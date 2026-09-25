@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
+from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.mlp_policy.mlp_policy import MLPPolicy
 
 
@@ -37,6 +38,7 @@ class RLTMLPPolicy(MLPPolicy):
         add_q_head: bool = True,
         q_head_type: str = "default",
         fixed_std: float = 0.002,
+        latent_world: dict | None = None,
     ):
         if not add_q_head:
             raise ValueError(
@@ -58,6 +60,24 @@ class RLTMLPPolicy(MLPPolicy):
 
         actor_obs_dim = z_dim + proprio_dim + flat_action_dim
         critic_obs_dim = z_dim + proprio_dim
+        world_cfg = latent_world or {}
+        world = None
+        if world_cfg.get("enabled", False):
+            from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
+
+            world = RLTLatentWorld.from_checkpoint(world_cfg["checkpoint"])
+            c = world.config
+            if (c.z_dim, c.proprio_dim, c.action_dim, c.chunk_len) != (
+                z_dim,
+                proprio_dim,
+                step_action_dim,
+                chunk_len,
+            ):
+                raise ValueError(
+                    "Latent world checkpoint shapes do not match the Stage 2 policy"
+                )
+            actor_obs_dim += c.hidden_dim
+            critic_obs_dim += c.hidden_dim
 
         super().__init__(
             obs_dim=actor_obs_dim,
@@ -75,6 +95,19 @@ class RLTMLPPolicy(MLPPolicy):
         self.ref_chunk_len = ref_chunk_len
         self.flat_action_dim = flat_action_dim
         self.fixed_std = float(fixed_std)
+        self.latent_world = world
+        self.bounded_residual = bool(world_cfg.get("bounded_residual", False))
+        self.residual_radius = float(world_cfg.get("residual_radius", 0.2))
+        self.min_residual_radius = float(world_cfg.get("min_residual_radius", 0.02))
+        self.uncertainty_scale = float(world_cfg.get("uncertainty_scale", 0.0))
+        if self.bounded_residual and (
+            world is None
+            or not 0 < self.min_residual_radius <= self.residual_radius <= 1
+            or self.uncertainty_scale < 0
+        ):
+            raise ValueError(
+                "Bounded residual requires a world model and 0 < min_radius <= radius <= 1"
+            )
         if self.fixed_std <= 0:
             raise ValueError(f"fixed_std must be positive, got {self.fixed_std}.")
 
@@ -127,10 +160,18 @@ class RLTMLPPolicy(MLPPolicy):
         ref_chunk = self._get_ref_chunk(obs)
         if apply_reference_dropout:
             ref_chunk = self._maybe_drop_reference(ref_chunk, reference_dropout_prob)
-        return torch.cat([ref_chunk, self._get_z(obs), self._get_proprio(obs)], dim=-1)
+        state = [ref_chunk, self._get_z(obs), self._get_proprio(obs)]
+        if self.latent_world is not None:
+            # The critic optimizer exclusively owns the world model. Actor
+            # gradients must not accumulate into it between critic updates.
+            state.append(self.latent_world.encode(obs).detach())
+        return torch.cat(state, dim=-1)
 
     def _critic_state(self, obs: dict) -> torch.Tensor:
-        return torch.cat([self._get_z(obs), self._get_proprio(obs)], dim=-1)
+        state = [self._get_z(obs), self._get_proprio(obs)]
+        if self.latent_world is not None:
+            state.append(self.latent_world.encode(obs))
+        return torch.cat(state, dim=-1)
 
     def _format_chunk_actions(self, actions: torch.Tensor) -> torch.Tensor:
         return actions.reshape(-1, self.chunk_len, self.step_action_dim)
@@ -155,7 +196,27 @@ class RLTMLPPolicy(MLPPolicy):
         action = action_mean if deterministic else probs.rsample()
         chunk_logprobs = probs.log_prob(action)
         action = torch.tanh(action)
+        if self.bounded_residual:
+            reference = self._get_ref_chunk(obs).clamp(-1, 1)
+            radius = self.residual_radius
+            if self.uncertainty_scale > 0:
+                uncertainty = self.latent_world.disagreement(obs, reference)
+                radius = (
+                    radius / (1 + uncertainty / self.uncertainty_scale)
+                ).clamp_min(self.min_residual_radius)
+            action = (reference + radius * action).clamp(-1, 1)
+            # RLT uses fixed zero entropy. These baseline pre-tanh logprobs
+            # are NOT a density for clipped/residual actions; entropy is forbidden.
         return action, chunk_logprobs, None
+
+    def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
+        if forward_type == ForwardType.RLT_WORLD:
+            if self.latent_world is None:
+                raise ValueError(
+                    "RLT_WORLD requires an enabled latent_world checkpoint"
+                )
+            return self.latent_world.loss(kwargs["batch"], offline=False)
+        return super().forward(forward_type=forward_type, **kwargs)
 
     def sac_q_forward(self, obs, actions, shared_feature=None, detach_encoder=False):
         del shared_feature

@@ -35,6 +35,7 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
             add_q_head=cfg.get("add_q_head", True),
             q_head_type=cfg.get("q_head_type", "default"),
             fixed_std=cfg.get("fixed_std", 0.002),
+            latent_world=cfg.get("latent_world", None),
         )
     elif cfg.model_type == "rlt_td3_mlp_policy":
         model = RLTTD3MLPPolicy(

@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - maniskill_rlt_stage2_latent_world
+  - _self_
+
+# Same resources, feature checkpoint, schedule and intervention setting;
+# original RLT actor/critic architecture, with no future model or auxiliary loss.
+runner:
+  logger:
+    experiment_name: maniskill_rlt_matched_baseline
+algorithm:
+  latent_world_weight: 0.0
+actor:
+  model:
+    latent_world:
+      enabled: False
+      checkpoint: ""

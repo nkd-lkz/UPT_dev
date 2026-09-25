@@ -296,7 +296,18 @@ class RLTACLossMixin:
         critic_loss = F.mse_loss(
             all_data_q_values, target_q_values.expand_as(all_data_q_values)
         )
-        return critic_loss, {"q_data": all_data_q_values.mean().item()}
+        metrics = {"q_data": all_data_q_values.mean().item()}
+        world_weight = float(self.cfg.algorithm.get("latent_world_weight", 0.0))
+        if world_weight > 0:
+            from rlinf.algorithms.rlt.latent_world import replay_world_batch
+
+            world_batch = replay_world_batch(batch, self.cfg.actor.model)
+            world_loss, world_metrics = self.model(
+                forward_type=ForwardType.RLT_WORLD, batch=world_batch
+            )
+            critic_loss = critic_loss + world_weight * world_loss
+            metrics.update({key: value.item() for key, value in world_metrics.items()})
+        return critic_loss, metrics
 
     @Worker.timer("forward_actor")
     def forward_actor(self, batch):

@@ -2744,3 +2744,262 @@ def test_vlm_trend_batch_video_metadata_stays_nested_per_sample():
     assert metadata[0][0].total_num_frames == 5
     assert metadata[0][0].frames_indices == [0, 1, 2, 3, 4]
     assert metadata[1][1].total_num_frames == 5
+
+
+def _write_latent_test_cache(tmp_path):
+    from rlinf.data.datasets.rlt_latent import atomic_torch_save, file_sha256
+
+    entries = []
+    for episode_id in range(24):
+        name = f"episode_{episode_id}.pt"
+        episode = {
+            "z_rl": torch.arange(6, dtype=torch.float32)[:, None].expand(6, 8).clone()
+            + episode_id * 100,
+            "proprio": torch.ones(6, 3) * episode_id,
+            "actions": torch.ones(6, 2) * 0.2,
+            "frame_index": torch.arange(6),
+            "task_index": 0,
+        }
+        atomic_torch_save(episode, tmp_path / name)
+        entries.append(
+            {
+                "id": str(episode_id),
+                "file": name,
+                "sha256": file_sha256(tmp_path / name),
+            }
+        )
+    atomic_torch_save(
+        {
+            "format_version": 1,
+            "complete": True,
+            "episodes": entries,
+            "feature_contract": {"test": "synthetic"},
+        },
+        tmp_path / "manifest.pt",
+    )
+
+
+def test_latent_world_cache_windows_do_not_cross_episodes_or_supervise_padding(
+    tmp_path,
+):
+    from rlinf.data.datasets.rlt_latent import RLTLatentDataset
+
+    _write_latent_test_cache(tmp_path)
+    train = RLTLatentDataset(tmp_path, horizons=(1, 3), split="train")
+    validation = RLTLatentDataset(tmp_path, horizons=(1, 3), split="validation")
+    assert not set(train.episode_ids) & set(validation.episode_ids)
+    for dataset in (train, validation):
+        for batch in dataset:
+            assert torch.all((batch["future_z"][:, 0] - batch["z_rl"][0]) <= 3)
+            assert (batch["future_z"][0, 0] - batch["z_rl"][0]).item() == 1
+        final_window = dataset[4]
+        assert final_window["valid"].tolist() == [True, False]
+        assert final_window["action_valid"].tolist() == [True, False, False]
+        assert torch.count_nonzero(final_window["actions"][1:]) == 0
+
+
+def test_latent_world_cache_rejects_corruption_and_missing_frames(tmp_path):
+    from rlinf.data.datasets.rlt_latent import RLTLatentDataset
+
+    _write_latent_test_cache(tmp_path)
+    data = RLTLatentDataset(tmp_path, horizons=(1, 3), split="train")
+    episode = dict(data.episodes[0])
+    episode["frame_index"] = torch.tensor([0, 1, 3, 4, 5, 6])
+    with pytest.raises(ValueError, match="consecutive"):
+        RLTLatentDataset.validate_episode(episode)
+    selected = data.episode_ids[0]
+    torch.save({"corrupt": True}, tmp_path / f"episode_{selected}.pt")
+    with pytest.raises(ValueError, match="Corrupted"):
+        RLTLatentDataset(tmp_path, horizons=(1, 3), split="train")
+
+
+def test_latent_world_online_replay_uses_whole_executed_chunk_and_masks_done():
+    from rlinf.algorithms.rlt.latent_world import replay_world_batch
+
+    cfg = OmegaConf.create(
+        {"latent_world": {"enabled": True}, "action_dim": 2, "num_action_chunks": 3}
+    )
+    batch = {
+        "curr_obs": {"z_rl": torch.zeros(2, 8), "proprio": torch.zeros(2, 3)},
+        "next_obs": {"z_rl": torch.ones(2, 8), "proprio": torch.ones(2, 3)},
+        "actions": torch.arange(12).reshape(2, 6).float(),
+        "rewards": torch.zeros(2, 3),
+        "dones": torch.tensor([[False, False, False], [False, True, False]]),
+    }
+    world = replay_world_batch(batch, cfg)
+    assert world["horizons"] == (3,)
+    assert world["valid"].tolist() == [[True], [False]]
+    torch.testing.assert_close(world["actions"].flatten(1), batch["actions"])
+    batch["rewards"] = torch.zeros(2, 1)
+    with pytest.raises(ValueError, match="duration"):
+        replay_world_batch(batch, cfg)
+
+
+def test_latent_world_stage1b_synthetic_checkpoint_resumes(tmp_path, monkeypatch):
+    import toolkits.rlt.train_latent_world as trainer
+    from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
+    from toolkits.rlt.train_latent_world import train
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _write_latent_test_cache(cache_dir)
+    cfg = OmegaConf.create(
+        {
+            "cache_dir": str(cache_dir),
+            "output_dir": str(tmp_path / "run"),
+            "seed": 2026,
+            "validation_fraction": 0.1,
+            "batch_size": 4,
+            "micro_batch_size": 2,
+            "max_steps": 2,
+            "learning_rate": 0.001,
+            "weight_decay": 0.0,
+            "warmup_steps": 0,
+            "clip_grad": 1.0,
+            "validate_every": 1,
+            "log_every": 1,
+            "early_stopping_patience": 0,
+            "world_model": {
+                "z_dim": 8,
+                "proprio_dim": 3,
+                "action_dim": 2,
+                "chunk_len": 3,
+                "horizons": [1, 3],
+                "hidden_dim": 8,
+                "num_heads": 2,
+                "num_layers": 1,
+            },
+            "wandb": {"mode": "disabled"},
+        }
+    )
+    config_path = tmp_path / "config.yaml"
+    OmegaConf.save(cfg, config_path)
+    save = trainer.atomic_torch_save
+
+    def capture_first_step(payload, path):
+        save(payload, path)
+        if payload["step"] == 1:
+            save(payload, tmp_path / "step_one.pt")
+
+    monkeypatch.setattr(trainer, "atomic_torch_save", capture_first_step)
+    best = train(str(config_path), device="cpu")
+    restored = RLTLatentWorld.from_checkpoint(best)
+    assert restored.config.z_dim == 8
+    from toolkits.rlt.evaluate_latent_world import evaluate_checkpoint
+
+    diagnostics = evaluate_checkpoint(str(best), str(cache_dir), batch_size=4)
+    assert diagnostics["horizons"]["3"]["valid_targets"] > 0
+    assert diagnostics["split"] == "validation_not_independent_test"
+    assert (best.parent / "last.pt").is_file()
+    continuous = torch.load(best.parent / "last.pt", weights_only=True)
+    assert (
+        train(str(config_path), device="cpu", resume=str(tmp_path / "step_one.pt"))
+        == best
+    )
+    resumed = torch.load(best.parent / "last.pt", weights_only=True)
+    for key, value in continuous["model"].items():
+        torch.testing.assert_close(value, resumed["model"][key], rtol=0, atol=0)
+    assert resumed["step"] == 2
+    with pytest.raises(FileExistsError):
+        train(str(config_path), device="cpu")
+
+
+def test_latent_world_stage2_configs_match_cache_and_baseline_resources(monkeypatch):
+    from pathlib import Path
+
+    from toolkits.rlt.preflight import compose_stage2
+
+    for key in (
+        "RLT_STAGE1_CHECKPOINT",
+        "RLT_NORM_STATS",
+        "RLT_DATASET",
+        "RLT_WORLD_CHECKPOINT",
+        "RLT_STAGE2_RUN",
+        "RLT_LATENT_CACHE",
+    ):
+        monkeypatch.setenv(key, f"/not-loaded/{key}")
+    experiment = compose_stage2("maniskill_rlt_stage2_latent_world")
+    baseline = compose_stage2("maniskill_rlt_stage2_matched_baseline")
+    cache = OmegaConf.load(
+        Path(__file__).parents[2]
+        / "experiments/maniskill_rlt/config/cache_latents.yaml"
+    )
+    assert OmegaConf.to_container(
+        cache.feature_model, resolve=True
+    ) == OmegaConf.to_container(experiment.rollout.rlt_feature_model, resolve=True)
+    assert experiment.cluster == baseline.cluster
+    assert experiment.env == baseline.env
+    assert experiment.actor.global_batch_size == baseline.actor.global_batch_size
+    assert not baseline.actor.model.latent_world.enabled
+    assert baseline.algorithm.latent_world_weight == 0
+    assert experiment.actor.model.latent_world == experiment.rollout.model.latent_world
+
+
+def test_latent_world_feature_contract_is_content_based(tmp_path):
+    from rlinf.data.datasets.rlt_latent import feature_contract
+
+    weights = tmp_path / "full_weights.pt"
+    stats = tmp_path / "norm_stats.json"
+    weights.write_bytes(b"synthetic checkpoint contents")
+    stats.write_text("{}")
+    cfg = OmegaConf.create(
+        {
+            "model_path": str(weights),
+            "precision": "bf16",
+            "openpi": {"use_rlt": True},
+            "openpi_data": {"repo_id": "/a", "norm_stats_path": str(stats)},
+        }
+    )
+    initial = feature_contract(cfg, control_mode="pd_joint_delta_pos", control_freq=10)
+    cfg.openpi_data.repo_id = "/b"
+    assert (
+        feature_contract(cfg, control_mode="pd_joint_delta_pos", control_freq=10)
+        == initial
+    )
+    weights.write_bytes(b"different weights with same path")
+    assert (
+        feature_contract(cfg, control_mode="pd_joint_delta_pos", control_freq=10)
+        != initial
+    )
+
+
+def test_latent_world_preflight_checks_real_contract_and_entropy(tmp_path, monkeypatch):
+    from rlinf.algorithms.rlt.latent_world import validate_latent_world_rollout
+    from rlinf.data.datasets.rlt_latent import feature_contract
+    from rlinf.models.embodiment.modules.rlt_latent_world import (
+        LatentWorldConfig,
+        RLTLatentWorld,
+    )
+    from toolkits.rlt.preflight import compose_stage2
+
+    weights, stats, sidecar = (
+        tmp_path / "full_weights.pt",
+        tmp_path / "norm.json",
+        tmp_path / "world.pt",
+    )
+    weights.write_bytes(b"synthetic content for hash-only validation")
+    stats.write_text("{}")
+    for key, value in {
+        "RLT_STAGE1_CHECKPOINT": weights,
+        "RLT_NORM_STATS": stats,
+        "RLT_WORLD_CHECKPOINT": sidecar,
+        "RLT_DATASET": tmp_path,
+        "RLT_STAGE2_RUN": tmp_path,
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    cfg = compose_stage2("maniskill_rlt_stage2_latent_world")
+    contract = feature_contract(
+        cfg.rollout.rlt_feature_model,
+        control_mode="pd_joint_delta_pos",
+        control_freq=10,
+    )
+    world = RLTLatentWorld(LatentWorldConfig(hidden_dim=8, num_heads=2, num_layers=1))
+    torch.save(world.checkpoint(contract), sidecar)
+    validate_latent_world_rollout(cfg)
+    cfg.algorithm.entropy_tuning.initial_alpha = 0.1
+    with pytest.raises(ValueError, match="zero entropy"):
+        validate_latent_world_rollout(cfg)
+    cfg.algorithm.entropy_tuning.initial_alpha = 0.0
+    stats.write_text('{"changed": true}')
+    with pytest.raises(ValueError, match="contract mismatch"):
+        validate_latent_world_rollout(cfg)

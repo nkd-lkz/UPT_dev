@@ -1,0 +1,55 @@
+# @package _global_
+defaults:
+  - rlt_research/ac_baseline
+  - _self_
+
+# Two visible GPUs: a small actor on 0, frozen VLA + simulation on 1.
+# Counts are smoke/initial research settings, not throughput-tuned settings.
+cluster:
+  component_placement:
+    actor: 0-0
+    env: 1-1
+    rollout: 1-1
+runner:
+  logger:
+    project_name: rlt-flare
+    experiment_name: maniskill_rlt_latent_world
+    log_path: ${oc.env:RLT_STAGE2_RUN}
+algorithm:
+  latent_world_weight: 0.1
+env:
+  train:
+    total_num_envs: 8
+    rlt_policy_switch:
+      expert_takeover:
+        # No stronger expert checkpoint is assumed to exist. The matched
+        # comparator disables takeover too; intervention experiments are separate.
+        enable: False
+  eval:
+    total_num_envs: 8
+rollout:
+  expert_model: null
+  model:
+    latent_world: ${actor.model.latent_world}
+  rlt_feature_model:
+    model_path: ${oc.env:RLT_STAGE1_CHECKPOINT}
+    openpi_data:
+      repo_id: ${oc.env:RLT_DATASET}
+      norm_stats_path: ${oc.env:RLT_NORM_STATS}
+    openpi:
+      torch_compile: False
+actor:
+  micro_batch_size: 64
+  global_batch_size: 256
+  model:
+    latent_world:
+      enabled: True
+      checkpoint: ${oc.env:RLT_WORLD_CHECKPOINT}
+      bounded_residual: False
+      residual_radius: 0.2
+      min_residual_radius: 0.02
+      # Zero disables uncertainty adaptation. A positive scale needs held-out
+      # calibration against actual prediction error before it is interpreted.
+      uncertainty_scale: 0.0
+  fsdp_config:
+    use_orig_params: True

@@ -119,8 +119,14 @@ class Pi0Eval(EnvIO, Pi0):
         }
 
     @torch.no_grad()
-    def extract_rlt_obs(self, env_obs: dict[str, Any]) -> dict[str, torch.Tensor]:
-        """Extract the frozen Stage1 features consumed by the Stage2 RLT head."""
+    def extract_rlt_obs(
+        self, env_obs: dict[str, Any], *, include_reference: bool = True
+    ) -> dict[str, torch.Tensor]:
+        """Extract Stage 2 features; optionally skip unused reference-action decoding.
+
+        Offline latent caching needs only z_rl and proprio. The default retains
+        the original rollout behavior, including its random-number consumption.
+        """
         self._require_rlt()
         observation = self.env_obs_to_observation(env_obs)
 
@@ -135,14 +141,15 @@ class Pi0Eval(EnvIO, Pi0):
             dtype=torch.float32
         )
 
-        model_actions = self._sample_actions_from_prefix_cache(
-            prepared_observation,
-            prefix_mask,
-            kv_cache,
-        )
-        ref_chunk = self.output_transform(
-            {"actions": model_actions, "state": observation.state}
-        )["actions"]
+        if include_reference:
+            model_actions = self._sample_actions_from_prefix_cache(
+                prepared_observation,
+                prefix_mask,
+                kv_cache,
+            )
+            ref_chunk = self.output_transform(
+                {"actions": model_actions, "state": observation.state}
+            )["actions"]
 
         raw_proprio = self._select_configured_state(env_obs["states"])
         if "maniskill" in self.config_name.lower():
@@ -157,11 +164,13 @@ class Pi0Eval(EnvIO, Pi0):
         if not torch.is_tensor(proprio):
             proprio = torch.as_tensor(proprio)
 
-        return {
+        result = {
             "z_rl": z_rl,
             "proprio": proprio.to(device=z_rl.device, dtype=torch.float32),
-            "ref_chunk": ref_chunk.to(device=z_rl.device, dtype=torch.float32),
         }
+        if include_reference:
+            result["ref_chunk"] = ref_chunk.to(device=z_rl.device, dtype=torch.float32)
+        return result
 
     def _sample_actions_from_prefix_cache(
         self,

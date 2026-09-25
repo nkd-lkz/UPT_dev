@@ -1272,3 +1272,187 @@ def test_apxinf_a_missing_apxinf_robo_names_what_to_install(monkeypatch):
         OpenPIApxInfAdapter(
             _apxinf_model_cfg(), "cpu", processor=_FakeApxInfProcessor()
         )
+
+
+def _latent_world_fixture():
+    from rlinf.models.embodiment.modules.rlt_latent_world import (
+        LatentWorldConfig,
+        RLTLatentWorld,
+    )
+
+    torch.manual_seed(17)
+    model = RLTLatentWorld(
+        LatentWorldConfig(
+            z_dim=8,
+            proprio_dim=3,
+            action_dim=2,
+            chunk_len=3,
+            horizons=(1, 3),
+            hidden_dim=8,
+            num_heads=2,
+            num_layers=1,
+            bootstrap_probability=1.0,
+        )
+    )
+    batch = {
+        "z_rl": torch.randn(4, 8),
+        "proprio": torch.randn(4, 3),
+        "actions": torch.rand(4, 3, 2) * 2 - 1,
+        "future_z": torch.randn(4, 2, 8, requires_grad=True),
+        "future_proprio": torch.randn(4, 2, 3, requires_grad=True),
+        "horizons": (1, 3),
+        "valid": torch.ones(4, 2, dtype=torch.bool),
+        "action_valid": torch.ones(4, 3, dtype=torch.bool),
+    }
+    return model, batch
+
+
+def test_latent_world_future_queries_cannot_read_actions_after_their_horizon():
+    model, batch = _latent_world_fixture()
+    model.eval()
+    later_changed = batch["actions"].clone()
+    later_changed[:, 1:] += 10
+    before = model(batch, batch["actions"], 1)[0]
+    after = model(batch, later_changed, 1)[0]
+    torch.testing.assert_close(before, after, rtol=0, atol=0)
+    assert not torch.allclose(
+        model(batch, batch["actions"], 3)[0], model(batch, later_changed, 3)[0]
+    )
+    assert model.disagreement(batch, batch["actions"]).shape == (4, 1)
+
+
+def test_latent_world_loss_trains_predictors_without_target_encoder_gradients():
+    model, batch = _latent_world_fixture()
+    loss, _ = model.loss(batch, offline=True)
+    loss.backward()
+    assert batch["future_z"].grad is None
+    assert batch["future_proprio"].grad is None
+    assert all(
+        p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()
+    )
+    assert sum(p.grad.abs().sum() for p in model.encoder.parameters()) > 0
+
+
+def test_latent_world_all_terminal_replay_has_zero_loss_and_zero_gradients():
+    model, batch = _latent_world_fixture()
+    batch["valid"].zero_()
+    loss, metrics = model.loss(batch, offline=False)
+    assert loss.item() == 0
+    assert metrics["world/valid_fraction"].item() == 0
+    loss.backward()
+    assert all(
+        p.grad is not None and torch.count_nonzero(p.grad) == 0
+        for p in model.parameters()
+    )
+
+
+def test_latent_world_sidecar_roundtrip_and_provenance_rejection(tmp_path):
+    from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
+
+    model, batch = _latent_world_fixture()
+    path = tmp_path / "sidecar.pt"
+    torch.save(model.checkpoint({"weights_sha256": "fixed-encoder"}), path)
+    restored = RLTLatentWorld.from_checkpoint(
+        path, expected_contract={"weights_sha256": "fixed-encoder"}
+    )
+    torch.testing.assert_close(
+        restored(batch, batch["actions"], 3)[0], model(batch, batch["actions"], 3)[0]
+    )
+    with pytest.raises(ValueError, match="contract mismatch"):
+        RLTLatentWorld.from_checkpoint(
+            path, expected_contract={"weights_sha256": "different-encoder"}
+        )
+
+
+def test_latent_world_disabled_preserves_original_rlt_checkpoint_and_output():
+    from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
+
+    kwargs = {"z_dim": 8, "proprio_dim": 3, "action_dim": 2, "num_action_chunks": 3}
+    torch.manual_seed(19)
+    baseline = RLTMLPPolicy(**kwargs)
+    torch.manual_seed(19)
+    disabled = RLTMLPPolicy(**kwargs, latent_world={"enabled": False})
+    disabled.load_state_dict(baseline.state_dict(), strict=True)
+    assert not any("latent_world" in name for name in baseline.state_dict())
+    obs = {
+        "z_rl": torch.randn(2, 8),
+        "proprio": torch.randn(2, 3),
+        "ref_chunk": torch.randn(2, 3, 2),
+    }
+    torch.testing.assert_close(
+        baseline.sac_forward(obs, deterministic=True)[0],
+        disabled.sac_forward(obs, deterministic=True)[0],
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_latent_world_policy_owns_gradients_and_bounds_residual_actions(tmp_path):
+    from rlinf.models.embodiment.base_policy import ForwardType
+    from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
+
+    world, batch = _latent_world_fixture()
+    path = tmp_path / "sidecar.pt"
+    torch.save(world.checkpoint({}), path)
+    policy = RLTMLPPolicy(
+        8,
+        3,
+        2,
+        3,
+        latent_world={
+            "enabled": True,
+            "checkpoint": str(path),
+            "bounded_residual": True,
+            "residual_radius": 0.1,
+            "uncertainty_scale": 0.1,
+        },
+    )
+    obs = {
+        "z_rl": batch["z_rl"],
+        "proprio": batch["proprio"],
+        "ref_chunk": batch["actions"],
+    }
+    actions, _, _ = policy(forward_type=ForwardType.SAC, obs=obs)
+    assert actions.abs().max() <= 1
+    assert (actions - obs["ref_chunk"].flatten(1)).abs().max() <= 0.10001
+    actions.sum().backward()
+    assert all(p.grad is None for p in policy.latent_world.parameters())
+    policy.zero_grad(set_to_none=True)
+    q = policy(forward_type=ForwardType.SAC_Q, obs=obs, actions=actions.detach())
+    loss, _ = policy(forward_type=ForwardType.RLT_WORLD, batch=batch)
+    (q.mean() + loss).backward()
+    assert all(p.grad is not None for p in policy.latent_world.parameters())
+    assert policy.latent_world.encoder[0].weight.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"hidden_dim": 7},
+        {"horizons": (0, 3)},
+        {"horizons": (1,)},
+        {"bootstrap_probability": 0},
+    ],
+)
+def test_latent_world_invalid_architecture_is_rejected(change):
+    from rlinf.models.embodiment.modules.rlt_latent_world import LatentWorldConfig
+
+    with pytest.raises(ValueError):
+        LatentWorldConfig(**change)
+
+
+def test_latent_world_policy_checkpoint_contains_all_rollout_sync_parameters(tmp_path):
+    from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
+    from rlinf.utils.utils import collect_param_names_need_sync
+
+    world, _ = _latent_world_fixture()
+    path = tmp_path / "world.pt"
+    torch.save(world.checkpoint({}), path)
+    cfg = {"enabled": True, "checkpoint": str(path)}
+    model = RLTMLPPolicy(8, 3, 2, 3, latent_world=cfg)
+    names = set(collect_param_names_need_sync(model))
+    world_names = {f"latent_world.{key}" for key in world.state_dict()}
+    assert world_names <= names
+    assert world_names <= set(model.state_dict())
+    with pytest.raises(ValueError, match="shapes"):
+        RLTMLPPolicy(9, 3, 2, 3, latent_world=cfg)

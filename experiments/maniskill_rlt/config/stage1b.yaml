@@ -1,0 +1,35 @@
+# Initial research settings, not an empirically tuned convergence guarantee.
+cache_dir: ${oc.env:RLT_LATENT_CACHE}
+output_dir: ${oc.env:RLT_WORLD_RUN}
+seed: 2026
+validation_fraction: 0.1
+batch_size: 256
+micro_batch_size: 32
+max_steps: 10000
+learning_rate: 0.0003
+weight_decay: 0.01
+warmup_steps: 500
+clip_grad: 1.0
+validate_every: 250
+log_every: 10
+early_stopping_patience: 12
+world_model:
+  z_dim: 2048
+  proprio_dim: 9
+  action_dim: 8
+  chunk_len: 10
+  hidden_dim: 128
+  num_heads: 4
+  num_layers: 2
+  ensemble_size: 3
+  horizons: [1, 5, 10]
+  future_weight: 1.0
+  latent_mse_weight: 0.1
+  proprio_weight: 0.5
+  anchor_weight: 0.1
+  bc_weight: 0.1
+  bootstrap_probability: 0.8
+wandb:
+  project: rlt-flare
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: ${oc.env:WANDB_MODE,offline}

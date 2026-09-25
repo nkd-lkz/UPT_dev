@@ -55,6 +55,15 @@ def _openpi_is_dsrl(cfg: DictConfig) -> bool:
     return str(openpi_cfg.get("task", "")).lower() == "dsrl"
 
 
+def critic_parameter_filters(model_cfg: DictConfig) -> list[str]:
+    """Select critic-owned parameters for the standard SAC/RLT optimizer split."""
+    filters = ["encoders", "encoder", "q_head", "state_proj"]
+    if model_cfg.get("latent_world", {}).get("enabled", False):
+        # Queries and prediction heads belong to the critic as well as the encoder.
+        filters.append("latent_world")
+    return filters
+
+
 class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
@@ -125,7 +134,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 "critic": ["critic_image_encoder", "critic_state_encoder", "q_head"]
             }
         else:
-            param_filters = {"critic": ["encoders", "encoder", "q_head", "state_proj"]}
+            param_filters = {"critic": critic_parameter_filters(self.cfg.actor.model)}
         filtered_optim_config = {"critic": self.cfg.actor.critic_optim}
         optimizers = self.build_optimizers(
             model=self.model,

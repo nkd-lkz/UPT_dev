@@ -868,3 +868,92 @@ def test_clear_stub_import_preserves_real_flash_attn_module():
     Patcher.clear_stub_import("flash_attn")
 
     assert sys.modules["flash_attn"] is real_flash_attn
+
+
+def test_latent_world_critic_update_owns_all_world_parameters(tmp_path):
+    import copy
+    from contextlib import nullcontext
+
+    import torch
+
+    from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
+    from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
+    from rlinf.models.embodiment.modules.rlt_latent_world import (
+        LatentWorldConfig,
+        RLTLatentWorld,
+    )
+    from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACLossMixin
+    from rlinf.workers.actor.fsdp_sac_policy_worker import critic_parameter_filters
+
+    world = RLTLatentWorld(
+        LatentWorldConfig(
+            z_dim=8,
+            proprio_dim=3,
+            action_dim=2,
+            chunk_len=3,
+            horizons=(1, 3),
+            hidden_dim=8,
+            num_heads=2,
+            num_layers=1,
+        )
+    )
+    path = tmp_path / "world.pt"
+    torch.save(world.checkpoint({}), path)
+    policy = RLTMLPPolicy(
+        8, 3, 2, 3, latent_world={"enabled": True, "checkpoint": str(path)}
+    )
+
+    class LocalLearner(RLTACLossMixin):
+        _accelerator_type = None
+
+        def worker_timer(self, *args, **kwargs):
+            return nullcontext()
+
+    learner = LocalLearner()
+    learner.model = policy
+    learner.target_model = copy.deepcopy(policy).requires_grad_(False)
+    learner.torch_dtype = torch.float32
+    learner.cfg = OmegaConf.create(
+        {
+            "actor": {
+                "model": {
+                    "action_dim": 2,
+                    "num_action_chunks": 3,
+                    "latent_world": {"enabled": True},
+                }
+            },
+            "algorithm": {"gamma": 0.99, "latent_world_weight": 0.1},
+            "env": {"train": {"env_type": "maniskill_rlt"}},
+        }
+    )
+    # Exercise the production optimizer partition on a real, CPU policy.
+    filters = {"critic": critic_parameter_filters(learner.cfg.actor.model)}
+    optim = OmegaConf.create({"lr": 0.001})
+    actor_optimizer, critic_optimizer = FSDPModelManager.build_optimizers(
+        None, policy, optim, filters, {"critic": optim}
+    )
+    actor_ids = {id(p) for g in actor_optimizer.param_groups for p in g["params"]}
+    critic_ids = {id(p) for g in critic_optimizer.param_groups for p in g["params"]}
+    world_ids = {id(p) for p in policy.latent_world.parameters()}
+    assert not actor_ids & world_ids
+    assert world_ids <= critic_ids
+    assert not actor_ids & critic_ids
+    obs = {
+        "z_rl": torch.randn(4, 8),
+        "proprio": torch.randn(4, 3),
+        "ref_chunk": torch.rand(4, 3, 2),
+    }
+    batch = {
+        "curr_obs": obs,
+        "next_obs": {k: v + 0.1 for k, v in obs.items()},
+        "actions": torch.rand(4, 6),
+        "rewards": torch.zeros(4, 3),
+        "dones": torch.zeros(4, 3, dtype=torch.bool),
+        "terminations": torch.zeros(4, 3, dtype=torch.bool),
+    }
+    before = policy.latent_world.predictors[0][-1].weight.detach().clone()
+    loss, metrics = learner.forward_critic(batch)
+    assert "world/loss" in metrics
+    loss.backward()
+    critic_optimizer.step()
+    assert not torch.equal(before, policy.latent_world.predictors[0][-1].weight)

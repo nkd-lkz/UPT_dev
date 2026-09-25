@@ -168,6 +168,9 @@ class MultiStepRolloutWorker(Worker):
             self.cfg, "rollout.rlt_feature_model", default=None
         )
         if rlt_feature_model_config is not None:
+            from rlinf.algorithms.rlt.latent_world import validate_latent_world_rollout
+
+            validate_latent_world_rollout(self.cfg)
             self.rlt_feature_model = get_model(copy.deepcopy(rlt_feature_model_config))
             self.rlt_feature_model.eval()
             self.rlt_feature_model.requires_grad_(False)
