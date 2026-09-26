@@ -353,6 +353,10 @@ def validate_interaction_memory_cfg(cfg: DictConfig) -> None:
         )
     if cfg.algorithm.get("target_update_type", "all") != "all":
         raise ValueError("Memory reader requires target_update_type=all")
+    if not OmegaConf.select(cfg, "actor.fsdp_config.use_orig_params", default=False):
+        raise ValueError(
+            "Memory reader requires FSDP use_orig_params=True for critic ownership"
+        )
     if cfg.rollout.get("enable_cuda_graph", False):
         raise ValueError("Interaction-memory CUDA graphs are not validated")
     for env in envs:

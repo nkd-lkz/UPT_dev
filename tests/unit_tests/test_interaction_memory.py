@@ -213,6 +213,34 @@ def test_disabled_feature_preserves_parameter_schema_rng_and_predictions(config)
     )
 
 
+def test_critic_optimizer_owns_and_updates_memory_reader(config):
+    from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
+
+    policy = _policy(config)
+    optim = OmegaConf.create({"lr": 0.001})
+    actor, critic = FSDPModelManager.build_optimizers(
+        None,
+        policy,
+        optim,
+        {"critic": ["encoders", "encoder", "q_head", "state_proj"]},
+        {"critic": optim},
+    )
+    reader_ids = {id(p) for p in policy.memory_encoder.parameters()}
+    actor_ids = {id(p) for g in actor.param_groups for p in g["params"]}
+    critic_ids = {id(p) for g in critic.param_groups for p in g["params"]}
+    assert not reader_ids & actor_ids
+    assert reader_ids <= critic_ids
+    before = {k: v.clone() for k, v in policy.memory_encoder.state_dict().items()}
+    obs = _obs(config)
+    q = policy.sac_q_forward(obs, torch.zeros(2, config.chunk_len * config.action_dim))
+    (q - 1).square().mean().backward()
+    critic.step()
+    assert any(
+        not torch.equal(before[k], v)
+        for k, v in policy.memory_encoder.state_dict().items()
+    )
+
+
 def test_memory_changes_policy_context_and_roundtrips_weights(config, tmp_path):
     torch.manual_seed(7)
     model = _policy(config)
@@ -272,6 +300,10 @@ def test_hydra_overlays_compose_without_starting_ray(name, monkeypatch):
     ):
         cfg = compose(config_name=name, overrides=["+experiment=rlt_memory"])
         validate_interaction_memory_cfg(cfg)
+        cfg.actor.fsdp_config.use_orig_params = False
+        with pytest.raises(ValueError, match="use_orig_params"):
+            validate_interaction_memory_cfg(cfg)
+        cfg.actor.fsdp_config.use_orig_params = True
         cfg.algorithm.target_update_type = "q_head_only"
         with pytest.raises(ValueError, match="target_update_type"):
             validate_interaction_memory_cfg(cfg)
@@ -380,3 +412,19 @@ def test_real_wrapper_records_terminal_prefix_before_reset(
         torch.testing.assert_close(
             second[-1]["memory_events"][0], terminal["memory_events"][0]
         )
+
+
+def test_offline_probe_uses_past_only_evidence():
+    from toolkits.rlt.probe_interaction_memory import episode_examples
+
+    states = torch.arange(31, dtype=torch.float32)[:, None].expand(-1, 9).clone()
+    actions = torch.zeros(31, 8)
+    rows = episode_examples(states, actions)
+    assert len(rows) == 3
+    assert not rows[0]["memory_valid"].any()
+    assert rows[1]["memory_valid"].sum() == 1
+    changed = states.clone()
+    changed[20:] += 999
+    other = episode_examples(changed, actions)
+    torch.testing.assert_close(rows[1]["memory_events"], other[1]["memory_events"])
+    assert not torch.equal(rows[1]["target"], other[1]["target"])

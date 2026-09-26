@@ -2,7 +2,7 @@
 
 这份设计说明解释记忆分支如何保留动作与实际后果、怎样接入 Stage 2，以及哪些实验才能验证它是否帮助学习。你可以沿用原来的 Stage 1 权重，先理解下面的闭环，再按代码索引阅读实现。当前交付是可测试的研究原型，不是已经验证有效的算法。
 
-分支为 `research/rlt-zeva-interaction-memory`，独立目录为 `/home/luokz/rlinf_rlt/UPT_zeva_dev`，起点固定为 baseline `ff56663769fd00f6108c39195888f5d55cb8a737`。没有合并 FLARE 或 VR 分支，没有启动训练。
+分支为 `research/rlt-zeva-interaction-memory`，独立目录为 `/home/luokz/rlinf_rlt/UPT_zeva_dev`，起点固定为 baseline `ff56663769fd00f6108c39195888f5d55cb8a737`。没有合并 FLARE 或 VR 分支。后续的 [2026-09-26 小规模实验与架构图](PILOT_RESULTS.zh-CN.md) 记录了真实 GPU smoke、续跑、FSDP optimizer 修复与预测探针的负结果，尚无收敛优势的结论。
 
 ## 1. 原来的 RLT 缺少哪条信息？
 
@@ -124,7 +124,7 @@ target 更新必须为 `algorithm.target_update_type=all`，使 target Q 所用�
 
 例如第 3 个控制步结束，只有这 3 步和真实末状态被记入。后面 7 步只是 padding，不能解释为又执行了 7 次动作。自动 reset 之前完成写入和 terminal snapshot；reset 后的空记忆用于新 episode，而不是替代 critic 的真实下一状态。baseline 对终止、截断和 bootstrap 的处理保持不变。启用记忆后必须经 `chunk_step()` 执行；直接调用 wrapper 的 `step()` 会拒绝，避免丢失 chunk 边界。
 
-默认每个原始快照约 3.48 KiB，当前和下一状态合计约 6.96 KiB；50,000 条 transition 约额外 340 MiB，仅计这些 tensor，不含轨迹副本、replay cache 和框架开销。实际吞吐与显存尚未通过 GPU smoke 验证。
+默认每个原始快照约 3.48 KiB，当前和下一状态合计约 6.96 KiB；50,000 条 transition 约额外 340 MiB，仅计这些 tensor，不含轨迹副本、replay cache 和框架开销。有界 GPU smoke 已通过，但该 replay 规模下的吞吐与显存开销仍未实测。
 
 ## 7. 怎样运行检查和准备实验？
 

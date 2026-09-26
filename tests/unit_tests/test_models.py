@@ -1272,3 +1272,22 @@ def test_apxinf_a_missing_apxinf_robo_names_what_to_install(monkeypatch):
         OpenPIApxInfAdapter(
             _apxinf_model_cfg(), "cpu", processor=_FakeApxInfProcessor()
         )
+
+
+def test_adapter_checkpoint_audit_detects_updates_and_rejects_invalid_weights(tmp_path):
+    from toolkits.rlt.audit_adapter import compare
+
+    before, after = tmp_path / "before.pt", tmp_path / "after.pt"
+    torch.save({"adapter.weight": torch.ones(2), "unrelated": torch.zeros(2)}, before)
+    torch.save({"adapter.weight": torch.ones(2)}, after)
+    assert compare(before, after, "adapter.")["changed_tensors"] == 0
+    torch.save({"adapter.weight": torch.tensor([1.0, 1.25])}, after)
+    assert compare(before, after, "adapter.")["max_abs_change"] == 0.25
+    torch.save({"adapter.weight": torch.tensor([float("nan"), 1.0])}, after)
+    with pytest.raises(ValueError, match="Nonfinite"):
+        compare(before, after, "adapter.")
+    torch.save({"adapter.weight": torch.ones(3)}, after)
+    with pytest.raises(ValueError, match="shape"):
+        compare(before, after, "adapter.")
+    with pytest.raises(ValueError, match="No matching"):
+        compare(before, after, "missing.")

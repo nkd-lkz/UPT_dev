@@ -2,7 +2,7 @@
 
 This design explains how the memory branch stores executed actions and observed outcomes, connects them to Stage 2, and separates implementation checks from evidence of learning. Reuse the original Stage 1 checkpoint, follow the decision loop below, then use the code map to inspect the implementation. This is a testable research prototype, not a validated performance improvement.
 
-Branch: `research/rlt-zeva-interaction-memory`. Worktree: `/home/luokz/rlinf_rlt/UPT_zeva_dev`. Fixed baseline: `ff56663769fd00f6108c39195888f5d55cb8a737`. Neither FLARE nor VR changes were merged; no training was launched.
+Branch: `research/rlt-zeva-interaction-memory`. Worktree: `/home/luokz/rlinf_rlt/UPT_zeva_dev`. Fixed baseline: `ff56663769fd00f6108c39195888f5d55cb8a737`. Neither FLARE nor VR changes were merged. The [2026-09-26 pilot results and architecture figure](PILOT_RESULTS.md) report subsequent GPU smoke, resume, the FSDP optimizer fix, and negative predictive-probe results; no convergence claim is made.
 
 ## 1. What Information Is Missing From Baseline RLT?
 
@@ -120,7 +120,7 @@ Read R_t -> choose a_t -> execute commands
 
 If execution ends after three ticks, only those ticks and the real terminal state are recorded. Seven padded ticks do not count as additional actions. Recording precedes auto-reset, so reset memory belongs to the new episode, not the critic's terminal successor. Baseline termination, truncation, and bootstrap semantics are unchanged. Memory-enabled execution must enter through `chunk_step()`; direct wrapper `step()` calls are rejected to avoid losing chunk boundaries.
 
-One default snapshot takes approximately 3.48 KiB; a current/next pair takes 6.96 KiB. At 50,000 transitions, these tensors alone add roughly 340 MiB, excluding trajectory copies, replay cache, and framework overhead. GPU throughput and memory consumption remain untested.
+One default snapshot takes approximately 3.48 KiB; a current/next pair takes 6.96 KiB. At 50,000 transitions, these tensors alone add roughly 340 MiB, excluding trajectory copies, replay cache, and framework overhead. A bounded GPU smoke passed, but throughput and memory at this replay scale remain unmeasured.
 
 ## 7. How Are Checks and Experiments Prepared?
 

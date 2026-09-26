@@ -19,6 +19,17 @@ if [[ "$RLT_SMOKE_MEMORY" == 1 ]]; then
     config_overrides=(+experiment=rlt_memory runner.logger.experiment_name=stage2_memory_smoke)
 fi
 
+smoke_steps=${RLT_SMOKE_STEPS:-2}
+if [[ ! "$smoke_steps" =~ ^[0-9]+$ ]] || (( smoke_steps < 1 || smoke_steps > 20 )); then
+    echo 'RLT_SMOKE_STEPS must be in [1, 20].' >&2
+    exit 2
+fi
+config_overrides+=("runner.max_steps=$smoke_steps" "runner.max_epochs=$smoke_steps")
+if [[ -n "${RLT_SMOKE_RESUME_DIR:-}" ]]; then
+    [[ -d "$RLT_SMOKE_RESUME_DIR/actor" ]] || { echo 'Missing resume actor directory.' >&2; exit 2; }
+    config_overrides+=("runner.resume_dir=$RLT_SMOKE_RESUME_DIR")
+fi
+
 RLINF_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$RLINF_ROOT"
 source "${RLINF_VENV:-$RLINF_ROOT/.venv}/bin/activate"
@@ -60,9 +71,10 @@ export RLT_SMOKE_RUN_DIR="$RLT_STORAGE/runs/stage2_smoke/$run_id"
 export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-6382}"
 
 # Read-only preflight: no Ray, CUDA allocation, checkpoint deserialization or mkdir.
-python - <<'PY'
+python - "${config_overrides[@]}" <<'PY'
 import json
 import os
+import sys
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
@@ -70,8 +82,7 @@ from omegaconf import OmegaConf
 from rlinf.algorithms.rlt.interaction_memory import validate_interaction_memory_cfg
 
 with initialize_config_dir(config_dir=os.environ['EMBODIED_PATH'] + '/config', version_base='1.1'):
-    overrides = ['+experiment=rlt_memory', 'runner.logger.experiment_name=stage2_memory_smoke'] if os.environ['RLT_SMOKE_MEMORY'] == '1' else []
-    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2', overrides=overrides)
+    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2', overrides=sys.argv[1:])
 OmegaConf.resolve(cfg)
 validate_interaction_memory_cfg(cfg)
 weights = Path(cfg.rollout.rlt_feature_model.model_path) / 'model_state_dict/full_weights.pt'
@@ -91,7 +102,8 @@ print('Config: maniskill_rlt_stage2_smoke_gpu2; RLinf physical rank: 2; worker C
 print(f'Interaction memory: {os.environ["RLT_SMOKE_MEMORY"] == "1"}')
 print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
-print('Budget: 2 train envs / 1 eval env; 40 control steps; 2 outer iterations')
+print(f'Budget: 2 train envs / 1 eval env; 40 control steps; stop at global step {cfg.runner.max_steps}')
+print(f'Resume: {cfg.runner.resume_dir}')
 print('Batch: global=4, micro=2; at most 2 AC updates per iteration')
 print(f'Planned output: {os.environ["RLT_SMOKE_RUN_DIR"]}')
 print('Preflight OK (paths/config only; GPU execution has not been tested).')
@@ -214,3 +226,18 @@ python examples/embodiment/train_embodied_agent.py \
 train_pid=$!
 wait "$train_pid"
 train_pid=
+if [[ "$RLT_SMOKE_MEMORY" == 1 ]] && (( smoke_steps >= 2 )); then
+    audit_root="$RLT_SMOKE_RUN_DIR/stage2_memory_smoke/checkpoints"
+    previous="$audit_root/global_step_$((smoke_steps - 1))/actor/model_state_dict/full_weights.pt"
+    if [[ ! -f "$previous" && "${RLT_SMOKE_RESUME_DIR:-}" == */global_step_$((smoke_steps - 1)) ]]; then
+        previous="$RLT_SMOKE_RESUME_DIR/actor/model_state_dict/full_weights.pt"
+    fi
+    latest="$audit_root/global_step_$smoke_steps/actor/model_state_dict/full_weights.pt"
+    if [[ -f "$previous" && -f "$latest" ]]; then
+        python -m toolkits.rlt.audit_adapter --before "$previous" --after "$latest" \
+            --prefix "memory_encoder." --require-change
+    else
+        echo 'ERROR: Adapter audit requires two consecutive saved checkpoints.' >&2
+        exit 1
+    fi
+fi

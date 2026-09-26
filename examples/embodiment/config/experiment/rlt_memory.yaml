@@ -2,6 +2,9 @@
 # Compose with baseline AC or GPU-2 smoke: +experiment=rlt_memory.
 # No change to baseline budgets, routing, expert, reward, or noise settings.
 actor:
+  fsdp_config:
+    # Keep reader names visible to the critic optimizer partition.
+    use_orig_params: True
   model:
     interaction_memory:
       enabled: True
