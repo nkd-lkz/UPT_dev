@@ -109,8 +109,8 @@ class RLTLatentDataset(Dataset):
             "complete"
         ):
             raise ValueError("Cache is incomplete or uses an unsupported format")
-        if split not in ("train", "validation"):
-            raise ValueError("split must be train or validation")
+        if split not in ("train", "validation", "all"):
+            raise ValueError("split must be train, validation or all")
         self.horizons = tuple(horizons)
         if (
             not horizons
@@ -123,7 +123,8 @@ class RLTLatentDataset(Dataset):
         self.episode_ids = []
         for entry in self.manifest["episodes"]:
             if (
-                episode_split(
+                split != "all"
+                and episode_split(
                     entry["id"], seed=seed, validation_fraction=validation_fraction
                 )
                 != split

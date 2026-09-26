@@ -1,10 +1,10 @@
 # ManiSkill RLT baseline and latent-world research
 
-This directory preserves the reproduction boundary and provides the code-review/runbook entry point for the FLARE-inspired research branch. No new real-data training or GPU inference was launched to prepare this implementation. [中文](README.zh-CN.md)
+This directory preserves the reproduction boundary and provides the code-review/runbook entry point for the FLARE-inspired research branch. The [2026-09-26 pilot report](PILOT_RESULTS.md) adds the implemented architecture figure, independent real-data evaluation, GPU smoke and resume evidence; faster RL convergence is not established. [中文](README.zh-CN.md)
 
 ## Branches and review order
 
-The baseline branch is `baseline/maniskill-rlt-2026-09-25` at `7db62813`, based on official-source snapshot `b85c07175b10017bf58ab83e1b1eee99666d0626`. It contains Stage 1/2 source/configurations and the existing two-GPU Stage 1 launcher, not a claim that both stages have converged. Its original worktree is `/home/luokz/rlinf_rlt/UPT_dev`.
+The initial baseline snapshot was `7db62813`, based on official-source snapshot `b85c07175b10017bf58ab83e1b1eee99666d0626`. Branch `baseline/maniskill-rlt-2026-09-25` now includes resume/isolation fixes through `ff566637`; this research branch cherry-picks that fix as `43a0e615`. Stage 1/2 source and launchers do not establish convergence. The original worktree remains `/home/luokz/rlinf_rlt/UPT_dev`.
 
 The research branch is `research/rlt-flare-latent-dynamics`, in `/home/luokz/rlinf_rlt/UPT_flare_dev`. It shares the existing Python environment but has a separate source tree. Do not switch branches in the active training worktree.
 
@@ -17,7 +17,7 @@ Read [baseline provenance](BASELINE.md), then [algorithm design and ablations](D
 - `rlinf/algorithms/rlt/latent_world.py`: executed-chunk replay and provenance guards.
 - `toolkits/rlt/preflight.py`: configuration/artifact checks without a training job.
 
-The following commands are **for review and later explicit execution**. Do not run cache export or training while the baseline still owns GPUs 0/1. The baseline can take longer than overnight; a saved intermediate checkpoint is not evidence of convergence.
+The following generic commands are **for review and later explicit execution**: they use GPU 0 or a two-GPU configuration, so do not execute them while baseline owns GPUs 0/1. For concurrent isolated GPU 2 work, use [the pilot runbook](PILOT_RESULTS.md) instead. A saved intermediate checkpoint is not evidence of convergence.
 
 ## Prepare paths without starting a job
 
@@ -53,7 +53,7 @@ CUDA_VISIBLE_DEVICES='' python toolkits/rlt/preflight.py --config-only
 
 ## Stage 1B: later execution after resources are free
 
-The exporter performs frozen VLA inference on one GPU, then the lightweight trainer uses only cached features. Both are explicit commands; they were not run on the real dataset for this delivery.
+The exporter performs frozen VLA inference on one GPU, then the lightweight trainer uses only cached features. A bounded real-data run is recorded in [pilot results](PILOT_RESULTS.md); the generic commands below require the selected devices to be free.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python toolkits/rlt/cache_latents.py \

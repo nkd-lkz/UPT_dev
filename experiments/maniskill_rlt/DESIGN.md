@@ -1,6 +1,6 @@
 # Action-conditioned future representations for RLT
 
-This design tests whether predicting interaction outcomes in a frozen RLT feature space makes online actor–critic learning more sample-efficient. It starts from the official ManiSkill reproduction, adds a lightweight offline adaptation stage, and carries that module into real-transition learning. It does not claim a trained result, a new physical law, or a complete continual-learning system. [中文](DESIGN.zh-CN.md)
+This design tests whether predicting interaction outcomes in a frozen RLT feature space makes online actor–critic learning more sample-efficient. It starts from the official ManiSkill reproduction, adds a lightweight offline adaptation stage, and carries that module into real-transition learning. The [pilot results](PILOT_RESULTS.md) add a residual-prediction variant, an architecture figure and real-data/GPU evidence; they do not establish improved RL, physical laws or complete continual learning. [中文](DESIGN.zh-CN.md)
 
 ## 1. The question we can test first
 
@@ -79,7 +79,7 @@ L_online_world = L_H + 0.1 * L_anchor       # no auxiliary online BC
 L_actor = original RLT Q/BC objective      # existing intervention targets retained
 ```
 
-`future_weight` also multiplies the online future term. The critic optimizer owns **all** sidecar parameters, including future queries and prediction heads. The actor reads a detached adapter feature. TD gradients may change the adapter; auxiliary gradients maintain its outcome-prediction role. Target updates must use `target_update_type: all`, so the target critic's adapter follows the same Polyak update. Parameters are ordinary registered policy parameters: the existing checkpoint and weight-sync paths include them. Full multi-process FSDP/Ray execution is not yet GPU-validated.
+`future_weight` also multiplies the online future term. The critic optimizer owns **all** sidecar parameters, including future queries and prediction heads. The actor reads a detached adapter feature. TD gradients may change the adapter; auxiliary gradients maintain its outcome-prediction role. Target updates must use `target_update_type: all`, so the target critic's adapter follows the same Polyak update. Parameters are ordinary registered policy parameters: the existing checkpoint and weight-sync paths include them. A single-GPU multi-process FSDP/Ray smoke and resume passed; multi-GPU scaling remains untested.
 
 The implemented ManiSkill collector produces a transition after the entire action chunk. With `H=10` and 10 Hz control, the online prediction spans **one second**, not 0.1 seconds. `replay_world_batch` checks reward-slot duration and action count against H. It uses the actual routed/executed chunk, including expert replacements, not the proposed student action. Any termination or truncation masks the whole row: RLT terminal rows may carry the current observation as a placeholder successor, and treating that as physics would teach false zero motion.
 
@@ -141,7 +141,7 @@ An explicit memory extension would store `(feature-version, task, context, execu
 
 ## 10. Review gates and limitations
 
-Accept the implementation only if baseline-off compatibility, episode boundaries, future masking, target stop-grad, chunk-duration matching, terminal masking, optimizer ownership, deterministic CPU resume and config parity tests pass. Next run a GPU cache smoke test and a short Stage 2 checkpoint/restart test after the ongoing baseline releases resources. Tests are not a substitute for these integration checks.
+Accept the implementation only if baseline-off compatibility, episode boundaries, future masking, target stop-grad, chunk-duration matching, terminal masking, optimizer ownership, deterministic CPU resume and config parity tests pass. GPU 2 cache extraction and short Stage 2 checkpoint/restart tests are now recorded in [pilot results](PILOT_RESULTS.md). Unit tests alone are not a substitute for these integration checks; convergence still requires controlled experiments.
 
 Stop or revise the hypothesis if future prediction is insensitive to actions, worse than persistence, improves only teacher loss, or accelerates updates but not interaction-budget success. Do not claim fewer interventions from an intervention-free run. Do not claim physical understanding, cross-task generalization, lifelong growth or guaranteed convergence before the corresponding experiments.
 

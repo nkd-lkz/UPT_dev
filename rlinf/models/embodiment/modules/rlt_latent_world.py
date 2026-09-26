@@ -30,6 +30,7 @@ class LatentWorldConfig:
     anchor_weight: float = 0.1
     bc_weight: float = 0.1
     bootstrap_probability: float = 0.8
+    predict_residual: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "horizons", tuple(self.horizons))
@@ -118,6 +119,12 @@ class RLTLatentWorld(nn.Module):
                 for _ in range(c.ensemble_size)
             ]
         )
+        if c.predict_residual:
+            # Start at the strong short-horizon persistence comparator.
+            with torch.no_grad():
+                for head in self.predictors:
+                    head[-1].weight[: c.z_dim].zero_()
+                    head[-1].bias[: c.z_dim].zero_()
         self.anchor = nn.Linear(c.hidden_dim, c.z_dim)
         self.behavior = nn.Sequential(
             nn.Linear(c.hidden_dim, c.hidden_dim),
@@ -154,7 +161,11 @@ class RLTLatentWorld(nn.Module):
         tokens = torch.cat((state[:, None], action_tokens, query), dim=1)
         future = self.transformer(tokens)[:, -1]
         predictions = torch.stack([head(future) for head in self.predictors])
-        return predictions[..., : c.z_dim], predictions[..., c.z_dim :]
+        future_z = predictions[..., : c.z_dim]
+        if c.predict_residual:
+            current = obs["z_rl"].detach().reshape(-1, c.z_dim).float()
+            future_z = future_z + F.layer_norm(current, (c.z_dim,))[None]
+        return future_z, predictions[..., c.z_dim :]
 
     @staticmethod
     def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

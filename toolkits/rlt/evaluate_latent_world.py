@@ -17,7 +17,12 @@ from toolkits.rlt.train_latent_world import device_batch
 
 @torch.no_grad()
 def evaluate_checkpoint(
-    checkpoint: str, cache_dir: str, *, device: str = "cpu", batch_size: int = 64
+    checkpoint: str,
+    cache_dir: str,
+    *,
+    device: str = "cpu",
+    batch_size: int = 64,
+    independent_test: bool = False,
 ) -> dict:
     """Compare true actions to shuffled full chunks and a persistence predictor.
 
@@ -33,7 +38,7 @@ def evaluate_checkpoint(
     dataset = RLTLatentDataset(
         cache_dir,
         horizons=model.config.horizons,
-        split="validation",
+        split="all" if independent_test else "validation",
         seed=settings["seed"],
         validation_fraction=settings["validation_fraction"],
     )
@@ -41,6 +46,21 @@ def evaluate_checkpoint(
         raise ValueError(
             "Evaluation cache uses a different frozen encoder/preprocessing"
         )
+    if independent_test:
+        original_ids = {row["id"] for row in payload["cache_manifest"]["episodes"]}
+        if original_ids.intersection(dataset.episode_ids):
+            raise ValueError(
+                "Independent test episodes overlap training/validation cache"
+            )
+        original_source = payload["cache_manifest"].get("source", {})
+        if any(
+            not original_source.get(key)
+            or dataset.manifest.get("source", {}).get(key) != original_source[key]
+            for key in ("info", "episodes", "tasks")
+        ):
+            raise ValueError(
+                "Independent test must use the same source dataset identity"
+            )
     donors = [
         i
         for i, (episode, t) in enumerate(dataset.index)
@@ -123,7 +143,9 @@ def evaluate_checkpoint(
         summary["valid_targets"] = len(error)
         results[str(horizon)] = summary
     return {
-        "split": "validation_not_independent_test",
+        "split": "independent_test"
+        if independent_test
+        else "validation_not_independent_test",
         "episodes": dataset.episode_ids,
         "horizons": results,
     }
@@ -136,6 +158,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--independent-test", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
@@ -144,6 +167,7 @@ def main() -> None:
                 args.cache_dir,
                 device=args.device,
                 batch_size=args.batch_size,
+                independent_test=args.independent_test,
             ),
             indent=2,
             allow_nan=False,

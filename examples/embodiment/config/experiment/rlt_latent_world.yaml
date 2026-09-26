@@ -1,0 +1,18 @@
+# @package _global_
+# Keep the selected baseline's resource and rollout budgets.
+algorithm:
+  latent_world_weight: 0.1
+actor:
+  model:
+    latent_world:
+      enabled: True
+      checkpoint: ${oc.env:RLT_WORLD_CHECKPOINT}
+      bounded_residual: False
+      residual_radius: 0.2
+      min_residual_radius: 0.02
+      uncertainty_scale: 0.0
+  fsdp_config:
+    use_orig_params: True
+rollout:
+  model:
+    latent_world: ${actor.model.latent_world}

@@ -36,7 +36,26 @@ def image_array(value: dict, root: Path) -> np.ndarray:
         return np.asarray(image.convert("RGB")).copy()
 
 
-def cache(config_path: str, *, device: str, batch_size: int) -> None:
+def select_episodes(entries: list[dict], episode_ids: list[int] | None) -> list[dict]:
+    """Select complete episodes in metadata order for a bounded export."""
+    if episode_ids is None:
+        return entries
+    if not episode_ids or len(set(episode_ids)) != len(episode_ids):
+        raise ValueError("episode_ids must be nonempty and unique")
+    available = {int(row["episode_index"]) for row in entries}
+    if not set(episode_ids) <= available:
+        raise ValueError("episode_ids contains IDs absent from the dataset")
+    return [row for row in entries if int(row["episode_index"]) in episode_ids]
+
+
+def cache(
+    config_path: str,
+    *,
+    device: str,
+    batch_size: int,
+    episode_ids: list[int] | None = None,
+    output_dir: str | None = None,
+) -> None:
     """Publish immutable episode features, resuming only identical source data."""
     import pyarrow.parquet as pq
 
@@ -45,6 +64,10 @@ def cache(config_path: str, *, device: str, batch_size: int) -> None:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     cfg = OmegaConf.load(config_path)
+    if episode_ids is not None:
+        cfg.episode_ids = episode_ids
+    if output_dir is not None:
+        cfg.cache_dir = output_dir
     root, output = Path(cfg.dataset_root), Path(cfg.cache_dir)
     info_path = root / "meta/info.json"
     info = json.loads(info_path.read_text())
@@ -61,6 +84,7 @@ def cache(config_path: str, *, device: str, batch_size: int) -> None:
     }
     episodes_path = root / "meta/episodes.jsonl"
     entries = [json.loads(line) for line in episodes_path.read_text().splitlines()]
+    entries = select_episodes(entries, cfg.get("episode_ids"))
     contract = feature_contract(
         cfg.feature_model, control_mode=cfg.control_mode, control_freq=cfg.control_freq
     )
@@ -69,6 +93,8 @@ def cache(config_path: str, *, device: str, batch_size: int) -> None:
         "episodes": file_sha256(episodes_path),
         "tasks": file_sha256(tasks_path),
     }
+    if cfg.get("episode_ids") is not None:
+        source["selected_episode_ids"] = [int(row["episode_index"]) for row in entries]
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "manifest.pt"
     manifest = {
@@ -180,8 +206,16 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--episode-ids", type=int, nargs="+")
+    parser.add_argument("--output")
     args = parser.parse_args()
-    cache(args.config, device=args.device, batch_size=args.batch_size)
+    cache(
+        args.config,
+        device=args.device,
+        batch_size=args.batch_size,
+        episode_ids=args.episode_ids,
+        output_dir=args.output,
+    )
 
 
 if __name__ == "__main__":

@@ -2,14 +2,34 @@
 # Start an isolated, bounded Stage 2 smoke job; never attach to Stage 1 Ray.
 set -euo pipefail
 
+world_overrides=()
+world_enabled=0
+if [[ "${1:-}" == --world ]]; then
+    world_enabled=1
+    : "${RLT_WORLD_CHECKPOINT:?Set RLT_WORLD_CHECKPOINT to a trained sidecar}"
+    world_overrides=(+experiment=rlt_latent_world runner.logger.experiment_name=stage2_world_smoke)
+    shift
+fi
+
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
-    echo "Usage: bash run_rlt_stage2_smoke_gpu2.sh [--check|--probe]" >&2
+    echo "Usage: bash run_rlt_stage2_smoke_gpu2.sh [--world] [--check|--probe]" >&2
     exit 2
+fi
+
+smoke_steps=${RLT_SMOKE_STEPS:-2}
+if [[ ! "$smoke_steps" =~ ^[0-9]+$ ]] || (( smoke_steps < 1 || smoke_steps > 20 )); then
+    echo 'RLT_SMOKE_STEPS must be in [1, 20].' >&2
+    exit 2
+fi
+world_overrides+=("runner.max_steps=$smoke_steps" "runner.max_epochs=$smoke_steps")
+if [[ -n "${RLT_SMOKE_RESUME_DIR:-}" ]]; then
+    [[ -d "$RLT_SMOKE_RESUME_DIR/actor" ]] || { echo 'Missing resume actor directory.' >&2; exit 2; }
+    world_overrides+=("runner.resume_dir=$RLT_SMOKE_RESUME_DIR")
 fi
 
 RLINF_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$RLINF_ROOT"
-source "$RLINF_ROOT/.venv/bin/activate"
+source "${RLINF_VENV:-$RLINF_ROOT/.venv}/bin/activate"
 export PYTHONPATH="$RLINF_ROOT:${PYTHONPATH:-}"
 export EMBODIED_PATH="$RLINF_ROOT/examples/embodiment"
 export HYDRA_FULL_ERROR=1 PYTHONUNBUFFERED=1
@@ -45,17 +65,21 @@ export RLT_SMOKE_RUN_DIR="$RLT_STORAGE/runs/stage2_smoke/$run_id"
 export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-6382}"
 
 # Read-only preflight: no Ray, CUDA allocation, checkpoint deserialization or mkdir.
-python - <<'PY'
+python - "${world_overrides[@]}" <<'PY'
 import json
 import os
+import sys
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 with initialize_config_dir(config_dir=os.environ['EMBODIED_PATH'] + '/config', version_base='1.1'):
-    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2')
+    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2', overrides=sys.argv[1:])
 OmegaConf.resolve(cfg)
+if OmegaConf.select(cfg, 'actor.model.latent_world.enabled', default=False):
+    assert Path(cfg.actor.model.latent_world.checkpoint).is_file(), 'Missing world checkpoint'
+    assert cfg.actor.fsdp_config.use_orig_params
 weights = Path(cfg.rollout.rlt_feature_model.model_path) / 'model_state_dict/full_weights.pt'
 assert weights.is_file() and weights.stat().st_size > 0, f'Missing weights: {weights}'
 stats_path = Path(cfg.rollout.rlt_feature_model.openpi_data.norm_stats_path)
@@ -72,7 +96,8 @@ assert 1024 <= port <= 65533 and not set(range(port, port + 3)) & {6379, 6385, 6
 print('Config: maniskill_rlt_stage2_smoke_gpu2; RLinf physical rank: 2; worker CUDA ordinal: 0')
 print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
-print('Budget: 2 train envs / 1 eval env; 40 control steps; 2 outer iterations')
+print(f'Budget: 2 train envs / 1 eval env; 40 control steps; stop at global step {cfg.runner.max_steps}')
+print(f'Resume: {cfg.runner.resume_dir}')
 print('Batch: global=4, micro=2; at most 2 AC updates per iteration')
 print(f'Planned output: {os.environ["RLT_SMOKE_RUN_DIR"]}')
 print('Preflight OK (paths/config only; GPU execution has not been tested).')
@@ -188,10 +213,25 @@ if [[ "${1:-}" == --probe ]]; then
 fi
 
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_smoke_gpu2 --cfg job --resolve \
+    --config-name maniskill_rlt_stage2_smoke_gpu2 "${world_overrides[@]}" --cfg job --resolve \
     > "$RLT_SMOKE_RUN_DIR/resolved-config.yaml"
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_smoke_gpu2 &
+    --config-name maniskill_rlt_stage2_smoke_gpu2 "${world_overrides[@]}" &
 train_pid=$!
 wait "$train_pid"
 train_pid=
+if [[ "$world_enabled" == 1 ]] && (( smoke_steps >= 2 )); then
+    audit_root="$RLT_SMOKE_RUN_DIR/stage2_world_smoke/checkpoints"
+    previous="$audit_root/global_step_$((smoke_steps - 1))/actor/model_state_dict/full_weights.pt"
+    if [[ ! -f "$previous" && "${RLT_SMOKE_RESUME_DIR:-}" == */global_step_$((smoke_steps - 1)) ]]; then
+        previous="$RLT_SMOKE_RESUME_DIR/actor/model_state_dict/full_weights.pt"
+    fi
+    latest="$audit_root/global_step_$smoke_steps/actor/model_state_dict/full_weights.pt"
+    if [[ -f "$previous" && -f "$latest" ]]; then
+        python -m toolkits.rlt.audit_adapter --before "$previous" --after "$latest" \
+            --prefix "latent_world." --require-change
+    else
+        echo 'ERROR: Adapter audit requires two consecutive saved checkpoints.' >&2
+        exit 1
+    fi
+fi

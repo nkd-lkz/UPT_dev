@@ -1456,3 +1456,45 @@ def test_latent_world_policy_checkpoint_contains_all_rollout_sync_parameters(tmp
     assert world_names <= set(model.state_dict())
     with pytest.raises(ValueError, match="shapes"):
         RLTMLPPolicy(9, 3, 2, 3, latent_world=cfg)
+
+
+def test_latent_world_residual_starts_at_persistence():
+    from rlinf.models.embodiment.modules.rlt_latent_world import (
+        LatentWorldConfig,
+        RLTLatentWorld,
+    )
+
+    cfg = LatentWorldConfig(
+        z_dim=8,
+        proprio_dim=3,
+        action_dim=2,
+        hidden_dim=8,
+        num_heads=2,
+        predict_residual=True,
+    )
+    model = RLTLatentWorld(cfg)
+    obs = {"z_rl": torch.randn(2, 8), "proprio": torch.randn(2, 3)}
+    target = torch.nn.functional.layer_norm(obs["z_rl"], (8,))
+    pred, _ = model(obs, torch.randn(2, 10, 2), 1)
+    torch.testing.assert_close(pred, target[None].expand_as(pred))
+    pred.square().mean().backward()
+    assert model.predictors[0][-1].weight.grad.abs().sum() > 0
+
+
+def test_adapter_checkpoint_audit_detects_updates_and_rejects_invalid_weights(tmp_path):
+    from toolkits.rlt.audit_adapter import compare
+
+    before, after = tmp_path / "before.pt", tmp_path / "after.pt"
+    torch.save({"adapter.weight": torch.ones(2), "unrelated": torch.zeros(2)}, before)
+    torch.save({"adapter.weight": torch.ones(2)}, after)
+    assert compare(before, after, "adapter.")["changed_tensors"] == 0
+    torch.save({"adapter.weight": torch.tensor([1.0, 1.25])}, after)
+    assert compare(before, after, "adapter.")["max_abs_change"] == 0.25
+    torch.save({"adapter.weight": torch.tensor([float("nan"), 1.0])}, after)
+    with pytest.raises(ValueError, match="Nonfinite"):
+        compare(before, after, "adapter.")
+    torch.save({"adapter.weight": torch.ones(3)}, after)
+    with pytest.raises(ValueError, match="shape"):
+        compare(before, after, "adapter.")
+    with pytest.raises(ValueError, match="No matching"):
+        compare(before, after, "missing.")

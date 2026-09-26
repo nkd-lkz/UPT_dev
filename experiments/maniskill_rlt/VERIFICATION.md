@@ -1,6 +1,6 @@
 # Verification / 验收记录
 
-This records implementation checks on 2026-09-25, not a robotics experiment result. 本文记录代码验证，不代表真实训练、成功率或泛化结果。
+This preserves implementation checks on 2026-09-25. The subsequent [pilot report](PILOT_RESULTS.md) / [中文实验记录](PILOT_RESULTS.zh-CN.md) supersedes pending real-data/GPU gates below: independent prediction tests, online smoke and resume now passed; 188 CPU tests pass. Success-rate, convergence and transfer improvements remain unproven. 下文保留初版验收历史，最新证据见链接。
 
 ## Scope / 范围
 

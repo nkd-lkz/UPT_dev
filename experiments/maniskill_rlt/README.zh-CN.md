@@ -1,10 +1,10 @@
 # ManiSkill RLT baseline 与未来表征研究
 
-这个目录记录复现边界，并提供 FLARE 启发分支的代码验收和运行入口。本次准备代码没有启动新的真实数据训练或 GPU 特征提取任务。[English](README.md)
+这个目录记录复现边界，并提供 FLARE 启发分支的代码验收和运行入口。[2026-09-26 小规模实验记录](PILOT_RESULTS.zh-CN.md) 补充了已实现架构图、真实数据独立测试、GPU smoke 与续跑证据，尚未证明在线 RL 收敛更快。[English](README.md)
 
 ## 分支与阅读顺序
 
-Baseline 分支是 `baseline/maniskill-rlt-2026-09-25`，提交 `7db62813`，对应官方源码快照 `b85c07175b10017bf58ab83e1b1eee99666d0626`。它保存 Stage 1/2 源码、配置与现有双 GPU Stage 1 启动脚本，不代表两个阶段已经训练收敛。原工作目录为 `/home/luokz/rlinf_rlt/UPT_dev`。
+初始 baseline 快照为 `7db62813`，对应官方源码快照 `b85c07175b10017bf58ab83e1b1eee99666d0626`。`baseline/maniskill-rlt-2026-09-25` 后续包含了恢复与隔离修复 `ff566637`，本研究分支将该修复 cherry-pick 为 `43a0e615`。Stage 1/2 源码与启动脚本不代表两个阶段已经收敛。原工作目录仍为 `/home/luokz/rlinf_rlt/UPT_dev`。
 
 研究分支是 `research/rlt-flare-latent-dynamics`，工作目录为 `/home/luokz/rlinf_rlt/UPT_flare_dev`。它复用现有 Python 环境，但源码目录独立。不要在正在训练的原目录切换分支。
 
@@ -17,7 +17,7 @@ Baseline 分支是 `baseline/maniskill-rlt-2026-09-25`，提交 `7db62813`，对
 - `rlinf/algorithms/rlt/latent_world.py`：实际执行 chunk 的 replay 对齐及来源检查。
 - `toolkits/rlt/preflight.py`：不启动训练的配置/文件检查。
 
-下面的命令供验收和以后明确启动时使用。Baseline 占用 GPU 0/1 期间，不要并行执行缓存提取或新训练。原训练可能不止一夜，保存了中间 checkpoint 也不等于已经收敛。
+下面是以后明确启动时使用的通用命令，使用 GPU 0 或双 GPU 配置；baseline 占用 GPU 0/1 时不要执行。要在空闲 GPU 2 上隔离运行，请使用 [小规模实验入口](PILOT_RESULTS.zh-CN.md)。保存了中间 checkpoint 不等于已经收敛。
 
 ## 准备路径，不启动任务
 
@@ -53,7 +53,7 @@ CUDA_VISIBLE_DEVICES='' python toolkits/rlt/preflight.py --config-only
 
 ## Stage 1B：资源空闲后再执行
 
-缓存工具在一张 GPU 上运行冻结 VLA 推理，之后的小模型训练只读取缓存。本次交付没有在真实数据上执行下面的命令。
+缓存工具在一张 GPU 上运行冻结 VLA 推理，之后的小模型训练只读取缓存。已经完成的有界真实数据实验见 [实验记录](PILOT_RESULTS.zh-CN.md)；下面的通用命令仍需等所选设备空闲后执行。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python toolkits/rlt/cache_latents.py \

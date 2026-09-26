@@ -2774,6 +2774,7 @@ def _write_latent_test_cache(tmp_path):
             "complete": True,
             "episodes": entries,
             "feature_contract": {"test": "synthetic"},
+            "source": {"info": "fixture", "episodes": "fixture", "tasks": "fixture"},
         },
         tmp_path / "manifest.pt",
     )
@@ -2890,6 +2891,28 @@ def test_latent_world_stage1b_synthetic_checkpoint_resumes(tmp_path, monkeypatch
     diagnostics = evaluate_checkpoint(str(best), str(cache_dir), batch_size=4)
     assert diagnostics["horizons"]["3"]["valid_targets"] > 0
     assert diagnostics["split"] == "validation_not_independent_test"
+    with pytest.raises(ValueError, match="overlap"):
+        evaluate_checkpoint(
+            str(best), str(cache_dir), batch_size=4, independent_test=True
+        )
+    test_cache = tmp_path / "test_cache"
+    test_cache.mkdir()
+    _write_latent_test_cache(test_cache)
+    manifest = torch.load(test_cache / "manifest.pt", weights_only=True)
+    for entry in manifest["episodes"]:
+        entry["id"] = str(int(entry["id"]) + 24)
+    torch.save(manifest, test_cache / "manifest.pt")
+    independent = evaluate_checkpoint(
+        str(best), str(test_cache), batch_size=4, independent_test=True
+    )
+    assert independent["split"] == "independent_test"
+    assert set(independent["episodes"]) == {str(i) for i in range(24, 48)}
+    manifest["source"]["info"] = "different dataset"
+    torch.save(manifest, test_cache / "manifest.pt")
+    with pytest.raises(ValueError, match="source dataset"):
+        evaluate_checkpoint(
+            str(best), str(test_cache), batch_size=4, independent_test=True
+        )
     assert (best.parent / "last.pt").is_file()
     continuous = torch.load(best.parent / "last.pt", weights_only=True)
     assert (
@@ -3003,3 +3026,14 @@ def test_latent_world_preflight_checks_real_contract_and_entropy(tmp_path, monke
     stats.write_text('{"changed": true}')
     with pytest.raises(ValueError, match="contract mismatch"):
         validate_latent_world_rollout(cfg)
+
+
+def test_latent_world_episode_selection_preserves_complete_episodes():
+    from toolkits.rlt.cache_latents import select_episodes
+
+    entries = [{"episode_index": i, "length": 30 + i} for i in range(4)]
+    assert select_episodes(entries, [3, 1]) == [entries[1], entries[3]]
+    assert select_episodes(entries, None) == entries
+    for ids in ([], [1, 1], [9]):
+        with pytest.raises(ValueError):
+            select_episodes(entries, ids)

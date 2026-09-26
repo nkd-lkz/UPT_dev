@@ -1,6 +1,6 @@
 # 用动作后果表征改进 RLT
 
-这个方案检验：在冻结的 RLT 特征空间里学习交互后果，能否提高在线 actor–critic 的样本效率。它以官方 ManiSkill 复现为起点，增加轻量离线适配阶段，再把同一模块接入真实 transition 的在线学习。目前没有训练结果，也不声称发现了物理规律或实现了完整的持续学习系统。[English](DESIGN.md)
+这个方案检验：在冻结的 RLT 特征空间里学习交互后果，能否提高在线 actor–critic 的样本效率。它以官方 ManiSkill 复现为起点，增加轻量离线适配阶段，再把同一模块接入真实 transition 的在线学习。[小规模实验记录](PILOT_RESULTS.zh-CN.md) 新增了增量预测、架构图与真实数据/GPU 证据，尚未证明在线 RL 改善、物理规律或完整持续学习能力。[English](DESIGN.md)
 
 ## 1. 先回答一个可以验证的问题
 
@@ -79,7 +79,7 @@ L_online_world = L_H + 0.1 * L_anchor       # 不加在线辅助 BC
 L_actor = 原 RLT 的 Q/BC 目标               # 保留原有干预目标
 ```
 
-`future_weight` 同样作用于在线 future 项。critic optimizer 管理 sidecar 的全部参数，包括 query 和预测 head；actor 读取 detach 后的 adapter 特征。TD 梯度可以调整 adapter，辅助梯度继续训练后果预测。`target_update_type` 必须为 `all`，确保 target critic 的 adapter 同步进行 Polyak 更新。sidecar 是正常注册的 policy 子模块，会进入现有 checkpoint 和权重同步路径；完整多进程 FSDP/Ray 路径尚未做 GPU 验证。
+`future_weight` 同样作用于在线 future 项。critic optimizer 管理 sidecar 的全部参数，包括 query 和预测 head；actor 读取 detach 后的 adapter 特征。TD 梯度可以调整 adapter，辅助梯度继续训练后果预测。`target_update_type` 必须为 `all`，确保 target critic 的 adapter 同步进行 Polyak 更新。sidecar 是正常注册的 policy 子模块，会进入现有 checkpoint 和权重同步路径；单 GPU 多进程 FSDP/Ray smoke 与续跑已通过，多 GPU 扩展仍待验证。
 
 当前 ManiSkill collector 在执行完整 action chunk 后给出 successor observation。`H=10`、控制频率 10 Hz 时，在线预测跨度是 **1 秒，不是 0.1 秒**。`replay_world_batch` 检查 reward slots 和动作数量是否匹配 H，使用真正路由/执行的动作，包括 expert 替换，不使用尚未执行的 student proposal。任何 termination 或 truncation 都会屏蔽整行：RLT 的终止 transition 可能拿当前观测代替 next_obs，不能把它当作“动作没有改变状态”的物理证据。
 
@@ -141,7 +141,7 @@ C 不是“冻结 adapter”：关闭 `latent_world_weight` 只关闭 replay 自
 
 ## 10. 验收门槛与局限
 
-代码验收应先通过：baseline 关闭兼容、episode 边界、未来 mask、target stop-grad、chunk 时间对齐、终止 mask、optimizer 参数归属、CPU 确定性续跑及配置一致性测试。原训练释放资源后，再做 GPU 缓存 smoke test，以及短程 Stage 2 保存/恢复测试。单元测试不能替代这些集成验证。
+代码验收应先通过：baseline 关闭兼容、episode 边界、未来 mask、target stop-grad、chunk 时间对齐、终止 mask、optimizer 参数归属、CPU 确定性续跑及配置一致性测试。GPU 2 缓存提取与短程 Stage 2 保存/恢复已记录在 [小规模实验结果](PILOT_RESULTS.zh-CN.md)。单元测试不能替代这些集成验证，收敛优势仍需受控实验。
 
 如果预测对动作不敏感、差于 persistence、只改善 teacher loss，或只减少更新次数却不改善交互预算下的成功率，应停止或修订假设。无干预实验不能证明干预减少；对应实验完成前，不声称物理理解、跨任务泛化、终身成长或保证收敛。
 
