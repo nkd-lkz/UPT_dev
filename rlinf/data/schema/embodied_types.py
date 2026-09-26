@@ -1630,6 +1630,8 @@ class EnvOutput:
         return self.transition.rlt_switch_flags
 
     def prepare_observations(self, obs: dict[str, Any]) -> dict[str, Any]:
+        from rlinf.algorithms.rlt.interaction_memory import copy_memory_observation
+
         image_tensor = obs["main_images"] if "main_images" in obs else None
         wrist_image_tensor = obs["wrist_images"] if "wrist_images" in obs else None
         extra_view_image_tensor = (
@@ -1642,13 +1644,15 @@ class EnvOutput:
             else None
         )
 
-        return {
+        prepared = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        copy_memory_observation(obs, prepared)
+        return prepared
 
     def to_dict(self) -> dict[str, Any]:
         return {

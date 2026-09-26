@@ -1655,6 +1655,12 @@ def adv_requires_group_baseline(
 
 
 def validate_cfg(cfg: DictConfig) -> DictConfig:
+    if cfg.runner.task_type == "embodied":
+        from rlinf.algorithms.rlt.interaction_memory import (
+            validate_interaction_memory_cfg,
+        )
+
+        validate_interaction_memory_cfg(cfg)
     OmegaConf.set_struct(cfg, True)
 
     with open_dict(cfg):

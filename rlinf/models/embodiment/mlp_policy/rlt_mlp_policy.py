@@ -37,6 +37,7 @@ class RLTMLPPolicy(MLPPolicy):
         add_q_head: bool = True,
         q_head_type: str = "default",
         fixed_std: float = 0.002,
+        interaction_memory: dict | None = None,
     ):
         if not add_q_head:
             raise ValueError(
@@ -58,6 +59,18 @@ class RLTMLPPolicy(MLPPolicy):
 
         actor_obs_dim = z_dim + proprio_dim + flat_action_dim
         critic_obs_dim = z_dim + proprio_dim
+        from rlinf.algorithms.rlt.interaction_memory import memory_config
+
+        memory_cfg = memory_config(interaction_memory)
+        if memory_cfg is not None:
+            if (
+                memory_cfg.proprio_dim,
+                memory_cfg.action_dim,
+                memory_cfg.chunk_len,
+            ) != (proprio_dim, step_action_dim, chunk_len):
+                raise ValueError("Interaction memory dimensions must match the policy")
+            actor_obs_dim += memory_cfg.hidden_dim
+            critic_obs_dim += memory_cfg.hidden_dim
 
         super().__init__(
             obs_dim=actor_obs_dim,
@@ -75,6 +88,13 @@ class RLTMLPPolicy(MLPPolicy):
         self.ref_chunk_len = ref_chunk_len
         self.flat_action_dim = flat_action_dim
         self.fixed_std = float(fixed_std)
+        self.memory_encoder = None
+        if memory_cfg is not None:
+            from rlinf.models.embodiment.modules.rlt_memory_encoder import (
+                RLTMemoryEncoder,
+            )
+
+            self.memory_encoder = RLTMemoryEncoder(memory_cfg)
         if self.fixed_std <= 0:
             raise ValueError(f"fixed_std must be positive, got {self.fixed_std}.")
 
@@ -127,10 +147,17 @@ class RLTMLPPolicy(MLPPolicy):
         ref_chunk = self._get_ref_chunk(obs)
         if apply_reference_dropout:
             ref_chunk = self._maybe_drop_reference(ref_chunk, reference_dropout_prob)
-        return torch.cat([ref_chunk, self._get_z(obs), self._get_proprio(obs)], dim=-1)
+        state = [ref_chunk, self._get_z(obs), self._get_proprio(obs)]
+        if self.memory_encoder is not None:
+            # The critic optimizer owns encoder parameters; actor consumes context.
+            state.append(self.memory_encoder(obs).detach())
+        return torch.cat(state, dim=-1)
 
     def _critic_state(self, obs: dict) -> torch.Tensor:
-        return torch.cat([self._get_z(obs), self._get_proprio(obs)], dim=-1)
+        state = [self._get_z(obs), self._get_proprio(obs)]
+        if self.memory_encoder is not None:
+            state.append(self.memory_encoder(obs))
+        return torch.cat(state, dim=-1)
 
     def _format_chunk_actions(self, actions: torch.Tensor) -> torch.Tensor:
         return actions.reshape(-1, self.chunk_len, self.step_action_dim)

@@ -296,7 +296,12 @@ class RLTACLossMixin:
         critic_loss = F.mse_loss(
             all_data_q_values, target_q_values.expand_as(all_data_q_values)
         )
-        return critic_loss, {"q_data": all_data_q_values.mean().item()}
+        metrics = {"q_data": all_data_q_values.mean().item()}
+        if "memory_valid" in curr_obs:
+            counts = curr_obs["memory_valid"].float().sum(dim=-1)
+            metrics["memory_valid_records"] = counts.mean().item()
+            metrics["memory_empty_fraction"] = (counts == 0).float().mean().item()
+        return critic_loss, metrics
 
     @Worker.timer("forward_actor")
     def forward_actor(self, batch):

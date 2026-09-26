@@ -1561,7 +1561,10 @@ def test_history_reward_assignment_matches_main_across_chunks():
 
 
 @pytest.mark.parametrize("loss_type", ["rlt_ac", "rlt_td3"])
-def test_rlt_output_matches_main_transition_and_intervention_behavior(loss_type):
+@pytest.mark.parametrize("with_memory", [False, True])
+def test_rlt_output_matches_main_transition_and_intervention_behavior(
+    loss_type, with_memory
+):
     collector = _make(_config(algorithm={"loss_type": loss_type}))
     key = TrajectoryKey(3, 0, 0, 0, 0)
     current_ref_chunk = torch.tensor([[1.0, 2.0]])
@@ -1600,10 +1603,33 @@ def test_rlt_output_matches_main_transition_and_intervention_behavior(loss_type)
         initial_transition=EnvTransition(),
     )
 
+    memory_keys = set()
+    if with_memory:
+        from rlinf.algorithms.rlt.interaction_memory import (
+            InteractionMemory,
+            InteractionMemoryConfig,
+        )
+
+        memory = InteractionMemory(InteractionMemoryConfig())
+        memory.begin_attempt("pipeline-test")
+        snapshot = memory.snapshot(torch.zeros(9))
+        current_memory = {key: value[None] for key, value in snapshot.items()}
+        memory.append_completed(torch.zeros(9), torch.zeros(10, 8), torch.ones(9))
+        successor_memory = {
+            key: value[None] for key, value in memory.snapshot(torch.ones(9)).items()
+        }
+        policy.output.forward_inputs.update(current_memory)
+        env.next_rlt_obs.update(successor_memory)
+        memory_keys = set(snapshot)
+
     [(_, trajectory)] = _collect(collector, env, policy)
 
-    assert set(trajectory.curr_obs) == {"z_rl", "proprio", "ref_chunk"}
-    assert set(trajectory.next_obs) == {"z_rl", "proprio", "ref_chunk"}
+    assert set(trajectory.curr_obs) == {"z_rl", "proprio", "ref_chunk"} | memory_keys
+    assert set(trajectory.next_obs) == {"z_rl", "proprio", "ref_chunk"} | memory_keys
+    if with_memory:
+        assert not trajectory.curr_obs["memory_valid"].any()
+        assert trajectory.next_obs["memory_valid"].any()
+        assert trajectory.next_obs["memory_valid"].dtype == torch.bool
     assert torch.equal(trajectory.curr_obs["ref_chunk"][0], intervened_chunk)
     assert torch.equal(
         trajectory.next_obs["ref_chunk"][0], torch.tensor([[11.0, 12.0]])

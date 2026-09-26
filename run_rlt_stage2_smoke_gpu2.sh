@@ -2,14 +2,26 @@
 # Start an isolated, bounded Stage 2 smoke job; never attach to Stage 1 Ray.
 set -euo pipefail
 
-if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
-    echo "Usage: bash run_rlt_stage2_smoke_gpu2.sh [--check|--probe]" >&2
-    exit 2
+smoke_mode=run
+export RLT_SMOKE_MEMORY=0
+for arg in "$@"; do
+    case "$arg" in
+        --memory) export RLT_SMOKE_MEMORY=1 ;;
+        --check|--probe)
+            [[ "$smoke_mode" == run ]] || { echo 'Select one of --check or --probe.' >&2; exit 2; }
+            smoke_mode=${arg#--}
+            ;;
+        *) echo "Usage: bash run_rlt_stage2_smoke_gpu2.sh [--memory] [--check|--probe]" >&2; exit 2 ;;
+    esac
+done
+config_overrides=()
+if [[ "$RLT_SMOKE_MEMORY" == 1 ]]; then
+    config_overrides=(+experiment=rlt_memory runner.logger.experiment_name=stage2_memory_smoke)
 fi
 
 RLINF_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$RLINF_ROOT"
-source "$RLINF_ROOT/.venv/bin/activate"
+source "${RLINF_VENV:-$RLINF_ROOT/.venv}/bin/activate"
 export PYTHONPATH="$RLINF_ROOT:${PYTHONPATH:-}"
 export EMBODIED_PATH="$RLINF_ROOT/examples/embodiment"
 export HYDRA_FULL_ERROR=1 PYTHONUNBUFFERED=1
@@ -41,6 +53,9 @@ unset DISPLAY WAYLAND_DISPLAY VK_LAYER_PATH VK_INSTANCE_LAYERS __NV_PRIME_RENDER
 unset RAY_ADDRESS RLINF_NODE_RANK
 
 run_id="stage2_gpu2_$(date +%Y%m%d_%H%M%S)_$$"
+if [[ "$RLT_SMOKE_MEMORY" == 1 ]]; then
+    run_id="memory_$run_id"
+fi
 export RLT_SMOKE_RUN_DIR="$RLT_STORAGE/runs/stage2_smoke/$run_id"
 export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-6382}"
 
@@ -52,10 +67,13 @@ from pathlib import Path
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+from rlinf.algorithms.rlt.interaction_memory import validate_interaction_memory_cfg
 
 with initialize_config_dir(config_dir=os.environ['EMBODIED_PATH'] + '/config', version_base='1.1'):
-    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2')
+    overrides = ['+experiment=rlt_memory', 'runner.logger.experiment_name=stage2_memory_smoke'] if os.environ['RLT_SMOKE_MEMORY'] == '1' else []
+    cfg = compose(config_name='maniskill_rlt_stage2_smoke_gpu2', overrides=overrides)
 OmegaConf.resolve(cfg)
+validate_interaction_memory_cfg(cfg)
 weights = Path(cfg.rollout.rlt_feature_model.model_path) / 'model_state_dict/full_weights.pt'
 assert weights.is_file() and weights.stat().st_size > 0, f'Missing weights: {weights}'
 stats_path = Path(cfg.rollout.rlt_feature_model.openpi_data.norm_stats_path)
@@ -70,6 +88,7 @@ assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates > 0
 port = int(os.environ['RLT_SMOKE_RAY_PORT'])
 assert 1024 <= port <= 65533 and not set(range(port, port + 3)) & {6379, 6385, 6386, 6387}, 'Ray ports overlap Stage 1'
 print('Config: maniskill_rlt_stage2_smoke_gpu2; RLinf physical rank: 2; worker CUDA ordinal: 0')
+print(f'Interaction memory: {os.environ["RLT_SMOKE_MEMORY"] == "1"}')
 print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
 print('Budget: 2 train envs / 1 eval env; 40 control steps; 2 outer iterations')
@@ -77,7 +96,7 @@ print('Batch: global=4, micro=2; at most 2 AC updates per iteration')
 print(f'Planned output: {os.environ["RLT_SMOKE_RUN_DIR"]}')
 print('Preflight OK (paths/config only; GPU execution has not been tested).')
 PY
-if [[ "${1:-}" == --check ]]; then
+if [[ "$smoke_mode" == check ]]; then
     exit 0
 fi
 
@@ -182,16 +201,16 @@ fi
 echo "Using isolated Ray at $RAY_ADDRESS (head PID $ray_head_pid)"
 
 python toolkits/rlt/probe_gpu2.py
-if [[ "${1:-}" == --probe ]]; then
+if [[ "$smoke_mode" == probe ]]; then
     echo 'GPU 2 placement probe passed; training was not started.'
     exit 0
 fi
 
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_smoke_gpu2 --cfg job --resolve \
+    --config-name maniskill_rlt_stage2_smoke_gpu2 "${config_overrides[@]}" --cfg job --resolve \
     > "$RLT_SMOKE_RUN_DIR/resolved-config.yaml"
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_smoke_gpu2 &
+    --config-name maniskill_rlt_stage2_smoke_gpu2 "${config_overrides[@]}" &
 train_pid=$!
 wait "$train_pid"
 train_pid=

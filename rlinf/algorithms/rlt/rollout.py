@@ -17,6 +17,10 @@ from typing import Any, Literal
 import numpy as np
 import torch
 
+from rlinf.algorithms.rlt.interaction_memory import (
+    MEMORY_OBS_KEYS,
+    copy_memory_observation,
+)
 from rlinf.algorithms.rlt.route import RLTRoute, RLTRouteContext
 from rlinf.algorithms.rlt.transition import RLT_OBS_KEYS, RLT_TRANSITION_PREFIX
 
@@ -31,8 +35,14 @@ def _append_rlt_transition_obs(
     transition_obs = rlt_obs
     if final_obs is not None:
         transition_obs = feature_model.extract_rlt_obs(final_obs)
+        copy_memory_observation(final_obs, transition_obs)
     for key in RLT_OBS_KEYS:
         result["forward_inputs"][f"{RLT_TRANSITION_PREFIX}{key}"] = transition_obs[key]
+    for key in MEMORY_OBS_KEYS:
+        if key in transition_obs:
+            result["forward_inputs"][f"{RLT_TRANSITION_PREFIX}{key}"] = (
+                transition_obs[key].detach().clone()
+            )
 
 
 def predict_rlt_actions(
@@ -50,6 +60,7 @@ def predict_rlt_actions(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     with torch.no_grad():
         rlt_obs = feature_model.extract_rlt_obs(env_obs)
+        copy_memory_observation(env_obs, rlt_obs)
         actions, result = policy_model.predict_action_batch(
             env_obs=rlt_obs,
             mode=mode,

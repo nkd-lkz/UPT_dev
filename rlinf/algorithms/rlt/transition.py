@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 
+from rlinf.algorithms.rlt.interaction_memory import MEMORY_OBS_KEYS
 from rlinf.envs import SupportedEnvType
 from rlinf.utils.nested_dict_process import copy_dict_tensor
 
@@ -54,9 +55,13 @@ def extract_rlt_obs_from_forward_inputs(
             "rollout.rlt_feature_model is configured and the rollout worker "
             "populates RLT features."
         )
-    return copy_dict_tensor(
-        {key: forward_inputs[f"{prefix}{key}"] for key in RLT_OBS_KEYS}
-    )
+    keys = list(RLT_OBS_KEYS)
+    memory_present = [f"{prefix}{key}" in forward_inputs for key in MEMORY_OBS_KEYS]
+    if any(memory_present):
+        if not all(memory_present):
+            raise ValueError("Incomplete replay memory snapshot")
+        keys.extend(MEMORY_OBS_KEYS)
+    return copy_dict_tensor({key: forward_inputs[f"{prefix}{key}"] for key in keys})
 
 
 def apply_rlt_interventions(

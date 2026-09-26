@@ -1,0 +1,26 @@
+# @package _global_
+# Compose with baseline AC or GPU-2 smoke: +experiment=rlt_memory.
+# No change to baseline budgets, routing, expert, reward, or noise settings.
+actor:
+  model:
+    interaction_memory:
+      enabled: True
+      proprio_dim: 9
+      action_dim: 8
+      chunk_len: 10
+      brief_size: 4
+      archive_size: 32
+      retrieval_size: 4
+      hidden_dim: 64
+      num_heads: 4
+      retain_on_identical_reset: False
+
+rollout:
+  model:
+    interaction_memory: ${actor.model.interaction_memory}
+
+env:
+  train:
+    interaction_memory: ${actor.model.interaction_memory}
+  eval:
+    interaction_memory: ${actor.model.interaction_memory}

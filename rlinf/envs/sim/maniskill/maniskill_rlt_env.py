@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Optional, Union
 
 import gymnasium as gym
@@ -27,9 +28,14 @@ from mani_skill.utils.structs.types import Array
 from omegaconf import DictConfig, open_dict
 from omegaconf.omegaconf import OmegaConf
 
+from rlinf.algorithms.rlt.interaction_memory import (
+    JointMemoryCollector,
+    memory_config,
+)
 from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
 from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
     RLT_OPENPI_JOINT_WRAP_MODE,
+    extract_rlt_joint_states,
     init_peg_insertion_event_state,
     is_peg_insertion_side_env_id,
     maybe_augment_peg_insertion_info,
@@ -156,6 +162,18 @@ class ManiskillRLTEnv(ManiskillEnv):
             self._init_metrics()
         self._init_persistent_done_state()
         self._init_rlt_switch()
+        memory_cfg = memory_config(cfg.get("interaction_memory"))
+        if memory_cfg is not None:
+            space = self.env.unwrapped.single_action_space
+            if not (np.all(space.low == -1) and np.all(space.high == 1)):
+                raise ValueError(
+                    "Interaction memory requires normalized joint controls"
+                )
+        self.interaction_memory = (
+            JointMemoryCollector(memory_cfg, self.num_envs)
+            if memory_cfg is not None
+            else None
+        )
 
     @property
     def instruction(self):
@@ -754,7 +772,7 @@ class ManiskillRLTEnv(ManiskillEnv):
                 raise ValueError(
                     "wrap_obs_mode='rlt_openpi_joint' requires ManiSkill obs_mode='rgb'."
                 )
-            return wrap_rlt_openpi_joint_obs(
+            obs = wrap_rlt_openpi_joint_obs(
                 raw_obs,
                 infos=infos,
                 task_descriptions=self.instruction,
@@ -762,7 +780,51 @@ class ManiskillRLTEnv(ManiskillEnv):
                 device=self.device,
                 is_peg_insertion_side=self._is_peg_insertion_side,
             )
+            memory = getattr(self, "interaction_memory", None)
+            if memory is not None:
+                obs.update(memory.snapshot(obs["states"]))
+            return obs
         return super()._wrap_obs(raw_obs, infos=infos)
+
+    def _reset_interaction_memory(self, raw_obs: dict, env_idx=None) -> None:
+        memory = getattr(self, "interaction_memory", None)
+        if memory is None:
+            return
+        states = extract_rlt_joint_states(
+            raw_obs, batch_size=self.num_envs, device=self.device
+        )
+        indices = (
+            list(range(self.num_envs))
+            if env_idx is None
+            else torch.as_tensor(env_idx).reshape(-1).cpu().tolist()
+        )
+        # Only exact reset-state matches under fixed task configuration may retry.
+        # This identity is local to this environment instance, never cross-task.
+        if memory.config.retain_on_identical_reset:
+            if not self.use_fixed_reset_state_ids:
+                raise ValueError("Persistent memory requires fixed reset-state IDs")
+            state_dict = self.env.unwrapped.get_state_dict()
+
+            def digest_state(value, index, digest):
+                if isinstance(value, dict):
+                    for key in sorted(value):
+                        digest.update(str(key).encode())
+                        digest_state(value[key], index, digest)
+                else:
+                    tensor = torch.as_tensor(value).detach().cpu()
+                    if tensor.ndim and tensor.shape[0] == self.num_envs:
+                        tensor = tensor[index]
+                    digest.update(str((tensor.dtype, tuple(tensor.shape))).encode())
+                    digest.update(tensor.contiguous().numpy().tobytes())
+
+            fingerprints = []
+            for index in indices:
+                digest = hashlib.sha256(str(self.task_id).encode())
+                digest_state(state_dict, index, digest)
+                fingerprints.append(digest.hexdigest())
+        else:
+            fingerprints = [f"{self.task_id}/lane-{index}" for index in indices]
+        memory.reset(indices, fingerprints, states)
 
     def _record_metrics(self, step_reward, infos):
         infos = super()._record_metrics(step_reward, infos)
@@ -816,6 +878,7 @@ class ManiskillRLTEnv(ManiskillEnv):
         if seed is not None:
             self._has_seeded_reset = True
         raw_obs, infos = self.env.reset(seed=seed, options=options)
+        self._reset_interaction_memory(raw_obs, options.get("env_idx"))
         if "env_idx" in options:
             env_idx = options["env_idx"]
             if self._is_peg_insertion_side:
@@ -835,8 +898,14 @@ class ManiskillRLTEnv(ManiskillEnv):
         return extracted_obs, infos
 
     def step(
-        self, actions: Union[Array, dict] = None, auto_reset=True
+        self,
+        actions: Union[Array, dict] = None,
+        auto_reset=True,
+        *,
+        _memory_chunk=False,
     ) -> tuple[Array, Array, Array, Array, dict]:
+        if getattr(self, "interaction_memory", None) is not None and not _memory_chunk:
+            raise RuntimeError("Interaction memory records chunks; use chunk_step()")
         if isinstance(actions, torch.Tensor):
             actions = actions.to(self.device)
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
@@ -1077,12 +1146,25 @@ class ManiskillRLTEnv(ManiskillEnv):
 
     def chunk_step(self, chunk_actions):
         self._validate_chunk_actions(chunk_actions)
+        memory = getattr(self, "interaction_memory", None)
+        if memory is not None and chunk_actions.shape[1] != memory.config.chunk_len:
+            raise ValueError(
+                "Memory-enabled rollouts require the configured chunk length"
+            )
+        if memory is not None:
+            memory_actions = torch.as_tensor(chunk_actions).detach().clone()
+            if not torch.isfinite(memory_actions).all():
+                raise ValueError("Memory-enabled rollouts require finite controls")
+            # ManiSkill's normalized joint controller clips before scaling. Record
+            # those effective normalized commands without changing baseline actions.
+            memory_actions = memory_actions.clamp(-1.0, 1.0)
         chunk_size = chunk_actions.shape[1]
         obs_list = []
         infos_list = []
         chunk_rewards = []
         raw_chunk_terminations = []
         raw_chunk_truncations = []
+        executed_ticks = []
         if not hasattr(self, "_persistent_done_mask"):
             self._init_persistent_done_state()
         frozen_dones = (
@@ -1102,6 +1184,8 @@ class ManiskillRLTEnv(ManiskillEnv):
             else None
         )
         for i in range(chunk_size):
+            if memory is not None:
+                executed_ticks.append(~frozen_dones.clone())
             actions = chunk_actions[:, i]
             if (
                 frozen_dones.all()
@@ -1122,8 +1206,11 @@ class ManiskillRLTEnv(ManiskillEnv):
             else:
                 state_before_step = self._snapshot_episode_state()
                 actions = self._zero_frozen_actions(actions, frozen_dones)
+                step_kwargs = {"auto_reset": False}
+                if memory is not None:
+                    step_kwargs["_memory_chunk"] = True
                 extracted_obs, step_reward, terminations, truncations, infos = (
-                    self.step(actions, auto_reset=False)
+                    self.step(actions, **step_kwargs)
                 )
                 if frozen_dones.any():
                     self._restore_episode_state(state_before_step, frozen_dones)
@@ -1173,6 +1260,16 @@ class ManiskillRLTEnv(ManiskillEnv):
         )
         self._sync_rlt_switch_episode_info(infos_list[-1])
         self._stack_chunk_rlt_flags(infos_list)
+
+        if memory is not None:
+            memory.complete(
+                memory_actions,
+                obs_list[-1]["states"],
+                torch.stack(executed_ticks, dim=1),
+                raw_chunk_terminations,
+                raw_chunk_truncations,
+            )
+            obs_list[-1].update(memory.snapshot(obs_list[-1]["states"]))
 
         if past_dones.any() and self.auto_reset:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
