@@ -1,0 +1,43 @@
+# Architecture matches the baseline Stage2 frozen feature model.
+# Paths are supplied explicitly by the server CLI.
+model_type: openpi
+model_path: null
+precision: bf16
+num_action_chunks: 10
+action_dim: 8
+num_steps: 5
+add_value_head: false
+is_lora: false
+lora_rank: 32
+openpi_data:
+  repo_id: null
+  norm_stats_path: null
+  default_prompt: insert the peg in the hole
+openpi:
+  task: eval
+  torch_compile: false
+  config_name: pi05_rlt_maniskill_joint
+  num_images_in_input: 2
+  action_chunk: 10
+  action_horizon: 10
+  action_env_dim: 8
+  num_steps: 5
+  model_action_dim: 32
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
+  max_token_len: 200
+  discrete_state_input: true
+  train_expert_only: false
+  add_value_head: false
+  detach_critic_input: true
+  use_rlt: true
+  rlt_alpha: 1.0
+  rlt_input_dim: 2048
+  rlt_embed_dim: 2048
+  rlt_prefix_seq_len: 1024
+  rlt_num_layers: 2
+  rlt_num_heads: 8
+  rlt_mlp_ratio: 4.0
+  rlt_encoder_type: append_self_attention
+  rlt_image_only: false
+  rlt_use_mask: true
