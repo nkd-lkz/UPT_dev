@@ -24,6 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from torch.utils._pytree import tree_map_only
 
 from rlinf.hybrid_engines.fsdp import FSDP, FSDPModule
 from rlinf.hybrid_engines.fsdp.utils import FSDPVersion, to_local_if_dtensor
@@ -115,6 +116,21 @@ class Checkpoint(Stateful):
             self._load_local_optim_state_dicts(state["optimizers"])
 
         else:
+            if self.opts.cpu_offload:
+                # DCP initializes optimizer tensors while building its load template.
+                # Keep those states initialized, but off GPU, while load_state_dict
+                # allocates their replacements. Clearing them would make DCP
+                # initialize another GPU copy (and perform a synthetic step).
+                optimizers = (
+                    (self.optimizers,)
+                    if isinstance(self.optimizers, Optimizer)
+                    else self.optimizers
+                )
+                for optimizer in optimizers:
+                    for param, values in optimizer.state.items():
+                        optimizer.state[param] = tree_map_only(
+                            torch.Tensor, lambda value: value.cpu(), values
+                        )
             set_state_dict(
                 model=self.model,
                 optimizers=self.optimizers,

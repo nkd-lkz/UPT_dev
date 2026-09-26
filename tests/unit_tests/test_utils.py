@@ -34,6 +34,83 @@ from rlinf.runners.reasoning_runner import ReasoningRunner
 from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
 
 
+@pytest.fixture
+def stage2_smoke_config(monkeypatch, tmp_path):
+    from hydra import compose, initialize_config_dir
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("EMBODIED_PATH", str(root / "examples/embodiment"))
+    monkeypatch.setenv("RLT_STAGE1_ACTOR", str(tmp_path / "stage1/actor"))
+    monkeypatch.setenv("RLT_DATASET_DIR", str(tmp_path / "dataset"))
+    monkeypatch.setenv("RLT_SMOKE_RUN_DIR", str(tmp_path / "smoke"))
+    monkeypatch.setenv("RLT_SMOKE_RENDER_DEVICE", "pci:0000:e1:00.0")
+    with initialize_config_dir(
+        config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+    ):
+        cfg = compose(config_name="maniskill_rlt_stage2_smoke_gpu2")
+    OmegaConf.resolve(cfg)
+    return cfg
+
+
+def test_stage2_smoke_config_is_single_gpu_and_bounded(stage2_smoke_config):
+    cfg = stage2_smoke_config
+    assert dict(cfg.cluster.component_placement) == {
+        "actor": "2-2",
+        "env": "2-2",
+        "rollout": "2-2",
+    }
+    assert cfg.runner.max_steps == cfg.runner.max_epochs == 2
+    assert cfg.runner.val_check_interval == cfg.runner.save_interval == 1
+    assert cfg.actor.global_batch_size == 4
+    assert cfg.actor.micro_batch_size == 2
+    assert cfg.env.train.total_num_envs == 2
+    assert cfg.env.eval.total_num_envs == 1
+    assert cfg.rollout.expert_model is None
+    assert cfg.rollout.rlt_feature_model.openpi.use_rlt
+    assert not cfg.rollout.rlt_feature_model.openpi.torch_compile
+    assert not cfg.actor.model.model_path
+    assert cfg.rollout.rlt_feature_model.openpi_data.norm_stats_path.endswith(
+        "/dataset/norm_stats.json"
+    )
+
+
+def test_stage2_smoke_config_can_reach_replay_updates(stage2_smoke_config):
+    cfg = stage2_smoke_config
+    for mode in (cfg.env.train, cfg.env.eval):
+        assert mode.init_params.sim_backend == "physx_cuda:0"
+        assert mode.init_params.render_backend == "pci:0000:e1:00.0"
+        assert mode.rlt_policy_switch.trigger_mode == "always_on"
+        assert not mode.rlt_policy_switch.expert_takeover.enable
+        assert mode.max_episode_steps == mode.max_steps_per_rollout_epoch == 40
+        assert mode.num_action_chunks == 10
+    chunk_transitions = (
+        cfg.env.train.total_num_envs
+        * cfg.env.train.max_steps_per_rollout_epoch
+        // cfg.env.train.num_action_chunks
+    )
+    assert chunk_transitions >= cfg.algorithm.rlt_schedule.warmup_min_size
+    assert cfg.algorithm.replay_buffer.min_buffer_size >= cfg.actor.global_batch_size
+    # A zero warmup budget would skip learner updates on the first collection.
+    assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates == 2
+    assert cfg.algorithm.rlt_schedule.max_updates_per_train_step == 2
+    assert cfg.algorithm.critic_actor_ratio == 1
+
+
+def test_stage2_smoke_launcher_rejects_missing_checkpoint(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    if not (root / ".venv/bin/activate").is_file():
+        pytest.skip("Host-specific launcher needs the configured baseline venv")
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_stage2_smoke_gpu2.sh"), "--check"],
+        env={**os.environ, "RLT_STAGE1_ACTOR": str(tmp_path / "missing")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "Missing weights:" in result.stderr
+
+
 def test_compute_evaluate_metrics_reports_interact_delay_wait_time_stats():
     metrics = compute_evaluate_metrics(
         [
