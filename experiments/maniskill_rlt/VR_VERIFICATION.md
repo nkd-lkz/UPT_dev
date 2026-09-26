@@ -12,7 +12,7 @@ The branch adds standalone tools, tests and documentation; baseline training fil
 | Transport / 通信 | Loopback TCP, token failure, environment mismatch, size cap, incomplete connection, lossless RGB codec / 本机 TCP、认证失败、环境不一致、消息上限、断连、无损图像 |
 | Recording / 记录 | Executed actions and human mask; read with `allow_pickle=False`; refuse existing output directory / 实际动作及人工标签；禁止覆盖已有目录 |
 | VR adapter / 手柄接口 | Vendor SDK mock checks valid/invalid tracking, button mapping and idempotent shutdown / SDK mock 验证跟踪、按键与重复关闭；非真机证明 |
-| Simulation / 仿真 | Linux CPU physics + GPU 2 Vulkan, actual baseline cameras, IK at current and displaced TCP, reset/step / Linux CPU 物理与 GPU 2 渲染，真实相机、IK、重置与步进 |
+| Simulation / 仿真 | Linux CPU physics + GPU 2 Vulkan, actual baseline cameras, IK at current and displaced TCP, reset/step; Windows CPU-render path reached IK initialization / Linux CPU 物理与 GPU 2 渲染，真实相机、IK、重置与步进；Windows CPU-render 路径已到达 IK 初始化 |
 | Stage1 inference / Stage 1 推理 | Actual step750 weights; two `10×8` chunks and simulator steps; approximately 370/161 ms model calls / 真实 step750，两次动作与步进；不包含校园网 |
 | Stage2 inference / Stage 2 推理 | Actual smoke step2 head + Stage1 features, through PNG/TCP RPC to an executed simulator step / 真实 smoke step2 head，经 PNG/TCP 到仿真步进；非收敛或在线训练证明 |
 | Static checks / 静态检查 | Ruff lint/format, CLI help, whitespace checks / lint、格式、命令帮助与空白检查 |
@@ -31,7 +31,7 @@ ruff check toolkits/rlt_vr tests/unit_tests/test_remote_teleop.py
 ruff format --check toolkits/rlt_vr tests/unit_tests/test_remote_teleop.py
 ```
 
-Ordinary run / 普通运行：17 passed, 2 hardware tests skipped. The two additional tests require an explicitly selected free GPU and the server's working headless Vulkan environment / 另外两个测试需显式选定空闲 GPU 并设置已验证的 Vulkan 环境：
+Ordinary run after the Windows IK backend change / Windows IK 后端修改后的普通运行：18 passed, 2 hardware tests skipped. The two additional tests require an explicitly selected free GPU and the server's working headless Vulkan environment / 另外两个测试需显式选定空闲 GPU 并设置已验证的 Vulkan 环境：
 
 ```bash
 export CUDA_VISIBLE_DEVICES=2
@@ -45,7 +45,7 @@ python -m pytest tests/unit_tests/test_remote_teleop.py -q
 
 `RLT_STORAGE` is the NAS project root defined in the guide; omit `RLT_VR_ACTOR` to test base inference. Hardware tests use trusted checkpoints and perform inference only / 路径变量沿用指南，省略 `RLT_VR_ACTOR` 则验证 base；硬件测试不训练。
 
-Final hardware-enabled result / 最终含硬件测试结果：**19 passed in 51.55 s**. Seventeen upstream SAPIEN/Torch deprecation warnings remain; no test failed / 17 条上游弃用警告，无测试失败。Both Sphinx language builds report zero build warnings / Sphinx 中英文构建均为 0 构建警告。This is a focused suite, not the full repository test suite / 本次为定向回归，未运行全仓测试。
+The earlier Pinocchio-backed implementation passed 19 hardware-enabled tests in 51.55 s. The new PyTorch IK path still requires a repeated Linux hardware check and the Windows check below; do not treat the old run as evidence for the replacement backend. Both Sphinx language builds previously reported zero build warnings. This is a focused suite, not the full repository test suite / 旧 Pinocchio 实现曾通过 19 项含硬件测试；新 PyTorch IK 路径仍需重跑 Linux 硬件检查和下述 Windows 检查，不能沿用旧结果作为新后端证据。此前中英文 Sphinx 构建均为 0 警告；本次为定向回归，未运行全仓测试。
 
 ## Still Required / 尚待验收
 

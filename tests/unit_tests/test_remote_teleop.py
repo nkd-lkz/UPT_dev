@@ -103,6 +103,40 @@ def test_invalid_policy_actions_are_rejected(bad):
         validate_actions(bad)
 
 
+def test_torch_ik_damped_step_is_finite():
+    torch = pytest.importorskip("torch")
+
+    from toolkits.rlt_vr.simulation import _TorchPandaIK
+
+    class Transform:
+        def get_matrix(self):
+            return torch.eye(4).unsqueeze(0)
+
+    class Chain:
+        def forward_kinematics(self, qpos):
+            assert qpos.shape == (1, 7)
+            return Transform()
+
+        def jacobian(self, qpos):
+            assert qpos.shape == (1, 7)
+            return torch.eye(6, 7).unsqueeze(0)
+
+    solver = object.__new__(_TorchPandaIK)
+    solver.torch = torch
+    solver.pk = SimpleNamespace(
+        matrix_to_axis_angle=lambda matrix: torch.zeros((len(matrix), 3))
+    )
+    solver.chain = Chain()
+    target = np.eye(4, dtype=np.float32)
+    target[:3, 3] = [0.01, -0.02, 0.03]
+
+    delta = solver.joint_delta(np.zeros(9, dtype=np.float32), target)
+
+    assert delta is not None and np.isfinite(delta).all()
+    np.testing.assert_allclose(delta[:3], target[:3, 3], atol=5e-6)
+    np.testing.assert_allclose(delta[3:], 0, atol=1e-7)
+
+
 def test_image_codec_preserves_baseline_pixels():
     image = np.random.default_rng(0).integers(0, 256, (384, 384, 3), dtype=np.uint8)
     np.testing.assert_array_equal(decode_image(encode_image(image)), image)

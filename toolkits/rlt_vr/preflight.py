@@ -36,7 +36,9 @@ def main() -> None:
     parser.add_argument(
         "--probe", choices=["sim", "vr", "network", "inference"], required=True
     )
-    parser.add_argument("--render-backend", default="gpu")
+    from .simulation import DEFAULT_RENDER_BACKEND
+
+    parser.add_argument("--render-backend", default=DEFAULT_RENDER_BACKEND)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--steps", type=int, default=20)
     args = parser.parse_args()

@@ -16,17 +16,72 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
 import numpy as np
 
 from .protocol import ENV_ID
 
+DEFAULT_RENDER_BACKEND = "cpu" if sys.platform == "win32" else "gpu"
+
+
+class _TorchPandaIK:
+    """Map a nearby Cartesian target to Panda joint deltas with PyTorch."""
+
+    def __init__(self, urdf_path: str, end_link_name: str) -> None:
+        import pytorch_kinematics as pk
+        import torch
+
+        self.pk = pk
+        self.torch = torch
+        with open(urdf_path, "rb") as urdf:
+            description = urdf.read()
+        # Panda's URDF has simulator-only dynamics attributes that the generic
+        # kinematics parser reports but safely ignores.
+        with open(os.devnull, "w") as sink:
+            with redirect_stdout(sink), redirect_stderr(sink):
+                self.chain = pk.build_serial_chain_from_urdf(
+                    description, end_link_name=end_link_name
+                ).to(device="cpu", dtype=torch.float32)
+
+    def joint_delta(
+        self, qpos: np.ndarray, target_at_base: np.ndarray
+    ) -> np.ndarray | None:
+        """Return one damped least-squares step for a nearby target pose."""
+        torch = self.torch
+        q = torch.as_tensor(qpos[:7], dtype=torch.float32).unsqueeze(0)
+        target = torch.as_tensor(target_at_base, dtype=torch.float32).unsqueeze(0)
+        current = self.chain.forward_kinematics(q).get_matrix()
+        position_error = target[:, :3, 3] - current[:, :3, 3]
+        rotation_error = self.pk.matrix_to_axis_angle(
+            target[:, :3, :3] @ current[:, :3, :3].transpose(1, 2)
+        )
+        error = torch.cat((position_error, rotation_error), dim=-1).unsqueeze(-1)
+        jacobian = self.chain.jacobian(q)
+        transpose = jacobian.transpose(1, 2)
+        regularizer = 1e-4 * torch.eye(
+            jacobian.shape[-1], dtype=jacobian.dtype
+        ).unsqueeze(0)
+        try:
+            delta = torch.linalg.solve(
+                transpose @ jacobian + regularizer, transpose @ error
+            )[0, :, 0]
+        except RuntimeError:
+            return None
+        if not torch.isfinite(delta).all():
+            return None
+        return delta.detach().cpu().numpy()
+
 
 class LocalSimulation:
     """Own a local Panda environment and its CPU inverse-kinematics model."""
 
-    def __init__(self, render_backend: str = "gpu", seed: int = 0) -> None:
+    def __init__(
+        self, render_backend: str = DEFAULT_RENDER_BACKEND, seed: int = 0
+    ) -> None:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
 
@@ -55,9 +110,9 @@ class LocalSimulation:
             self.raw, _ = self.env.reset(seed=seed)
             self.robot = self.env.unwrapped.agent.robot
             self.tcp = self.env.unwrapped.agent.tcp
-            self.ik = self.robot.create_pinocchio_model()
-            self.link_index = [link.name for link in self.robot.links].index(
-                self.tcp.name
+            self.ik = _TorchPandaIK(
+                self.env.unwrapped.agent.urdf_path,
+                self.env.unwrapped.agent.ee_link_name,
             )
             arm = self.env.unwrapped.agent.controller.controllers["arm"]
             if arm.config.lower != -0.1 or arm.config.upper != 0.1:
@@ -89,17 +144,11 @@ class LocalSimulation:
 
         qpos = self._array(self.robot.get_qpos())[0]
         base_target = self.robot.pose.sp.inv() * sapien.Pose(target)
-        result, success, _ = self.ik.compute_inverse_kinematics(
-            self.link_index,
-            base_target,
-            initial_qpos=qpos,
-            active_qmask=np.array([1] * 7 + [0] * 2),
-            max_iterations=100,
-        )
-        if not success or not np.isfinite(result).all():
+        delta_qpos = self.ik.joint_delta(qpos, base_target.to_transformation_matrix())
+        if delta_qpos is None:
             return None
         # Bound teleop to 0.025 rad/control step, below the controller's limit.
-        delta = np.clip((result[:7] - qpos[:7]) / 0.1, -0.25, 0.25)
+        delta = np.clip(delta_qpos / 0.1, -0.25, 0.25)
         return np.r_[delta, np.clip(gripper, -1, 1)].astype(np.float32)
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool]:

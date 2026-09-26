@@ -24,7 +24,7 @@ Windows：CPU 物理仿真 ← 本地 IK / 接管控制 ← 操作者
 
 ## Windows 能否运行
 
-RTX 4060 8 GB 不需要加载 VLA 权重，预计适合尝试单环境渲染，但 CPU 性能、驱动和 SteamVR 共同负载决定实际速度。官方支持矩阵列出 Windows 的 CPU 仿真和渲染，未支持 GPU 仿真；本客户端固定 `num_envs=1`、`sim_backend=physx_cpu`。不要用 WSL 替代原生 Windows 的图形环境。[ManiSkill 系统支持](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/installation.html#system-support)
+RTX 4060 8 GB 不需要加载 VLA 权重，预计适合尝试单环境渲染，但 CPU 性能、驱动和 SteamVR 共同负载决定实际速度。官方支持矩阵列出 Windows 的 CPU 仿真和渲染，未支持 GPU 仿真；本客户端固定 `num_envs=1`、`sim_backend=physx_cpu`。Windows 默认使用 `render_backend=cpu`，避免 SAPIEN 3.0.1 的 CUDA 图像互操作路径；Linux 默认仍为 `gpu`。不要用 WSL 替代原生 Windows 的图形环境。[ManiSkill 系统支持](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/installation.html#system-support)
 
 已确认 SAPIEN 3.0.1 发布了 `cp311-win_amd64` wheel，但安装包存在不等于这台笔记本已验收。[SAPIEN 发布清单](https://pypi.org/project/sapien/3.0.1/#files)
 
@@ -42,7 +42,7 @@ $PY = ".\.venv-vr\Scripts\python.exe"
 & $PY -m toolkits.rlt_vr.preflight --probe sim --steps 20
 ```
 
-预检会构建正式插销任务、检查两路图像与 IK，再执行 20 个保持机械臂位置的控制步。它不弹窗，也不连接服务器；成功时输出 `PASS` 和步耗时。如果 wheel、Vulkan 或 Pinocchio 在 Windows 不可用，保留完整报错，不要悄悄升级仿真版本后声称与 baseline 一致。版本不一致需要单独回归。
+预检会构建正式插销任务、检查两路图像与 IK，再执行 20 个保持机械臂位置的控制步。它不弹窗，也不连接服务器；成功时输出 `PASS` 和步耗时。客户端使用 ManiSkill 已固定依赖的 `pytorch_kinematics` 求解 Panda IK，不需要另装 Pinocchio；Windows 下 Pinocchio 的 LLVM OpenMP 与 PyTorch 的 Intel OpenMP 不能安全地加载在同一仿真进程。如果 wheel 或 Vulkan 不可用，保留完整报错，不要悄悄升级仿真版本后声称与 baseline 一致。版本不一致需要单独回归。
 
 ## 验证 PICO 输入并单独接管
 

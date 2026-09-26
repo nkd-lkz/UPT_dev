@@ -28,7 +28,7 @@ import numpy as np
 
 from .control import OperatorControl, relative_target
 from .protocol import CAMERAS, CONTRACT, encode_image, request
-from .simulation import LocalSimulation
+from .simulation import DEFAULT_RENDER_BACKEND, LocalSimulation
 from .vr import SteamVRController
 
 logger = logging.getLogger(__name__)
@@ -267,7 +267,7 @@ def main() -> None:
     """Parse local-only controls; autonomous motion always requires P."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--render-backend", default="gpu")
+    parser.add_argument("--render-backend", default=DEFAULT_RENDER_BACKEND)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--record", type=Path)
     parser.add_argument("--reply-ttl", type=float, default=10)

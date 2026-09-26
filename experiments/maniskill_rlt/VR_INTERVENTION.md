@@ -24,7 +24,7 @@ The display is a local OpenCV two-camera window, not a head-tracked stereoscopic
 
 ## Check Windows Simulation
 
-The RTX 4060 8 GB does not load VLA weights and is a reasonable candidate for single-environment rendering. Actual throughput depends on the CPU, graphics driver, and concurrent SteamVR workload. The official matrix supports CPU simulation and rendering on Windows, not GPU simulation. This client fixes `num_envs=1` and `sim_backend=physx_cpu`; do not substitute WSL for native Windows graphics. [ManiSkill system support](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/installation.html#system-support)
+The RTX 4060 8 GB does not load VLA weights and is a reasonable candidate for single-environment rendering. Actual throughput depends on the CPU, graphics driver, and concurrent SteamVR workload. The official matrix supports CPU simulation and rendering on Windows, not GPU simulation. This client fixes `num_envs=1` and `sim_backend=physx_cpu`. It defaults to `render_backend=cpu` on Windows to avoid SAPIEN 3.0.1's CUDA image-interoperability path, while Linux keeps `gpu`. Do not substitute WSL for native Windows graphics. [ManiSkill system support](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/installation.html#system-support)
 
 SAPIEN 3.0.1 publishes a `cp311-win_amd64` wheel. Availability is not proof of compatibility on this laptop. [SAPIEN release files](https://pypi.org/project/sapien/3.0.1/#files)
 
@@ -42,7 +42,7 @@ $PY = ".\.venv-vr\Scripts\python.exe"
 & $PY -m toolkits.rlt_vr.preflight --probe sim --steps 20
 ```
 
-This checks the actual peg-insertion task, both cameras, and IK before executing 20 arm-hold steps. It neither opens a window nor contacts the server. A successful run reports `PASS` and step timings. If Windows wheels, Vulkan, or Pinocchio fail, retain the full error. Changing simulator versions requires a new regression check, not an implicit claim of baseline parity.
+This checks the actual peg-insertion task, both cameras, and IK before executing 20 arm-hold steps. It neither opens a window nor contacts the server. A successful run reports `PASS` and step timings. The client solves Panda IK with ManiSkill's pinned `pytorch_kinematics` dependency. Keep Pinocchio out of this Windows environment because its LLVM OpenMP runtime cannot safely share this process with PyTorch's Intel OpenMP runtime. If a wheel or Vulkan fails, retain the full error. Changing simulator versions requires a new regression check, not an implicit claim of baseline parity.
 
 ## Check PICO Input and Manual Control
 
