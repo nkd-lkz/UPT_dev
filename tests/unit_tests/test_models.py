@@ -22,7 +22,6 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -894,31 +893,10 @@ class _FakeEnv:
         return "obs", {}
 
 
-# Mock gymnasium and its transitive imports for unit-test environments that
-# do not install the embodied extras. A minimal gym.Wrapper shim is enough
-# because InsertDelay only delegates to self.env.
-
-
-class _FakeGymEnv:
-    pass
-
-
-class _FakeGymWrapper:
-    def __init__(self, env):
-        self.env = env
-
-
-_fake_gym = MagicMock()
-_fake_gym.Env = _FakeGymEnv
-_fake_gym.Wrapper = _FakeGymWrapper
-
-if "gymnasium" not in sys.modules:
-    sys.modules["gymnasium"] = _fake_gym
-if "imageio" not in sys.modules:
-    sys.modules["imageio"] = MagicMock()
-
-
 def _delayed_env(delay: float):
+    # Global import stubs poison later ManiSkill imports in the same test run.
+    pytest.importorskip("gymnasium")
+    pytest.importorskip("imageio")
     from rlinf.envs.wrappers import InsertDelay
 
     return InsertDelay(

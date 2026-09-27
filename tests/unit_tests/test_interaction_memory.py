@@ -414,6 +414,66 @@ def test_real_wrapper_records_terminal_prefix_before_reset(
         )
 
 
+def test_hidden_dynamics_probe_preserves_pair_splits_and_masks():
+    from toolkits.rlt.probe_memory_dynamics import build_splits, mask_memory, pair_split
+
+    assert [pair_split(i) for i in (0, 31, 32, 39, 40)] == [
+        "train",
+        "train",
+        "validation",
+        "validation",
+        "test",
+    ]
+    trajectories = []
+    for pair in (0, 32, 40):
+        for stiffness in (250, 1000):
+            trajectories.append(
+                {
+                    "pair": pair,
+                    "split": pair_split(pair),
+                    "stiffness": stiffness,
+                    "states": torch.zeros(61, 9),
+                    "actions": torch.zeros(61, 8),
+                }
+            )
+    splits = build_splits(trajectories)
+    for batch in splits.values():
+        assert "stiffness" not in batch
+        assert not mask_memory(batch, "none")["memory_valid"].any()
+        assert not mask_memory(batch, "recent")["memory_valid"][:, 4:].any()
+        assert not mask_memory(batch, "archive")["memory_valid"][:, :4].any()
+        assert batch["memory_valid"].any()
+    assert not set(splits["train"]["episode"].tolist()) & set(
+        splits["test"]["episode"].tolist()
+    )
+    trajectories[0]["split"] = "test"
+    with pytest.raises(ValueError, match="crosses"):
+        build_splits(trajectories)
+
+
+def test_empirical_response_uses_completed_commands_not_future_labels():
+    from toolkits.rlt.probe_memory_dynamics import response_summary
+
+    c = InteractionMemoryConfig()
+    memory = InteractionMemory(c)
+    memory.begin_attempt("test")
+    commands = torch.zeros(10, 8)
+    commands[:, :7] = 0.1
+    start = torch.zeros(9)
+    end = start.clone()
+    end[:7] = 0.05
+    memory.append_completed(start, commands, end)
+    obs = {k: v.unsqueeze(0) for k, v in memory.snapshot(end).items()}
+    summary = response_summary(obs)
+    torch.testing.assert_close(summary[:, :7], torch.full((1, 7), 0.005 / 0.0101))
+    obs["target"] = torch.full((1, 9), float("nan"))
+    torch.testing.assert_close(summary, response_summary(obs))
+    obs["memory_events"][~obs["memory_valid"]] = float("nan")
+    torch.testing.assert_close(summary, response_summary(obs))
+    obs["memory_valid"][:] = False
+    assert torch.count_nonzero(response_summary(obs)) == 0
+
+
 def test_offline_probe_uses_past_only_evidence():
     from toolkits.rlt.probe_interaction_memory import episode_examples
 

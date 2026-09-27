@@ -1,6 +1,6 @@
 # Interaction Memory: Pilot Results and Acceptance
 
-This record reports the actual 2026-09-26 experiments: GPU rollout, TD updates and checkpoint resume now work, but faster RLT convergence has not been demonstrated. Read the method first, then separate engineering checks from evidence of benefit. [中文](PILOT_RESULTS.zh-CN.md)
+This record reports the actual 2026-09-26–27 experiments: GPU rollout, TD updates and checkpoint resume now work, but faster RLT convergence has not been demonstrated. Read the method first, then separate engineering checks from evidence of benefit. [中文](PILOT_RESULTS.zh-CN.md)
 
 ## How Memory Extends RLT
 
@@ -50,6 +50,37 @@ The no-memory control had the same architecture with context zeroed. Complete ep
 There is **no consistent benefit across seeds**. Shuffling hurts, showing sensitivity to history, but also creates mismatched inputs; it does not establish useful causal reasoning. Increasing the bounded budget still gave no stable advantage, so the negative results are retained without further tuning to this validation set. Both rounds are exploratory validation, not independent final testing.
 
 A hypothesis is that current joints and commands already explain much of the change in successful demonstrations under one controller. The next experiment should reserve new test episodes and vary hidden dynamics or use failure/recovery data, comparing no memory, recent history and retrieved history. Successful demonstrations alone cannot establish cross-task experience transfer.
+
+## Hidden Dynamics and the Reader Bottleneck
+
+On 2026-09-27, `toolkits/rlt/probe_memory_dynamics.py` separated information availability from the network's ability to use it. Real single-environment ManiSkill runs used CPU physics, scene resources isolated to physical GPU 2, and 10 Hz control. Each paired seed began at exactly matching joint states and executed the same 120 commands, changing only Panda arm PD stiffness between 250 and 1000. Stiffness never entered model inputs; outcomes came from actual physics.
+
+Collection produced 56 pairs, 112 trajectories and 13440 control ticks. Command/scene seeds 0–31 train, 32–39 validate and 40–55 test; both stiffness conditions of a seed stay together. This yields 768/192/384 ten-tick windows. Histories are read before appending each outcome. Models are selected only by validation error, with 600 updates and seeds 2026/2027/2028. These diagnose joint response, not insertion-task RL.
+
+| Method | Test MSE, Mean Over Three Seeds | Test MSE After At Least Four Completed Chunks |
+|---|---|---|
+| No memory, same-size prediction head | 0.00018326 | 0.00019090 |
+| Recent four only | 0.00018306 | 0.00019007 |
+| Retrieved archive only | 0.00018344 | 0.00019116 |
+| Recent plus archive | 0.00018294 | 0.00018977 |
+| Explicit response statistics as MLP context | 0.00018527 | 0.00018678 |
+| Direct fixed empirical response, no training | 0.00007389 | 0.00001657 |
+
+Learned-network differences remain too small to claim consistent benefit. The fixed-form diagnostic uses only completed evidence: let `u = 0.1 * sum(executed joint commands)` be cumulative commanded displacement; estimate each arm joint's `g = sum(u * observed change) / (sum(u²) + 1e-4)` and predict change with `g * cumulative new command`. It handles seven arm joints, predicts zero gripper change, and returns zero without history. It uses the known control-interface scale, not hidden stiffness or future labels.
+
+Historical evidence therefore contains extractable response information in this experiment. Neither the attention reader nor concatenating statistics into an MLP automatically exploits it. The direct formula remains a diagnostic, not an actor or safety constraint, and is not inserted into production defaults. Mostly small random joint motions do not establish contact understanding, recovery or task transfer. Statistics and formula baselines were added after the initial diagnostic, so the comparison is exploratory; stronger claims require new sealed task/dynamics tests and equal-budget online RL comparisons.
+
+NAS artifacts are `research/zeva_hidden_dynamics_20260927`, `research/zeva_hidden_probe_20260927`, `research/zeva_response_probe_20260927` and `research/zeva_empirical_audit_20260927`. `collect` requires the full GPU 2 UUID, idle checks and the existing headless Vulkan environment; `fit` and `audit` are CPU-only. All outputs must be new directories:
+
+```bash
+python -m toolkits.rlt.probe_memory_dynamics collect --output NEW_DATA
+CUDA_VISIBLE_DEVICES='' python -m toolkits.rlt.probe_memory_dynamics fit --data NEW_DATA --output NEW_FIT --updates 600
+CUDA_VISIBLE_DEVICES='' python -m toolkits.rlt.probe_memory_dynamics audit --data NEW_DATA --output NEW_AUDIT
+```
+
+Before collection, use the existing GPU-2 smoke Vulkan loader/ICD setup and set `CUDA_VISIBLE_DEVICES=GPU-4662787b-485a-0e8f-e4b2-dd47352ed69c`; do not overlap another GPU 2 job. The tool verifies CUDA UUID and pins Vulkan PCI while physics remains on CPU. New tests cover paired splits, nonmutating history masks, exclusion of hidden parameters, and response formulas ignoring future labels. Production online memory architecture, reward and exploration settings remain unchanged.
+
+The combined CPU regression on 2026-09-27 reports **197 passed, 1 skipped, 1 deselected** across `test_interaction_memory.py`, `test_models.py` and `test_data.py`. An initial combined run exposed collection-time global Gymnasium stubs in the model tests, which broke eight ManiSkill imports. The delay tests now use the installed optional dependency or skip when unavailable, without replacing `sys.modules` globally. The same combined run then passed. The remaining skip and deselection have the baseline reasons described above; no runtime dependencies were changed.
 
 ## Reproduce and Locate Artifacts
 
