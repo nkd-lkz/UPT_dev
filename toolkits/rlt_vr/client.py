@@ -100,7 +100,12 @@ def run(args: argparse.Namespace) -> None:
     if args.record is not None:
         recorder = TransitionRecorder(
             args.record,
-            {"model_id": model_id, "seed": args.seed, "yaw_degrees": args.yaw_degrees},
+            {
+                "model_id": model_id,
+                "seed": args.seed,
+                "yaw_degrees": args.yaw_degrees,
+                "max_episode_steps": args.max_episode_steps,
+            },
         )
     env = None
     vr = None
@@ -109,7 +114,7 @@ def run(args: argparse.Namespace) -> None:
     operator = OperatorControl()
     gate = operator.gate
     generation, submitted = -1, 0.0
-    request_id, episode = 0, 0
+    request_id, episode, episode_steps = 0, 0, 0
     anchor_vr = anchor_tcp = None
     gripper_command = 1.0
     trigger_was_down = False
@@ -121,7 +126,11 @@ def run(args: argparse.Namespace) -> None:
     was_valid = True
     status = "PAUSED: P=policy, grip=human, Space=pause, R=reset, Q=quit"
     try:
-        env = LocalSimulation(args.render_backend, args.seed)
+        env = LocalSimulation(
+            args.render_backend,
+            args.seed,
+            args.max_episode_steps,
+        )
         if not args.no_vr:
             vr = SteamVRController(
                 args.clutch_button,
@@ -134,10 +143,11 @@ def run(args: argparse.Namespace) -> None:
         last_step = last_loop = last_log = time.monotonic()
         logger.info(
             "Control ready: scale=%.2f max_translation=%.3fm "
-            "max_rotation=%.1fdeg stall_timeout=%.1fs",
+            "max_rotation=%.1fdeg episode_steps=%d stall_timeout=%.1fs",
             args.translation_scale,
             args.max_displacement,
             args.max_rotation_degrees,
+            args.max_episode_steps,
             args.stall_timeout,
         )
         while True:
@@ -172,6 +182,7 @@ def run(args: argparse.Namespace) -> None:
             if key == ord("r"):
                 operator.reset()
                 episode += 1
+                episode_steps = 0
                 observation = env.reset(args.seed + episode)
                 anchor_vr = anchor_tcp = None
                 last_mapping = None
@@ -310,6 +321,7 @@ def run(args: argparse.Namespace) -> None:
                 if action is not None:
                     step_started = time.monotonic()
                     next_obs, reward, terminated, truncated = env.step(action)
+                    episode_steps += 1
                     last_step_ms = (time.monotonic() - step_started) * 1000
                     last_action = action.copy()
                     if recorder is not None:
@@ -327,11 +339,24 @@ def run(args: argparse.Namespace) -> None:
                     observation = next_obs
                     if terminated or truncated:
                         operator.finish()
-                        status = (
-                            f"Episode ended (reward={reward}); R starts next episode"
-                        )
+                        reasons = []
+                        if terminated:
+                            reasons.append("task terminal")
+                        if truncated:
+                            reasons.append(
+                                f"time limit at {episode_steps}/{args.max_episode_steps}"
+                            )
+                        reason = " + ".join(reasons)
+                        status = f"Episode ended: {reason}; R resets"
                         logger.info(
-                            "Episode %d ended with reward %.3f", episode, reward
+                            "Episode %d ended: terminated=%s truncated=%s "
+                            "steps=%d/%d reward=%.3f",
+                            episode,
+                            terminated,
+                            truncated,
+                            episode_steps,
+                            args.max_episode_steps,
+                            reward,
                         )
                 last_step = now
             if now - last_log >= args.log_interval:
@@ -393,6 +418,7 @@ def main() -> None:
     parser.add_argument("--translation-scale", type=float, default=0.5)
     parser.add_argument("--max-displacement", type=float, default=0.15)
     parser.add_argument("--max-rotation-degrees", type=float, default=30)
+    parser.add_argument("--max-episode-steps", type=int, default=100)
     parser.add_argument("--stall-timeout", type=float, default=2.0)
     parser.add_argument("--log-interval", type=float, default=1.0)
     parser.add_argument("--manual-only", action="store_true")
@@ -410,6 +436,8 @@ def main() -> None:
         parser.error("--max-displacement must be in (0, 0.3] meters")
     if not 0 < args.max_rotation_degrees <= 90:
         parser.error("--max-rotation-degrees must be in (0, 90]")
+    if not 1 <= args.max_episode_steps <= 10000:
+        parser.error("--max-episode-steps must be in [1, 10000]")
     if not 0.5 <= args.stall_timeout <= 10:
         parser.error("--stall-timeout must be in [0.5, 10] seconds")
     if not 0.2 <= args.log_interval <= 10:

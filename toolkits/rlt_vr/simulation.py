@@ -80,7 +80,10 @@ class LocalSimulation:
     """Own a local Panda environment and its CPU inverse-kinematics model."""
 
     def __init__(
-        self, render_backend: str = DEFAULT_RENDER_BACKEND, seed: int = 0
+        self,
+        render_backend: str = DEFAULT_RENDER_BACKEND,
+        seed: int = 0,
+        max_episode_steps: int = 100,
     ) -> None:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
@@ -93,8 +96,12 @@ class LocalSimulation:
 
         register_rlinf_peg_insertion_side_variants()
         allow_pci_render_backend()
+        if max_episode_steps <= 0:
+            raise ValueError("max_episode_steps must be positive")
+        self.max_episode_steps = max_episode_steps
         self.env = gym.make(
             ENV_ID,
+            max_episode_steps=max_episode_steps,
             num_envs=1,
             robot_uids=PANDA_WIDE_WRISTCAM_UID,
             obs_mode="rgb",
@@ -164,8 +171,9 @@ class LocalSimulation:
     def reset(self, seed: int) -> dict:
         """Reset the episode; rebuild IK if ManiSkill reconfigures the scene."""
         backend = self.render_backend
+        max_episode_steps = self.max_episode_steps
         self.env.close()
-        self.__init__(backend, seed)
+        self.__init__(backend, seed, max_episode_steps)
         return self.observation()
 
     @property

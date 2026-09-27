@@ -50,7 +50,7 @@ Once simulation works, connect PICO Business Streaming and SteamVR and verify th
 
 ```powershell
 & $PY -m toolkits.rlt_vr.preflight --probe vr --steps 60
-& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001 --log-interval 1
+& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001 --max-episode-steps 1000 --log-interval 1
 ```
 
 The probe reports tracking validity, the button bitmask, grip/trigger state, analog `trigger_value`, and position. Holding the side grip must set `grip=True`, and pressing the index trigger must set `trigger=True` or raise `trigger_value`. Tracking should remain valid while moving. The client accepts `--clutch-button` and `--trigger-button` to override defaults 2 and 33; it also discovers a trigger axis advertised by SteamVR and treats values at or above `--trigger-threshold 0.6` as pressed. Never bypass the validity check to make the robot move.
@@ -69,6 +69,8 @@ The probe reports tracking validity, the button bitmask, grip/trigger state, ana
 Check all translation and rotation directions in free space before attempting grasping. OpenVR right/up/back maps to robot forward/left/up; `--yaw-degrees` adjusts standing orientation. IK is not collision avoidance and does not guarantee stable contact. These limits are for simulation debugging, not real-robot safety.
 
 The terminal prints one telemetry record per second with control ownership, tracking, raw buttons, analog trigger, requested/applied relative motion, the largest arm command, gripper command, simulation-step time, and display-loop time. The same button and timing summary appears on the camera window. Reaching a relative-motion bound intentionally holds the target and reports `Motion limit reached`; release grip, move the controller back to a comfortable pose, and hold grip again to create a new anchor. For a larger simulation workspace, use an explicit bound up to 30 cm, for example `--max-displacement 0.25`; keep the default until every direction is calibrated.
+
+The registered training task ends after 100 control steps, which is about ten seconds of executed motion at 10 Hz. Manual calibration uses `--max-episode-steps 1000` to provide about 100 seconds without changing control frequency or model inputs. The client reports `terminated` and `truncated` separately: task success causes termination, while reaching this wrapper limit causes truncation. Press `R` after either event. Keep the baseline value 100 when comparing task-level evaluation results.
 
 The display watchdog starts after simulator and SteamVR initialization and pauses control only when one loop exceeds `--stall-timeout 2.0`. After a watchdog, tracking, or IK fault, release grip once to clear the safety latch. Raising the timeout up to ten seconds helps diagnose a slow Windows renderer, but it also delays fault detection and is not a real-robot setting.
 
