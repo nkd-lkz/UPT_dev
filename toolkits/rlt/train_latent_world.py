@@ -104,7 +104,7 @@ def train(config_path: str, *, device: str, resume: str | None = None) -> Path:
             cfg.cache_dir,
             horizons=c.horizons,
             split=split,
-            seed=int(cfg.seed),
+            seed=int(cfg.get("split_seed", cfg.seed)),
             validation_fraction=float(cfg.validation_fraction),
         )
         for split in ("train", "validation")

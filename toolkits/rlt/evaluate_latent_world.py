@@ -15,6 +15,44 @@ from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
 from toolkits.rlt.train_latent_world import device_batch
 
 
+def episode_error_summary(episode_ids: torch.Tensor, fields: dict) -> dict:
+    """Summarize independent trajectories rather than treating frames as trials.
+
+    The paired bootstrap is descriptive uncertainty over the sampled episodes,
+    not a test of control improvement or a correction for repeated model tuning.
+    """
+    rows = {}
+    for episode in episode_ids.unique(sorted=True).tolist():
+        mask = episode_ids == episode
+        rows[str(episode)] = {
+            key: float(values[mask].mean())
+            for key, values in fields.items()
+            if key
+            in ("cosine_error", "persistence_cosine_error", "shuffled_cosine_error")
+        }
+    if not rows:
+        return {
+            "episodes": {},
+            "paired_persistence_gain_mean": None,
+            "paired_persistence_gain_ci95": None,
+        }
+    gains = torch.tensor(
+        [r["persistence_cosine_error"] - r["cosine_error"] for r in rows.values()]
+    )
+    interval = None
+    if len(gains) >= 2:
+        generator = torch.Generator().manual_seed(1729)
+        samples = torch.randint(len(gains), (2000, len(gains)), generator=generator)
+        interval = torch.quantile(
+            gains[samples].mean(1), torch.tensor([0.025, 0.975])
+        ).tolist()
+    return {
+        "episodes": rows,
+        "paired_persistence_gain_mean": float(gains.mean()),
+        "paired_persistence_gain_ci95": interval,
+    }
+
+
 @torch.no_grad()
 def evaluate_checkpoint(
     checkpoint: str,
@@ -39,7 +77,7 @@ def evaluate_checkpoint(
         cache_dir,
         horizons=model.config.horizons,
         split="all" if independent_test else "validation",
-        seed=settings["seed"],
+        seed=settings.get("split_seed", settings["seed"]),
         validation_fraction=settings["validation_fraction"],
     )
     if dataset.manifest["feature_contract"] != model.feature_contract:
@@ -85,6 +123,7 @@ def evaluate_checkpoint(
                 "proprio_mae",
                 "latent_mse",
                 "disagreement",
+                "episode_index",
             )
         }
         for h in model.config.horizons
@@ -99,6 +138,13 @@ def evaluate_checkpoint(
                 for i in range(len(batch["actions"]))
             ]
         ).to(device)
+        episode_indices = torch.tensor(
+            [
+                episode
+                for episode, _ in dataset.index[offset : offset + len(batch["actions"])]
+            ],
+            device=device,
+        )
         offset += len(batch["actions"])
         for i, horizon in enumerate(model.config.horizons):
             predictions, delta = model(batch, batch["actions"], horizon)
@@ -120,12 +166,20 @@ def evaluate_checkpoint(
                 .mean(-1),
                 "latent_mse": (predictions.mean(0) - target).square().mean(-1),
                 "disagreement": predictions.var(0, unbiased=False).mean(-1),
+                "episode_index": episode_indices,
             }
             for key, value in values.items():
                 records[horizon][key].append(value[valid].cpu())
     results = {}
     for horizon, fields in records.items():
         fields = {key: torch.cat(values) for key, values in fields.items()}
+        episode_indices = fields.pop("episode_index")
+        episode_summary = episode_error_summary(episode_indices, fields)
+        # The public report names dataset episode IDs, not internal positions.
+        episode_summary["episodes"] = {
+            str(dataset.episode_ids[int(k)]): v
+            for k, v in episode_summary["episodes"].items()
+        }
         summary = {
             key: float(value.mean()) if len(value) else None
             for key, value in fields.items()
@@ -141,6 +195,7 @@ def evaluate_checkpoint(
             float(torch.quantile(uncertainty, 0.95)) if len(uncertainty) else None
         )
         summary["valid_targets"] = len(error)
+        summary["episode_summary"] = episode_summary
         results[str(horizon)] = summary
     return {
         "split": "independent_test"

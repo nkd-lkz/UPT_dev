@@ -44,6 +44,22 @@ These results support residual parameterization under this budget and sensitivit
 
 Prediction-head disagreement is not calibrated safety confidence. Original validation ten-tick uncertainty/error correlation was about -0.0017; residual independent-test correlation was about 0.4644, still uncalibrated. Exploration bounds remain disabled; these values do not automatically constrain actions.
 
+## Three Seeds With a Fixed Split
+
+On 2026-09-27, six bounded fits tested whether the earlier result depended on one initialization. Training previously shared one `seed` between initialization and episode splitting; optional `split_seed` now separates them, preserving old behavior when omitted. The repeat fixed `split_seed=2026`, used initialization/sampling seeds 2026/2027/2028, and trained each variant for 300 updates. Test episodes 12–23 remain training-disjoint, but have already been inspected: this is replication, not a newly sealed final test.
+
+| Horizon | Persistence | Direct: Mean ± Across-Seed SD | Residual: Mean ± Across-Seed SD |
+|---|---|---|---|
+| 1 | 0.012456 | 0.073905 ± 0.000946 | 0.010605 ± 0.000108 |
+| 5 | 0.071462 | 0.073711 ± 0.001061 | 0.029521 ± 0.000537 |
+| 10 | 0.158003 | 0.073513 ± 0.001411 | 0.043414 ± 0.002442 |
+
+`evaluate_latent_world.py` additionally records per-episode errors and episode-level paired bootstrap intervals rather than treating adjacent frames as independent trials. Residual improvement over persistence has positive intervals at all three horizons for all three seeds. This supports small-budget prediction stability, not online control or transfer. Intervals do not correct for prior exploration or multiple comparisons.
+
+Run `python -m toolkits.rlt.repeat_latent_pilot --config TRAIN_CONFIG --test-cache TEST_CACHE --output NEW_OUTPUT --device cuda:0 --steps 300`. GPU mode requires `CUDA_VISIBLE_DEVICES` to equal physical GPU 2's full UUID and verifies single-device visibility and idle memory before loading. CPU is the default. Configurations, checkpoints and per-episode results live under NAS `research/flare_repeat_20260927`; no large artifacts are committed. Model/data CPU regression reports **190 passed, 1 skipped, 1 deselected**.
+
+An additional broad run including all of `test_worker.py` failed six Ray worker-import/logging integration cases, including `ModuleNotFoundError: test_worker`; its full result was 223 passed, 1 skipped, 1 deselected, 6 failed. It is not reported as a passing full suite. Subsequent regression was scoped to model/data tests without rerunning unrelated cluster-attaching worker integration. Original GPU 0/1 processes remained alive and Stage 1 advanced beyond step 1747. No scheduler changes hide those failures.
+
 ## Online Integration and Regression
 
 The original sidecar completed two Stage 2 global steps with 50/54 `latent_world.*` tensors changing. The four unchanged tensors belong to the offline-only BC head, as expected. The residual sidecar also passed the real GPU smoke. The launcher now audits adjacent checkpoints rather than trusting exit codes; its overlay enforces FSDP `use_orig_params=True` for name-based optimizer partitioning.

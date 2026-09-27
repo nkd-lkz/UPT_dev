@@ -1458,6 +1458,25 @@ def test_latent_world_policy_checkpoint_contains_all_rollout_sync_parameters(tmp
         RLTMLPPolicy(9, 3, 2, 3, latent_world=cfg)
 
 
+def test_latent_world_episode_uncertainty_does_not_count_frames_as_trials():
+    from toolkits.rlt.evaluate_latent_world import episode_error_summary
+
+    # The first episode has three frames; it still receives one episode vote.
+    episodes = torch.tensor([0, 0, 0, 1])
+    report = episode_error_summary(
+        episodes,
+        {
+            "cosine_error": torch.tensor([0.0, 0.0, 0.0, 0.4]),
+            "persistence_cosine_error": torch.tensor([0.1, 0.1, 0.1, 0.1]),
+            "shuffled_cosine_error": torch.ones(4),
+        },
+    )
+    assert report["paired_persistence_gain_mean"] == pytest.approx(-0.1)
+    low, high = report["paired_persistence_gain_ci95"]
+    assert low < 0 < high
+    assert len(report["episodes"]) == 2
+
+
 def test_latent_world_residual_starts_at_persistence():
     from rlinf.models.embodiment.modules.rlt_latent_world import (
         LatentWorldConfig,

@@ -2836,7 +2836,10 @@ def test_latent_world_online_replay_uses_whole_executed_chunk_and_masks_done():
         replay_world_batch(batch, cfg)
 
 
-def test_latent_world_stage1b_synthetic_checkpoint_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("split_seed", [None, 2027])
+def test_latent_world_stage1b_synthetic_checkpoint_resumes(
+    tmp_path, monkeypatch, split_seed
+):
     import toolkits.rlt.train_latent_world as trainer
     from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
     from toolkits.rlt.train_latent_world import train
@@ -2874,6 +2877,8 @@ def test_latent_world_stage1b_synthetic_checkpoint_resumes(tmp_path, monkeypatch
         }
     )
     config_path = tmp_path / "config.yaml"
+    if split_seed is not None:
+        cfg.split_seed = split_seed
     OmegaConf.save(cfg, config_path)
     save = trainer.atomic_torch_save
 
@@ -2889,6 +2894,16 @@ def test_latent_world_stage1b_synthetic_checkpoint_resumes(tmp_path, monkeypatch
     from toolkits.rlt.evaluate_latent_world import evaluate_checkpoint
 
     diagnostics = evaluate_checkpoint(str(best), str(cache_dir), batch_size=4)
+    from rlinf.data.datasets.rlt_latent import RLTLatentDataset
+
+    expected = RLTLatentDataset(
+        cache_dir,
+        horizons=(1, 3),
+        split="validation",
+        seed=split_seed if split_seed is not None else cfg.seed,
+        validation_fraction=cfg.validation_fraction,
+    )
+    assert diagnostics["episodes"] == expected.episode_ids
     assert diagnostics["horizons"]["3"]["valid_targets"] > 0
     assert diagnostics["split"] == "validation_not_independent_test"
     with pytest.raises(ValueError, match="overlap"):

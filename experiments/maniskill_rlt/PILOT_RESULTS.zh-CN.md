@@ -44,6 +44,22 @@ Stage 1B 用真实示范学习预测器，并保留原来的 anchor/BC 辅助项
 
 预测头分歧与误差的相关性不是安全置信度。原版验证集 10 步相关性约为 -0.0017；增量版独立测试约 0.4644，仍未经校准。因此探索范围约束保持关闭，不用这些数值自动收紧探索。
 
+## 固定划分的三种子复测
+
+2026-09-27 新增了固定数据划分的重复实验，检验之前的结果是否依赖一次初始化。原训练入口把随机初始化和数据划分共用 `seed`，现在新增可选 `split_seed`；省略时保留旧行为。复测固定 `split_seed=2026`，初始化与采样使用 2026/2027/2028，每个种子分别训练直接预测和增量预测 300 步，共 6 个小模型。测试仍用未参与训练的 episodes 12–23；此前已分析过这批轨迹，因此属于重复验证，不是新封存的最终测试。
+
+| 预测跨度 | 保持当前状态 | 直接预测：均值 ± 跨种子标准差 | 增量预测：均值 ± 跨种子标准差 |
+|---|---|---|---|
+| 1 | 0.012456 | 0.073905 ± 0.000946 | 0.010605 ± 0.000108 |
+| 5 | 0.071462 | 0.073711 ± 0.001061 | 0.029521 ± 0.000537 |
+| 10 | 0.158003 | 0.073513 ± 0.001411 | 0.043414 ± 0.002442 |
+
+`evaluate_latent_world.py` 现在另存逐 episode 误差和以 episode 为单位的配对 bootstrap 区间，避免把相邻帧当作独立实验。三个种子的增量版在三个 horizon 上，相对保持当前状态的 episode 平均改善区间均为正。这支持小预算预测结果的稳定性，不证明在线控制或跨任务迁移；区间也未校正先前探索和多重比较。
+
+复测入口为 `python -m toolkits.rlt.repeat_latent_pilot --config TRAIN_CONFIG --test-cache TEST_CACHE --output NEW_OUTPUT --device cuda:0 --steps 300`。GPU 模式要求 `CUDA_VISIBLE_DEVICES` 等于物理 GPU 2 的完整 UUID，并在加载前验证唯一可见设备及空闲显存；CPU 为默认模式。全部配置、模型与逐 episode 结果保存在 NAS `research/flare_repeat_20260927`，没有提交大文件。新增 CPU 回归共 **190 passed、1 skipped、1 deselected**（`test_models.py` 与 `test_data.py`）。
+
+一次额外扩大到整个 `test_worker.py` 的检查出现 6 项失败，涉及 Ray worker 无法导入测试模块 `test_worker` 及日志集成；该运行报告 223 passed、1 skipped、1 deselected、6 failed，不能表述为全量通过。之后限定为模型与数据回归，没有重试会自动连接集群的无关 worker 集成测试。GPU 0/1 原训练进程保持运行，Stage 1 继续超过 step 1747。没有改 scheduler 来掩盖这些失败。
+
 ## 在线链路与回归验证
 
 原版 sidecar 的 Stage 2 smoke 完成 2 个全局 step，50/54 个 `latent_world.*` 张量更新。4 个不变张量属于仅离线使用的 BC head，符合预期。增量 sidecar 也通过相同的真实 GPU smoke。launcher 现在审计相邻 checkpoint 的模块更新，不再只看退出码；overlay 强制 FSDP `use_orig_params=True`，保证按名称分配 optimizer 参数。
