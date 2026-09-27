@@ -21,12 +21,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 from .control import MappedTarget, OperatorControl, map_relative_target
+from .online_transport import TransitionUploader
 from .protocol import CAMERAS, CONTRACT, encode_image, request
 from .simulation import DEFAULT_RENDER_BACKEND, LocalSimulation
 from .vr import SteamVRController
@@ -89,6 +91,11 @@ def run(args: argparse.Namespace) -> None:
 
     token = os.environ.get("RLT_VR_TOKEN", "")
     model_id = "manual-only"
+    online = getattr(args, "online", False)
+    uploader = None
+    session = uuid.uuid4().hex
+    sequence = 0
+    behavior_version = -1
     if not args.manual_only:
         health = request(
             "127.0.0.1", args.port, token, {"op": "health", "request_id": 0}, 5
@@ -96,6 +103,16 @@ def run(args: argparse.Namespace) -> None:
         if health["contract"] != CONTRACT:
             raise ValueError("Server environment contract does not match this client")
         model_id = health["model_id"]
+        if online:
+            if not health.get("online") or health.get("horizon") != 1:
+                raise ValueError("--online requires the single-step online server")
+            request(
+                "127.0.0.1",
+                args.port,
+                token,
+                {"op": "begin", "request_id": 0, "session": session},
+                10,
+            )
     recorder = None
     if args.record is not None:
         recorder = TransitionRecorder(
@@ -105,6 +122,8 @@ def run(args: argparse.Namespace) -> None:
                 "seed": args.seed,
                 "yaw_degrees": args.yaw_degrees,
                 "max_episode_steps": args.max_episode_steps,
+                "online": online,
+                "session": session,
             },
         )
     env = None
@@ -126,6 +145,8 @@ def run(args: argparse.Namespace) -> None:
     was_valid = True
     status = "PAUSED: P=policy, grip=human, Space=pause, R=reset, Q=quit"
     try:
+        if online:
+            uploader = TransitionUploader(args.port, token, session)
         env = LocalSimulation(
             args.render_backend,
             args.seed,
@@ -202,6 +223,12 @@ def run(args: argparse.Namespace) -> None:
                 command=command,
                 stalled=stalled,
             )
+            if uploader is not None and not uploader.ready:
+                operator.pause()
+                status = (
+                    uploader.error
+                    or "Upload queue full; paused until drained; release grip"
+                )
             if not valid:
                 status = "Tracking invalid: check SteamVR; release grip before retry"
                 if was_valid:
@@ -258,6 +285,10 @@ def run(args: argparse.Namespace) -> None:
                     if time.monotonic() - submitted <= args.reply_ttl:
                         accepted = gate.accept(generation, response["actions"])
                         if accepted:
+                            model_id = response["model_id"]
+                            behavior_version = int(
+                                response.get("metrics", {}).get("policy_version", -1)
+                            )
                             status = (
                                 f"RPC {(time.monotonic() - submitted) * 1000:.0f} ms"
                             )
@@ -278,6 +309,7 @@ def run(args: argparse.Namespace) -> None:
                     "op": "predict",
                     "request_id": request_id,
                     "contract": CONTRACT,
+                    **({"session": session} if online else {}),
                     "state": observation["state"].tolist(),
                     **{k: encode_image(observation[k]) for k in CAMERAS},
                 }
@@ -336,6 +368,22 @@ def run(args: argparse.Namespace) -> None:
                             episode,
                             model_id,
                         )
+                    if uploader is not None:
+                        uploader.submit(
+                            sequence,
+                            observation,
+                            next_obs,
+                            action=action.tolist(),
+                            reward=reward,
+                            terminated=terminated,
+                            truncated=truncated,
+                            human=gate.mode == "human",
+                            episode=episode,
+                            policy_version=-1
+                            if gate.mode == "human"
+                            else behavior_version,
+                        )
+                        sequence += 1
                     observation = next_obs
                     if terminated or truncated:
                         operator.finish()
@@ -360,6 +408,13 @@ def run(args: argparse.Namespace) -> None:
                         )
                 last_step = now
             if now - last_log >= args.log_interval:
+                if uploader is not None:
+                    logger.info(
+                        "Online learner: ack=%d pending=%d metrics=%s",
+                        uploader.accepted_sequence,
+                        uploader.queue.qsize(),
+                        uploader.metrics,
+                    )
                 if reading is not None:
                     mapping_text = "n/a"
                     if last_mapping is not None:
@@ -401,6 +456,8 @@ def run(args: argparse.Namespace) -> None:
             env.close()
         cv2.destroyAllWindows()
         pool.shutdown(wait=True, cancel_futures=True)
+        if uploader is not None:
+            uploader.close()
 
 
 def main() -> None:
@@ -423,9 +480,18 @@ def main() -> None:
     parser.add_argument("--log-interval", type=float, default=1.0)
     parser.add_argument("--manual-only", action="store_true")
     parser.add_argument(
+        "--online",
+        action="store_true",
+        help="Send executed steps to the h=1 online learner; requires --record",
+    )
+    parser.add_argument(
         "--no-vr", action="store_true", help="Explicit keyboard-only policy test"
     )
     args = parser.parse_args()
+    if args.online and (args.manual_only or args.record is None):
+        parser.error(
+            "--online requires --record and cannot be combined with --manual-only"
+        )
     if not 0 < args.reply_ttl <= 30:
         parser.error("--reply-ttl must be in (0, 30] seconds")
     if not 0 < args.trigger_threshold <= 1:

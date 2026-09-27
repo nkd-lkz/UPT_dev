@@ -50,12 +50,14 @@ class InferenceServer(socketserver.TCPServer):
         token: str,
         predict: Callable[[dict], np.ndarray],
         model_id: str,
+        dispatch: Callable[[dict], dict] | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Set RLT_VR_TOKEN to a secret of at least 32 characters")
         self.token = token
         self.predict = predict
         self.model_id = model_id
+        self.dispatch = dispatch
         super().__init__(address, _Handler)
 
 
@@ -73,6 +75,10 @@ class _Handler(socketserver.BaseRequestHandler):
             request_id = message.get("request_id")
             if type(request_id) is not int or request_id < 0:
                 raise ValueError("Invalid request id")
+            if self.server.dispatch is not None:
+                result = self.server.dispatch(message)
+                send(self.request, {**result, "ok": True, "request_id": request_id})
+                return
             if message.get("op") == "health":
                 send(
                     self.request,
@@ -101,7 +107,7 @@ class _Handler(socketserver.BaseRequestHandler):
             )
         except Exception as error:
             # Do not log request contents: they contain credentials and images.
-            logger.warning("RPC rejected: %s", type(error).__name__)
+            logger.warning("RPC rejected: %s: %s", type(error).__name__, error)
             try:
                 send(
                     self.request,
@@ -165,8 +171,8 @@ class RLTInference:
             )
             self.actor.to("cuda")
 
-    def __call__(self, observation: dict) -> np.ndarray:
-        """Return environment-normalized actions, not model-space actions."""
+    def extract(self, observation: dict) -> dict:
+        """Extract frozen RLT features for an unnormalized camera observation."""
         import torch
 
         env_obs = {
@@ -178,6 +184,14 @@ class RLTInference:
         }
         with torch.inference_mode():
             features = self.feature.extract_rlt_obs(env_obs)
+        return {key: value.detach().float().cpu() for key, value in features.items()}
+
+    def __call__(self, observation: dict) -> np.ndarray:
+        """Return environment-normalized actions, not model-space actions."""
+        import torch
+
+        features = self.extract(observation)
+        with torch.inference_mode():
             if self.actor is None:
                 actions = features["ref_chunk"]
             else:

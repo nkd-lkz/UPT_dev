@@ -1,6 +1,6 @@
 # Local Simulation and VR Takeover With Remote Inference
 
-This guide runs one ManiSkill environment, its camera display, and PICO intervention on a Windows laptop while a Linux server generates RLT actions. Verify simulation first, controller input second, and remote inference last. Online training integration follows hardware acceptance, not just a successful socket connection.
+This guide runs one ManiSkill environment, its camera display, and PICO intervention on a Windows laptop while a Linux server generates RLT actions. Verify simulation first, controller input second, and remote inference last. Then follow [single-environment online acceptance](VR_ONLINE.md) to connect the GPU 2 learner.
 
 The branch is `feature/rlt-pico-vr-intervention`, based on baseline `ff566637`, with its own worktree at `/home/luokz/rlinf_rlt/UPT_vr_dev`. It is not merged into baseline and contains no FLARE algorithm changes. Existing Stage 1 jobs and Stage 2 entrypoints are unchanged.
 
@@ -123,15 +123,15 @@ Network p95 measures only small health messages. The inference probe also includ
 
 ## Carry Intervention Data Into Stage 2
 
-The implemented loop ends with recording the transition that actually occurred. `metadata.json` identifies the environment contract; each `.npz` stores before/after images and qpos, executed action, raw reward, terminated/truncated, episode, model_id, and `human_intervention`. Pressing grip without a successful step does not produce a human-action label.
+The local loop records the transition that actually occurred. `metadata.json` identifies the environment contract; each `.npz` stores before/after images and qpos, executed action, raw reward, terminated/truncated, episode, model_id, and `human_intervention`. Pressing grip without a successful step does not produce a human-action label.
 
-These files are not direct baseline replay inputs. The client uses individual steps, raw sparse rewards, and CPU physics, whereas baseline has chunk replay, RLT features, phase routing, and its own reward/termination handling. Online integration needs a separate tested change:
+The new `--online` mode uploads executed transitions to a standalone single-step learner; follow [single-environment online acceptance](VR_ONLINE.md) for commands and limits. Files are still not direct inputs for formal ten-step baseline replay. Integration into that path must additionally validate:
 
 1. Split chunks at takeover boundaries and carry valid lengths/masks for partial chunks without fabricating actions.
 2. Compute start/end features with the same frozen model and retain executed actions, per-step human masks, and policy versions.
 3. Match reward accumulation, discounts, success/termination handling, time-limit bootstrap, and final observations before resets.
 4. Deliver executed transitions to the actual learner training path. Test any human-sample sampling or imitation loss as a separate algorithmic change.
-5. Complete Windows/PICO acceptance before considering a baseline merge. This inference-only server does not claim to train online from human samples.
+5. Complete Windows/PICO acceptance before considering a baseline merge. `server.py` remains inference-only; `online_server.py` owns online updates. Server-side scripted takeover does not substitute for headset acceptance.
 
 ## Ubuntu Fallback and Acceptance Scope
 

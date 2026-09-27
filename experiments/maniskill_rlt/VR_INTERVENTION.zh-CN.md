@@ -1,6 +1,6 @@
 # 本地仿真与 VR 接管，服务器推理
 
-本指南帮助你在 Windows 笔记本上运行单个 ManiSkill 环境、显示相机画面并用 PICO 手柄接管动作，同时让服务器加载 RLT checkpoint 生成动作。先验证本地仿真，再验证手柄，最后连接推理服务；全部通过后才考虑接入在线训练。
+本指南帮助你在 Windows 笔记本上运行单个 ManiSkill 环境、显示相机画面并用 PICO 手柄接管动作，同时让服务器加载 RLT checkpoint 生成动作。先验证本地仿真，再验证手柄，最后连接推理服务；全部通过后按 [单环境在线验收](VR_ONLINE.zh-CN.md) 连接 GPU 2 learner。
 
 开发分支为 `feature/rlt-pico-vr-intervention`，起点是 baseline 的 `ff566637`，独立工作目录为 `/home/luokz/rlinf_rlt/UPT_vr_dev`。本分支没有合入 baseline，也不包含 FLARE 算法改动。运行中的 Stage 1 和原 Stage 2 入口保持不变。
 
@@ -125,13 +125,13 @@ $env:RLT_VR_TOKEN = [System.Net.NetworkCredential]::new("", (Read-Host "RLT VR t
 
 本次交付先封闭接管验证链路：本地决定并执行动作，然后保存实际发生的 transition。`metadata.json` 记录环境接口，逐步 `.npz` 保存前后图像、qpos、实际动作、原始 reward、terminated/truncated、episode、model_id 和 `human_intervention`。只按过接管键但没有执行成功，不会生成“人工动作”标签。
 
-这些文件还不能直接送入 baseline replay。当前客户端是单步、原始 sparse reward、CPU 仿真；baseline 使用 chunk replay、RLT 特征、阶段路由和自己的 reward/termination 处理。后续在线连接必须在独立提交中实现并测试：
+新增的 `--online` 模式已将实际 transition 上传给独立的单步 learner，具体命令和边界见 [单环境在线验收](VR_ONLINE.zh-CN.md)。这些文件仍不能直接送入正式 baseline 的 10 步 replay。后续与正式 Stage 2 合并时必须继续验证：
 
 1. 在 takeover 边界切分 chunk，为不足 10 步的片段提供有效步数和 mask，不能补假动作。
 2. 用同一冻结模型生成起止 RLT 特征；以实际执行动作构造 replay，保留逐步人工标记及 policy 版本。
 3. 对齐 reward 累积、discount、success/termination、time-limit bootstrap 和 reset 后的 final observation。
 4. 在 learner 端接收已执行 transition，确认实际训练路径消费它；加入人工样本的采样或模仿损失时单独做对照。
-5. 完成 Windows/PICO 实机验收，再讨论合入 baseline。当前服务器仅推理，没有声称在线 RL 已经接收人工样本。
+5. 完成 Windows/PICO 实机验收，再讨论合入 baseline。`server.py` 仍仅推理，新增 `online_server.py` 才包含在线更新；服务器脚本接管 smoke 不能替代真实手柄验收。
 
 ## 备用 Ubuntu 主机与验收范围
 

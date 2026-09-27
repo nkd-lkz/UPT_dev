@@ -1,0 +1,24 @@
+# A single-environment integration test, not the 10-step production baseline.
+horizon: 1
+z_dim: 2048
+proprio_dim: 9
+action_dim: 8
+reference_horizon: 10
+seed: 2026
+gamma: 0.99
+tau: 0.005
+lr: 0.0001
+batch_size: 8
+min_replay: 8
+capacity: 2048
+demo_ratio: 0.5
+critic_actor_ratio: 1
+reference_dropout: 0.5
+bc_weight: 7.0
+q_weight: 0.05
+actor_after_updates: 8
+publish_interval: 4
+max_updates: 128
+checkpoint_interval: 16
+# Match the baseline simulator's absorbing truncation convention explicitly.
+bootstrap_truncation: false

@@ -2,6 +2,30 @@
 
 This record separates server-side evidence from Windows/PICO hardware acceptance. 本记录区分服务器侧软件验证与 Windows/PICO 实机验收，不能把前者当作后者。
 
+## Online Update — 2026-09-27 / 在线更新
+
+The standalone single-step learner now passes real GPU 2 simulation/RPC/update smoke. Run instructions: [English](VR_ONLINE.md) / [中文](VR_ONLINE.zh-CN.md). 新增的是独立单步 learner，不是正式 64 环境 worker 集成；Windows/PICO 到在线 learner 的跨机器验收仍待操作者完成。
+
+Two 40-transition trials used the completed Stage 1 step1500 export, CPU physics, PyTorch IK and Vulkan on `pci:0000:e1:00.0`. The final trial is NAS `runs/vr_online/20260927_162119_1187984`, beneath `/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill`. Both exited 0. 两次均通过，最终 trial 增加了恢复后继续 optimizer 更新的检查；`result.json` 明确记录 `physical_pico_tested=false`。
+
+| Check / 检查 | Measured Result / 实测 |
+|---|---|
+| Executed transitions / 实际仿真 transition | 40; two timed-out episodes / 两个超时回合 |
+| Scripted takeover samples / 脚本接管样本 | 12; not physical human interventions / 不是真实人工操作 |
+| Critic / actor updates | 33 / 33 |
+| Published actor version / 发布版本 | 32, used for subsequent simulator actions / 已用于后续仿真动作 |
+| Actor / critic maximum weight change | 0.00355607 / 0.00254076 |
+| Duplicate upload / 重复上传 | Same sequence acknowledged without reinsertion / 未重复入库 |
+| Checkpoint resume / 恢复 | Model exact reload; nonempty optimizer states; update 33→34 on replay / 精确加载，保留 optimizer，再更新一步 |
+| Peak Torch allocation / Torch 峰值分配 | 9767.38 MiB; excludes driver/Vulkan allocations / 不含驱动及 Vulkan |
+| CPU regression / CPU 回归 | 26 passed, 2 optional hardware tests skipped |
+
+CUDA identity was checked before model allocation against physical GPU 2 UUID `GPU-4662787b-485a-0e8f-e4b2-dd47352ed69c`. Baseline GPU 0/1 PIDs 2061116/2061119 remained alive before and after; GPU 2 was released after each trial. 没有启动 Ray，没有停止或重启 baseline，没有修改共享训练环境依赖。Smoke checkpoints contain scripted intervention demonstrations and are engineering artifacts, not trained human-expert policies / smoke 权重含脚本样本，不作为人工专家训练成果。
+
+Tests cover GPU busy rejection/UUID selection, terminal and time-limit targets, executed human BC targets, actor publication, exact CPU optimizer/RNG/replay continuation, ordered/deduplicated authenticated uploads, episode continuity, and fail-closed optimizer faults. Ruff, shell syntax and whitespace checks pass. Both Sphinx trees build with zero warnings; unchanged global scans retain 61 markup and 26 symbol findings. 新 Markdown 按 `refine-docs` 与 `docs-check` 核对命令及 EN/ZH 范围；未改 public RST 页面。
+
+The following sections preserve the earlier inference-only milestone, not the current online evidence / 以下为早期仅推理阶段记录，最新状态以上文为准。
+
 ## Scope / 范围
 
 The branch adds standalone tools, tests and documentation; baseline training files are unchanged. 分支只新增独立工具、测试和文档，不修改 baseline 训练入口，也不合并 FLARE。Test date / 测试日期：2026-09-26。
@@ -51,6 +75,6 @@ The earlier Pinocchio-backed implementation passed 19 hardware-enabled tests in 
 
 Windows/PICO, campus-network p50/p95, GUI responsiveness, controller calibration, and operator intervention on the physical borrowed device remain untested. 本地硬件不可远程访问，不能声称 VR 已可用或 RTX 4060 已达到某个帧率。
 
-Native stereo VR rendering, Windows-to-Ubuntu VR input bridging, automatic baseline phase routing and online learner replay ingestion are not implemented. 当前只有本地双相机窗口、独立采集和冻结推理；不具备真机安全保证。Partial-chunk masks, reward alignment and actual learner consumption are explicit next integration gates, documented in the guide / 后续训练集成门槛见指南。
+Native stereo VR rendering, Windows-to-Ubuntu VR input bridging and automatic baseline phase routing remain unimplemented. 在线 replay 已由上文独立单步入口接通；正式 baseline 的 10 步 partial-chunk 集成仍待开发。No real-robot safety guarantee is provided / 不具备真机安全保证。
 
 The bilingual guide was checked against CLI signatures, environment/action dimensions and checkpoint loading. Sphinx checks cover the unchanged documentation trees, not these standalone Markdown pages. 本次指南按 `refine-docs` / `docs-check` 保持中英文流程和命令一致；全仓检查仍有 61 个既有 markup 提示及 26 个既有符号提示，未改动相关页面。

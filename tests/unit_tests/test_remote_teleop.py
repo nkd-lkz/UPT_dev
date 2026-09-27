@@ -44,6 +44,251 @@ from toolkits.rlt_vr.server import InferenceServer
 from toolkits.rlt_vr.vr import SteamVRController
 
 
+def test_online_gpu_guard_rejects_busy_device_and_pins_uuid(monkeypatch):
+    from toolkits.rlt_vr.gpu_guard import isolate_gpu2
+
+    monkeypatch.setattr(
+        "subprocess.check_output", lambda *a, **kw: "GPU-test, 00000000:E1:00.0, 1200"
+    )
+    with pytest.raises(RuntimeError, match="busy"):
+        isolate_gpu2()
+    monkeypatch.setattr(
+        "subprocess.check_output", lambda *a, **kw: "GPU-test, 00000000:E1:00.0, 4"
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "invalid-before-guard")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    assert isolate_gpu2() == {"uuid": "GPU-test", "render_backend": "pci:0000:e1:00.0"}
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-test"
+
+
+@pytest.fixture
+def online_config():
+    from pathlib import Path
+
+    from omegaconf import OmegaConf
+
+    config = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).parents[2] / "toolkits/rlt_vr/online_smoke.yaml")
+    )
+    config.update(
+        z_dim=8,
+        batch_size=4,
+        min_replay=2,
+        publish_interval=1,
+        actor_after_updates=1,
+        checkpoint_interval=100,
+    )
+    return config
+
+
+def online_features(config, value=0.0):
+    import torch
+
+    return {
+        "z_rl": torch.full((1, config["z_dim"]), value, requires_grad=True),
+        "proprio": torch.full((1, 9), value),
+        "ref_chunk": torch.full((1, 10, 8), 0.25),
+    }
+
+
+def online_transition(config, *, human=True, terminated=False, truncated=False):
+    return {
+        "obs": online_features(config),
+        "next_obs": online_features(config, 0.1),
+        "action": [-0.25] * 8,
+        "reward": 1.0,
+        "human": human,
+        "terminated": terminated,
+        "truncated": truncated,
+    }
+
+
+def test_online_updates_publish_and_resume_optimizer_replay_rng(
+    online_config, tmp_path
+):
+    import torch
+
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+
+    learner = OnlineLearner(online_config)
+    sample = online_transition(online_config)
+    reference, source = learner.predict(sample["obs"])
+    assert source == "reference" and reference.shape == (1, 8)
+    before = {k: v.clone() for k, v in learner.model.state_dict().items()}
+    for _ in range(4):
+        learner.observe(sample)
+    assert sample["obs"]["z_rl"].grad is None
+    assert learner.status()["human_accepted"] == 4
+    assert learner.status()["demo_sample_ratio"] == 0.5
+    action, source = learner.predict(sample["obs"])
+    assert source == "actor" and torch.isfinite(action).all()
+    for prefix in ("backbone.", "q_head."):
+        assert any(
+            not torch.equal(v, before[k])
+            for k, v in learner.model.state_dict().items()
+            if k.startswith(prefix)
+        )
+    assert all(p.grad is None for p in learner.target.parameters())
+    learner.save(tmp_path / "learner.pt", {"sequence": 3})
+    expected = learner.observe(sample)
+    resumed = OnlineLearner(online_config)
+    assert resumed.load(tmp_path / "learner.pt") == {"sequence": 3}
+    assert resumed.actor_optim.state and resumed.critic_optim.state
+    assert resumed.observe(sample) == expected
+    for key, value in learner.model.state_dict().items():
+        torch.testing.assert_close(
+            value, resumed.model.state_dict()[key], rtol=0, atol=0
+        )
+    resumed.load(tmp_path / "learner.pt")
+    assert resumed.status()["replay_size"] == 4  # reload does not append twice
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_online_terminal_target_and_human_bc_use_executed_action(
+    online_config, monkeypatch, truncated
+):
+    import torch
+    import torch.nn.functional as functional
+
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+
+    online_config["min_replay"] = 1
+    learner = OnlineLearner(online_config)
+    losses = []
+    original = functional.mse_loss
+
+    def mse(prediction, target, *args, **kwargs):
+        losses.append(target.detach().clone())
+        return original(prediction, target, *args, **kwargs)
+
+    monkeypatch.setattr(functional, "mse_loss", mse)
+    learner.observe(
+        online_transition(online_config, terminated=not truncated, truncated=truncated)
+    )
+    torch.testing.assert_close(losses[0], torch.ones_like(losses[0]))
+    torch.testing.assert_close(losses[1], torch.full_like(losses[1], -0.25))
+
+
+@pytest.fixture
+def online_rpc(online_config, tmp_path):
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+    from toolkits.rlt_vr.online_service import OnlineService
+    from toolkits.rlt_vr.online_transport import encode_observation
+
+    learner = OnlineLearner(online_config)
+    service = OnlineService(
+        learner, lambda obs: online_features(online_config), tmp_path, "fixed-feature"
+    )
+    obs = {
+        "state": np.zeros(9, np.float32),
+        "main_image": np.zeros((384, 384, 3), np.uint8),
+        "wrist_image": np.zeros((384, 384, 3), np.uint8),
+    }
+    payload = {
+        "op": "observe",
+        "session": "test-session",
+        "sequence": 0,
+        "episode": 0,
+        "observation": encode_observation(obs),
+        "next_observation": encode_observation(obs),
+        "action": [0.0] * 8,
+        "reward": 0,
+        "human": True,
+        "terminated": False,
+        "truncated": False,
+        "policy_version": -1,
+    }
+    service({"op": "begin", "session": "test-session"})
+    return service, payload, obs
+
+
+def test_online_protocol_order_duplicate_and_episode_boundaries(online_rpc):
+    import copy
+
+    service, payload, _ = online_rpc
+    first = service(payload)
+    assert first["metrics"]["accepted"] == 1
+    assert service({**payload, "request_id": 33})["duplicate"]
+    with pytest.raises(ValueError, match="Conflicting"):
+        service({**payload, "human": False})
+    with pytest.raises(ValueError, match="Out-of-order"):
+        service({**payload, "sequence": 2})
+    with pytest.raises(ValueError, match="session"):
+        service({**payload, "session": "another-session"})
+    bad = copy.deepcopy(payload)
+    bad["sequence"] = 1
+    bad["observation"]["state"][0] = 1
+    with pytest.raises(ValueError, match="contiguous"):
+        service(bad)
+    service({**payload, "sequence": 1, "truncated": True})
+    with pytest.raises(ValueError, match="contiguous"):
+        service({**payload, "sequence": 2})
+    result = service({**payload, "sequence": 2, "episode": 1})
+    assert result["metrics"]["accepted"] == 3
+    assert result["metrics"]["human_accepted"] == 3
+
+
+def test_online_training_fault_is_fail_closed(online_rpc, monkeypatch):
+    service, payload, _ = online_rpc
+
+    def fail(item):
+        raise RuntimeError("nonfinite gradient")
+
+    monkeypatch.setattr(service.learner, "observe", fail)
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        service(payload)
+    assert service({"op": "health"})["faulted"]
+    with pytest.raises(RuntimeError, match="faulted"):
+        service(payload)
+    with pytest.raises(RuntimeError, match="faulted"):
+        service.checkpoint()
+
+
+def test_online_background_upload_uses_authenticated_real_socket(online_rpc):
+    import time
+
+    from toolkits.rlt_vr.online_transport import TransitionUploader
+
+    service, _, obs = online_rpc
+    token = "t" * 32
+    with InferenceServer(
+        ("127.0.0.1", 0), token, lambda obs: None, "test", dispatch=service
+    ) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        uploader = TransitionUploader(server.server_address[1], token, "test-session")
+        try:
+            for i in range(3):
+                uploader.submit(
+                    i,
+                    obs,
+                    obs,
+                    episode=0,
+                    action=[0.0] * 8,
+                    reward=0,
+                    human=i == 1,
+                    terminated=False,
+                    truncated=False,
+                    policy_version=-1,
+                )
+            deadline = time.monotonic() + 20
+            while (
+                uploader.accepted_sequence < 2
+                and not uploader.error
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            assert uploader.error is None and uploader.accepted_sequence == 2
+            assert uploader.metrics["human_accepted"] == 1
+            assert uploader.metrics["update_step"] == 2
+        finally:
+            uploader.close()
+            server.shutdown()
+            thread.join(timeout=10)
+
+
 def test_intervention_discards_pending_and_remaining_actions():
     gate = ActionGate()
     gate.change("policy")
