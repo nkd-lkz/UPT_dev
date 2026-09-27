@@ -50,15 +50,15 @@ Once simulation works, connect PICO Business Streaming and SteamVR and verify th
 
 ```powershell
 & $PY -m toolkits.rlt_vr.preflight --probe vr --steps 60
-& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001
+& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001 --log-interval 1
 ```
 
-The probe reports tracking validity, the button bitmask, grip/trigger state, and position. Holding the side grip must set `grip=True`, and pressing the index trigger must set `trigger=True`. Tracking should remain valid while moving. The client accepts `--clutch-button` and `--trigger-button` to override defaults 2 and 33. This adapter uses SteamVR's legacy controller API: a PICO profile that does not expose these bindings needs adaptation. Never bypass the validity check to make it move.
+The probe reports tracking validity, the button bitmask, grip/trigger state, analog `trigger_value`, and position. Holding the side grip must set `grip=True`, and pressing the index trigger must set `trigger=True` or raise `trigger_value`. Tracking should remain valid while moving. The client accepts `--clutch-button` and `--trigger-button` to override defaults 2 and 33; it also discovers a trigger axis advertised by SteamVR and treats values at or above `--trigger-threshold 0.6` as pressed. Never bypass the validity check to make the robot move.
 
 | Input | Local behavior |
 |---|---|
 | Hold right grip | Anchor the current controller/TCP poses and take over |
-| Move/rotate controller | Local IK; translation scale 0.5, at most 15 cm and 0.5 rad from each clutch anchor |
+| Move/rotate controller | Local IK; translation scale 0.5, at most 15 cm and 30 degrees from each clutch anchor |
 | Fresh trigger press during takeover | Toggle the latched gripper target; releasing trigger keeps it |
 | Release grip | Pause, retain gripper target, discard remaining policy actions |
 | `P` | Request fresh policy inference; disabled in manual-only mode |
@@ -67,6 +67,10 @@ The probe reports tracking validity, the button bitmask, grip/trigger state, and
 | `Q`, Esc, or closing the window | Exit and release local resources |
 
 Check all translation and rotation directions in free space before attempting grasping. OpenVR right/up/back maps to robot forward/left/up; `--yaw-degrees` adjusts standing orientation. IK is not collision avoidance and does not guarantee stable contact. These limits are for simulation debugging, not real-robot safety.
+
+The terminal prints one telemetry record per second with control ownership, tracking, raw buttons, analog trigger, requested/applied relative motion, the largest arm command, gripper command, simulation-step time, and display-loop time. The same button and timing summary appears on the camera window. Reaching a relative-motion bound intentionally holds the target and reports `Motion limit reached`; release grip, move the controller back to a comfortable pose, and hold grip again to create a new anchor. For a larger simulation workspace, use an explicit bound up to 30 cm, for example `--max-displacement 0.25`; keep the default until every direction is calibrated.
+
+The display watchdog starts after simulator and SteamVR initialization and pauses control only when one loop exceeds `--stall-timeout 2.0`. After a watchdog, tracking, or IK fault, release grip once to clear the safety latch. Raising the timeout up to ten seconds helps diagnose a slow Windows renderer, but it also delays fault detection and is not a real-robot setting.
 
 ## Start Server Inference
 

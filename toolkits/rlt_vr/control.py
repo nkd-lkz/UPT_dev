@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -116,7 +117,33 @@ class OperatorControl:
         return self.gate.mode
 
 
-def relative_target(
+@dataclass(frozen=True)
+class MappedTarget:
+    """A bounded robot target and the limits applied to the controller motion."""
+
+    pose: np.ndarray
+    requested_translation: float
+    applied_translation: float
+    requested_rotation: float
+    applied_rotation: float
+
+    @property
+    def translation_limited(self) -> bool:
+        """Whether controller translation reached the configured bound."""
+        return self.requested_translation > self.applied_translation + 1e-6
+
+    @property
+    def rotation_limited(self) -> bool:
+        """Whether controller rotation reached the configured bound."""
+        return self.requested_rotation > self.applied_rotation + 1e-6
+
+    @property
+    def limited(self) -> bool:
+        """Whether either motion component reached its configured bound."""
+        return self.translation_limited or self.rotation_limited
+
+
+def map_relative_target(
     anchor_vr: np.ndarray,
     current_vr: np.ndarray,
     anchor_tcp: np.ndarray,
@@ -125,8 +152,8 @@ def relative_target(
     yaw_degrees: float = 0,
     max_displacement: float = 0.15,
     max_rotation: float = 0.5,
-) -> np.ndarray:
-    """Map OpenVR right/up/back to robot forward/left/up at clutch press.
+) -> MappedTarget:
+    """Map OpenVR motion to a bounded target and report active limits.
 
     Translation and rotation are bounded relative to the clutch anchor. The
     rotation bound is in radians; positions are meters. This is not a collision
@@ -142,11 +169,43 @@ def relative_target(
     basis = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]], dtype=float)
     basis = Rotation.from_euler("z", yaw_degrees, degrees=True).as_matrix() @ basis
     delta = scale * basis @ (current_vr[:3, 3] - anchor_vr[:3, 3])
-    delta *= min(1, max_displacement / max(np.linalg.norm(delta), 1e-9))
+    requested_translation = float(np.linalg.norm(delta))
+    applied_translation = min(requested_translation, max_displacement)
+    delta *= min(1, max_displacement / max(requested_translation, 1e-9))
     rotation = basis @ current_vr[:3, :3] @ anchor_vr[:3, :3].T @ basis.T
     vector = Rotation.from_matrix(rotation).as_rotvec()
-    vector *= min(1, max_rotation / max(np.linalg.norm(vector), 1e-9))
+    requested_rotation = float(np.linalg.norm(vector))
+    applied_rotation = min(requested_rotation, max_rotation)
+    vector *= min(1, max_rotation / max(requested_rotation, 1e-9))
     result = anchor_tcp.copy()
     result[:3, 3] += delta
     result[:3, :3] = Rotation.from_rotvec(vector).as_matrix() @ anchor_tcp[:3, :3]
-    return result
+    return MappedTarget(
+        pose=result,
+        requested_translation=requested_translation,
+        applied_translation=applied_translation,
+        requested_rotation=requested_rotation,
+        applied_rotation=applied_rotation,
+    )
+
+
+def relative_target(
+    anchor_vr: np.ndarray,
+    current_vr: np.ndarray,
+    anchor_tcp: np.ndarray,
+    *,
+    scale: float = 0.5,
+    yaw_degrees: float = 0,
+    max_displacement: float = 0.15,
+    max_rotation: float = 0.5,
+) -> np.ndarray:
+    """Return the bounded pose while preserving the original public contract."""
+    return map_relative_target(
+        anchor_vr,
+        current_vr,
+        anchor_tcp,
+        scale=scale,
+        yaw_degrees=yaw_degrees,
+        max_displacement=max_displacement,
+        max_rotation=max_rotation,
+    ).pose

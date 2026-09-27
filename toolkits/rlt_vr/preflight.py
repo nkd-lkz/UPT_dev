@@ -54,11 +54,12 @@ def main() -> None:
             for _ in range(args.steps):
                 reading = vr.read()
                 logger.info(
-                    "valid=%s buttons=%s grip=%s trigger=%s xyz=%s",
+                    "valid=%s buttons=%s grip=%s trigger=%s trigger_value=%.3f xyz=%s",
                     reading.valid,
                     hex(reading.buttons),
                     reading.clutch,
                     reading.close_gripper,
+                    reading.trigger_value,
                     reading.pose[:3, 3].round(3),
                 )
                 time.sleep(0.5)

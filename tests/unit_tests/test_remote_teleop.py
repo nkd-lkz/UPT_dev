@@ -24,7 +24,12 @@ import numpy as np
 import pytest
 
 from toolkits.rlt_vr.client import TransitionRecorder
-from toolkits.rlt_vr.control import ActionGate, OperatorControl, relative_target
+from toolkits.rlt_vr.control import (
+    ActionGate,
+    OperatorControl,
+    map_relative_target,
+    relative_target,
+)
 from toolkits.rlt_vr.protocol import (
     CONTRACT,
     MAX_MESSAGE,
@@ -174,6 +179,11 @@ def test_relative_pose_and_motion_bounds():
         relative_target(anchor, current, anchor)[:3, 3]
     ) == pytest.approx(0.15)
     np.testing.assert_allclose(relative_target(anchor, anchor, anchor), anchor)
+    mapped = map_relative_target(anchor, current, anchor)
+    assert mapped.translation_limited
+    assert not mapped.rotation_limited
+    assert mapped.requested_translation == pytest.approx(5.0)
+    assert mapped.applied_translation == pytest.approx(0.15)
 
 
 @pytest.fixture
@@ -314,6 +324,44 @@ def test_vendor_tracking_loss_and_button_mapping(monkeypatch):
     controller.close()
     controller.close()
     assert calls == ["closed"]
+
+
+def test_vendor_analog_trigger_mapping(monkeypatch):
+    import sys
+
+    pose = SimpleNamespace(
+        mDeviceToAbsoluteTracking=SimpleNamespace(m=np.eye(4)[:3]),
+        bPoseIsValid=True,
+        bDeviceIsConnected=True,
+        eTrackingResult=200,
+    )
+    axes = [SimpleNamespace(x=0.0) for _ in range(5)]
+    axes[1].x = 0.75
+    state = SimpleNamespace(ulButtonPressed=0, rAxis=axes)
+    system = SimpleNamespace(
+        getTrackedDeviceIndexForControllerRole=lambda role: 1,
+        getControllerStateWithPose=lambda origin, index: (True, state, pose),
+        getInt32TrackedDeviceProperty=lambda index, prop: 7 if prop == 101 else 0,
+        isInputAvailable=lambda: True,
+    )
+    sdk = SimpleNamespace(
+        init=lambda kind: system,
+        shutdown=lambda: None,
+        VRApplication_Background=3,
+        TrackedControllerRole_RightHand=2,
+        k_unTrackedDeviceIndexInvalid=0xFFFFFFFF,
+        TrackingUniverseStanding=1,
+        TrackingResult_Running_OK=200,
+        k_unControllerStateAxisCount=5,
+        Prop_Axis0Type_Int32=100,
+        k_eControllerAxis_Trigger=7,
+    )
+    monkeypatch.setitem(sys.modules, "openvr", sdk)
+
+    reading = SteamVRController(trigger_threshold=0.6).read()
+
+    assert reading.close_gripper
+    assert reading.trigger_value == pytest.approx(0.75)
 
 
 @pytest.mark.skipif(

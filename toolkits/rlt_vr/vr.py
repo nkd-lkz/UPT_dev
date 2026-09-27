@@ -30,6 +30,7 @@ class VRReading:
     clutch: bool
     close_gripper: bool
     buttons: int
+    trigger_value: float
 
 
 class SteamVRController:
@@ -40,16 +41,43 @@ class SteamVRController:
     stepping, including during autonomous execution.
     """
 
-    def __init__(self, clutch_button: int = 2, trigger_button: int = 33) -> None:
+    def __init__(
+        self,
+        clutch_button: int = 2,
+        trigger_button: int = 33,
+        trigger_threshold: float = 0.6,
+    ) -> None:
         import openvr
 
         if not 0 <= clutch_button < 64 or not 0 <= trigger_button < 64:
             raise ValueError("Button ids must be in [0, 63]")
+        if not 0 < trigger_threshold <= 1:
+            raise ValueError("Trigger threshold must be in (0, 1]")
         self.vr = openvr
         self.system = openvr.init(openvr.VRApplication_Background)
         self.clutch_button = clutch_button
         self.trigger_button = trigger_button
+        self.trigger_threshold = trigger_threshold
         self.closed = False
+
+    def _trigger_axis_value(self, index: int, state: object) -> float:
+        """Read a vendor-advertised analog trigger when no button bit is set."""
+        axis_count = int(getattr(self.vr, "k_unControllerStateAxisCount", 5))
+        property_base = getattr(self.vr, "Prop_Axis0Type_Int32", None)
+        trigger_type = getattr(self.vr, "k_eControllerAxis_Trigger", None)
+        axes = getattr(state, "rAxis", ())
+        if property_base is None or trigger_type is None:
+            return 0.0
+        for axis_index in range(min(axis_count, len(axes))):
+            try:
+                axis_type = self.system.getInt32TrackedDeviceProperty(
+                    index, property_base + axis_index
+                )
+            except Exception:  # Vendor runtimes differ in property support.
+                continue
+            if axis_type == trigger_type:
+                return float(np.clip(axes[axis_index].x, 0, 1))
+        return 0.0
 
     def read(self) -> VRReading:
         """Fetch current tracking and button state without a network round trip."""
@@ -57,7 +85,7 @@ class SteamVRController:
             self.vr.TrackedControllerRole_RightHand
         )
         if index == self.vr.k_unTrackedDeviceIndexInvalid:
-            return VRReading(np.eye(4), False, False, False, 0)
+            return VRReading(np.eye(4), False, False, False, 0, 0.0)
         ok, state, pose = self.system.getControllerStateWithPose(
             self.vr.TrackingUniverseStanding, index
         )
@@ -72,12 +100,17 @@ class SteamVRController:
             and np.isfinite(matrix).all()
         )
         buttons = int(state.ulButtonPressed)
+        trigger_value = self._trigger_axis_value(index, state)
         return VRReading(
             matrix,
             valid,
             bool(buttons & (1 << self.clutch_button)),
-            bool(buttons & (1 << self.trigger_button)),
+            bool(
+                buttons & (1 << self.trigger_button)
+                or trigger_value >= self.trigger_threshold
+            ),
             buttons,
+            trigger_value,
         )
 
     def close(self) -> None:

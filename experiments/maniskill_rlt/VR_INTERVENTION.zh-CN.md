@@ -50,15 +50,15 @@ $PY = ".\.venv-vr\Scripts\python.exe"
 
 ```powershell
 & $PY -m toolkits.rlt_vr.preflight --probe vr --steps 60
-& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001
+& $PY -m toolkits.rlt_vr.client --manual-only --record C:\rlt-records\manual-001 --log-interval 1
 ```
 
-预检持续打印 `valid`、按键位图、grip、trigger 和位置。按住侧握键应令 `grip=True`，食指扳机应令 `trigger=True`；无论如何移动，正常跟踪时 `valid` 应保持为真。默认按键编号为 2 和 33，可用客户端的 `--clutch-button`、`--trigger-button` 修改。此处使用 SteamVR 的 legacy controller API；若 PICO profile 未暴露这些绑定，需要先完成绑定适配，不能绕过 `valid` 检查。
+预检持续打印 `valid`、按键位图、grip、trigger、模拟量 `trigger_value` 和位置。按住侧握键应令 `grip=True`；按下食指扳机应令 `trigger=True` 或提高 `trigger_value`。正常跟踪时，移动过程中 `valid` 应保持为真。默认按键编号为 2 和 33，可用 `--clutch-button`、`--trigger-button` 修改；客户端还会读取 SteamVR 声明的扳机轴，数值达到 `--trigger-threshold 0.6` 时视为按下。不能绕过 `valid` 检查来强制移动机械臂。
 
 | 操作 | 本地行为 |
 |---|---|
 | 按住右手 grip | 以当前 TCP 和手柄位姿建立相对移动起点，接管机械臂 |
-| 移动或转动手柄 | 本地 IK 生成关节增量；位移缩放 0.5，单次握持最多偏移 15 cm、旋转 0.5 rad |
+| 移动或转动手柄 | 本地 IK 生成关节增量；位移缩放 0.5，单次握持最多偏移 15 cm、旋转 30° |
 | 接管期间新按一次 trigger | 切换夹爪开/闭目标；松开 trigger 不改变目标 |
 | 松开 grip | 暂停；保留夹爪目标，不自动恢复模型动作 |
 | `P` | 从当前新观测请求模型动作；manual-only 下无效 |
@@ -67,6 +67,10 @@ $PY = ".\.venv-vr\Scripts\python.exe"
 | `Q` / Esc / 关闭窗口 | 退出并关闭本地资源 |
 
 先在空中测试三个平移方向与旋转方向，再尝试夹取。默认 OpenVR 的右/上/后坐标映射到机器人前/左/上坐标，可用 `--yaw-degrees` 校正站立朝向。IK 不等于避障，也不保证接触稳定；目前限制只服务于仿真调试，不能用于真机安全控制。
+
+终端默认每秒输出一条 telemetry，其中包含控制权、跟踪状态、原始按键、扳机模拟量、请求与实际采用的相对运动、最大机械臂动作、夹爪命令、仿真步耗时和显示循环耗时；相机窗口也会显示按键与耗时摘要。相对运动达到边界时，客户端会保持边界目标并显示 `Motion limit reached`。此时松开 grip，把手柄移回舒适位置，再次握住以建立新起点。如果仿真活动空间确实需要扩大，可显式设置不超过 30 cm 的范围，例如 `--max-displacement 0.25`；完成全部方向校准前保留默认值。
+
+显示循环的 watchdog 会在仿真和 SteamVR 初始化完成后才开始计时，只有单次循环超过 `--stall-timeout 2.0` 才暂停。watchdog、跟踪或 IK 故障触发后，松开一次 grip 即可解除安全锁。排查 Windows 慢渲染时最多可把阈值提高到 10 秒，但这会推迟故障检测，不能作为真机参数。
 
 ## 启动服务器推理
 

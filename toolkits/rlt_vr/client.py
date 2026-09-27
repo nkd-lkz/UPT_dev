@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .control import OperatorControl, relative_target
+from .control import MappedTarget, OperatorControl, map_relative_target
 from .protocol import CAMERAS, CONTRACT, encode_image, request
 from .simulation import DEFAULT_RENDER_BACKEND, LocalSimulation
 from .vr import SteamVRController
@@ -113,17 +113,38 @@ def run(args: argparse.Namespace) -> None:
     anchor_vr = anchor_tcp = None
     gripper_command = 1.0
     trigger_was_down = False
-    last_step = last_loop = time.monotonic()
+    last_step = last_loop = last_log = time.monotonic()
+    last_mapping: MappedTarget | None = None
+    last_action: np.ndarray | None = None
+    last_step_ms = 0.0
+    was_limited = False
+    was_valid = True
     status = "PAUSED: P=policy, grip=human, Space=pause, R=reset, Q=quit"
     try:
         env = LocalSimulation(args.render_backend, args.seed)
         if not args.no_vr:
-            vr = SteamVRController(args.clutch_button, args.trigger_button)
+            vr = SteamVRController(
+                args.clutch_button,
+                args.trigger_button,
+                args.trigger_threshold,
+            )
         observation = env.observation()
+        # Environment and SteamVR initialization may take seconds on Windows.
+        # Start the watchdog only after both are ready, not before construction.
+        last_step = last_loop = last_log = time.monotonic()
+        logger.info(
+            "Control ready: scale=%.2f max_translation=%.3fm "
+            "max_rotation=%.1fdeg stall_timeout=%.1fs",
+            args.translation_scale,
+            args.max_displacement,
+            args.max_rotation_degrees,
+            args.stall_timeout,
+        )
         while True:
             now = time.monotonic()
             # A long input/render stall requires deliberate re-arming.
-            stalled = now - last_loop > 0.5
+            loop_elapsed = now - last_loop
+            stalled = loop_elapsed > args.stall_timeout
             last_loop = now
             reading = vr.read() if vr else None
             valid = reading is None or reading.valid
@@ -132,6 +153,12 @@ def run(args: argparse.Namespace) -> None:
             cv2.putText(
                 panel, f"{gate.mode} | {status}", (5, 20), 0, 0.4, (0, 255, 255), 1
             )
+            if reading is not None:
+                diagnostic = (
+                    f"buttons={reading.buttons:#x} grip={int(reading.clutch)} "
+                    f"trigger={reading.trigger_value:.2f} step={last_step_ms:.0f}ms"
+                )
+                cv2.putText(panel, diagnostic, (5, 38), 0, 0.4, (0, 255, 255), 1)
             cv2.imshow("RLT local simulation: main / wrist", panel)
             key = cv2.waitKey(1) & 0xFF
             if (
@@ -147,10 +174,14 @@ def run(args: argparse.Namespace) -> None:
                 episode += 1
                 observation = env.reset(args.seed + episode)
                 anchor_vr = anchor_tcp = None
+                last_mapping = None
+                last_action = None
+                was_limited = False
                 status = "Reset; paused"
                 last_loop = time.monotonic()
                 continue
             previous_mode = gate.mode
+            release_was_required = operator.require_release
             command = "pause" if key == ord(" ") else ""
             if key == ord("p") and not args.manual_only:
                 command = "policy"
@@ -162,11 +193,22 @@ def run(args: argparse.Namespace) -> None:
             )
             if not valid:
                 status = "Tracking invalid: check SteamVR; release grip before retry"
+                if was_valid:
+                    logger.warning("Tracking became invalid; motion paused")
             elif stalled:
-                status = "UI stalled: paused; release grip before retry"
+                status = f"Safety pause after {loop_elapsed:.1f}s stall; release grip"
+                logger.warning(
+                    "Display/input loop stalled for %.3fs; motion paused",
+                    loop_elapsed,
+                )
+            elif release_was_required and not operator.require_release:
+                status = "Ready: hold grip to establish a fresh motion anchor"
+                logger.info("Safety latch cleared after grip release")
+            was_valid = valid
             if previous_mode != gate.mode:
                 if valid and not stalled:
                     status = f"{gate.mode}: grip=human, P=policy, Space=pause"
+                logger.info("Control authority: %s -> %s", previous_mode, gate.mode)
                 if gate.mode == "human":
                     anchor_vr, anchor_tcp = reading.pose.copy(), env.tcp_matrix()
                     # Preserve the grasp on takeover. Each fresh trigger press
@@ -176,11 +218,27 @@ def run(args: argparse.Namespace) -> None:
                         np.clip(2 * (finger + 0.01) / 0.05 - 1, -1, 1)
                     )
                     trigger_was_down = reading.close_gripper
+                    was_limited = False
+                    logger.info(
+                        "Human anchor: controller_xyz=%s tcp_xyz=%s gripper=%+.1f",
+                        np.round(anchor_vr[:3, 3], 3),
+                        np.round(anchor_tcp[:3, 3], 3),
+                        gripper_command,
+                    )
                 else:
                     anchor_vr = anchor_tcp = None
+                    last_mapping = None
+                    was_limited = False
             if gate.mode == "human" and reading is not None:
                 if reading.close_gripper and not trigger_was_down:
                     gripper_command = -1.0 if gripper_command > 0 else 1.0
+                    logger.info(
+                        "Gripper toggled to %+.1f (buttons=%#x analog=%.3f)",
+                        gripper_command,
+                        reading.buttons,
+                        reading.trigger_value,
+                    )
+                    status = f"human: gripper command {gripper_command:+.1f}"
                 trigger_was_down = reading.close_gripper
 
             if pending is not None and pending.done():
@@ -219,20 +277,41 @@ def run(args: argparse.Namespace) -> None:
             if now - last_step >= 0.1:
                 action = None
                 if gate.mode == "human" and reading is not None:
-                    target = relative_target(
+                    last_mapping = map_relative_target(
                         anchor_vr,
                         reading.pose,
                         anchor_tcp,
+                        scale=args.translation_scale,
                         yaw_degrees=args.yaw_degrees,
+                        max_displacement=args.max_displacement,
+                        max_rotation=np.deg2rad(args.max_rotation_degrees),
                     )
-                    action = env.human_action(target, gripper_command)
+                    if last_mapping.limited:
+                        status = "Motion limit reached: release grip, recenter, re-grip"
+                        if not was_limited:
+                            logger.warning(
+                                "Relative motion limited: translation %.3f/%.3fm, "
+                                "rotation %.1f/%.1fdeg; release and re-grip",
+                                last_mapping.requested_translation,
+                                last_mapping.applied_translation,
+                                np.rad2deg(last_mapping.requested_rotation),
+                                np.rad2deg(last_mapping.applied_rotation),
+                            )
+                    elif was_limited:
+                        status = "human: inside configured motion limits"
+                    was_limited = last_mapping.limited
+                    action = env.human_action(last_mapping.pose, gripper_command)
                     if action is None:
                         operator.pause()
                         status = "IK failed; release grip and try a smaller motion"
+                        logger.warning("IK failed; motion paused")
                 elif gate.mode == "policy":
                     action = gate.next_action()
                 if action is not None:
+                    step_started = time.monotonic()
                     next_obs, reward, terminated, truncated = env.step(action)
+                    last_step_ms = (time.monotonic() - step_started) * 1000
+                    last_action = action.copy()
                     if recorder is not None:
                         recorder.append(
                             observation,
@@ -251,7 +330,43 @@ def run(args: argparse.Namespace) -> None:
                         status = (
                             f"Episode ended (reward={reward}); R starts next episode"
                         )
+                        logger.info(
+                            "Episode %d ended with reward %.3f", episode, reward
+                        )
                 last_step = now
+            if now - last_log >= args.log_interval:
+                if reading is not None:
+                    mapping_text = "n/a"
+                    if last_mapping is not None:
+                        mapping_text = (
+                            f"translation={last_mapping.requested_translation:.3f}/"
+                            f"{last_mapping.applied_translation:.3f}m "
+                            f"rotation={np.rad2deg(last_mapping.requested_rotation):.1f}/"
+                            f"{np.rad2deg(last_mapping.applied_rotation):.1f}deg "
+                            f"limited={last_mapping.limited}"
+                        )
+                    arm_max = (
+                        float(np.max(np.abs(last_action[:7])))
+                        if last_action is not None
+                        else 0.0
+                    )
+                    logger.info(
+                        "Telemetry mode=%s valid=%s buttons=%#x grip=%s "
+                        "trigger=%s(%.3f) %s arm_max=%.3f gripper=%+.1f "
+                        "step=%.1fms loop=%.1fms",
+                        gate.mode,
+                        valid,
+                        reading.buttons,
+                        reading.clutch,
+                        reading.close_gripper,
+                        reading.trigger_value,
+                        mapping_text,
+                        arm_max,
+                        gripper_command,
+                        last_step_ms,
+                        loop_elapsed * 1000,
+                    )
+                last_log = now
             time.sleep(0.005)
     finally:
         gate.reset()
@@ -274,6 +389,12 @@ def main() -> None:
     parser.add_argument("--yaw-degrees", type=float, default=0)
     parser.add_argument("--clutch-button", type=int, default=2)
     parser.add_argument("--trigger-button", type=int, default=33)
+    parser.add_argument("--trigger-threshold", type=float, default=0.6)
+    parser.add_argument("--translation-scale", type=float, default=0.5)
+    parser.add_argument("--max-displacement", type=float, default=0.15)
+    parser.add_argument("--max-rotation-degrees", type=float, default=30)
+    parser.add_argument("--stall-timeout", type=float, default=2.0)
+    parser.add_argument("--log-interval", type=float, default=1.0)
     parser.add_argument("--manual-only", action="store_true")
     parser.add_argument(
         "--no-vr", action="store_true", help="Explicit keyboard-only policy test"
@@ -281,6 +402,18 @@ def main() -> None:
     args = parser.parse_args()
     if not 0 < args.reply_ttl <= 30:
         parser.error("--reply-ttl must be in (0, 30] seconds")
+    if not 0 < args.trigger_threshold <= 1:
+        parser.error("--trigger-threshold must be in (0, 1]")
+    if not 0 < args.translation_scale <= 1:
+        parser.error("--translation-scale must be in (0, 1]")
+    if not 0 < args.max_displacement <= 0.3:
+        parser.error("--max-displacement must be in (0, 0.3] meters")
+    if not 0 < args.max_rotation_degrees <= 90:
+        parser.error("--max-rotation-degrees must be in (0, 90]")
+    if not 0.5 <= args.stall_timeout <= 10:
+        parser.error("--stall-timeout must be in [0.5, 10] seconds")
+    if not 0.2 <= args.log_interval <= 10:
+        parser.error("--log-interval must be in [0.2, 10] seconds")
     logging.basicConfig(level=logging.INFO)
     run(args)
 
