@@ -1,8 +1,9 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate physical GPU assignment before loading any smoke model."""
+"""Validate physical GPU assignment before loading an RLT model."""
 
+import argparse
 import os
 import subprocess
 
@@ -42,21 +43,39 @@ class GPUProbe(Worker):
         }
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config-dir",
+        default=os.environ["EMBODIED_PATH"] + "/config",
+    )
+    parser.add_argument(
+        "--config-name",
+        default="maniskill_rlt_stage2_smoke_gpu2",
+    )
+    parser.add_argument("--override", action="append", default=[])
+    return parser.parse_args()
+
+
 def main() -> None:
     """Resolve all component placements, then probe one real RLinf worker."""
+    args = _parse_args()
     if not os.environ.get("RAY_ADDRESS"):
         raise RuntimeError("An explicit, isolated RAY_ADDRESS is required")
     expected_uuid = subprocess.check_output(
         ["nvidia-smi", "-i", "2", "--query-gpu=uuid", "--format=csv,noheader"],
         text=True,
     ).strip()
-    with initialize_config_dir(
-        config_dir=os.environ["EMBODIED_PATH"] + "/config", version_base="1.1"
-    ):
-        cfg = compose(config_name="maniskill_rlt_stage2_smoke_gpu2")
+    with initialize_config_dir(config_dir=args.config_dir, version_base="1.1"):
+        cfg = compose(config_name=args.config_name, overrides=args.override)
     cluster = Cluster(cluster_cfg=cfg.cluster)
     placement = HybridComponentPlacement(cfg, cluster)
-    for component in ("actor", "env", "rollout"):
+    components = {
+        component.strip()
+        for key in cfg.cluster.component_placement
+        for component in str(key).split(",")
+    }
+    for component in sorted(components):
         entries = placement.get_strategy(component).get_placement(cluster)
         if len(entries) != 1 or entries[0].visible_accelerators != ["2"]:
             raise RuntimeError(f"Unsafe {component} placement: {entries}")

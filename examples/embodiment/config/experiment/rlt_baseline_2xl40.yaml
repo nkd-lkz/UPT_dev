@@ -1,0 +1,66 @@
+# @package _global_
+
+# Formal two-L40 overlay for the ManiSkill RLT Stage2 baseline.
+# Compose with: maniskill_rlt_stage2_ac_mlp +experiment=rlt_baseline_2xl40
+cluster:
+  num_nodes: 1
+  component_placement:
+    # The Stage2 actor is a small MLP. Keep one learner on GPU 0 and use both
+    # GPUs for independent simulator/frozen-Stage1 rollout workers.
+    actor: 0-0
+    env: 0-1
+    rollout: 0-1
+
+runner:
+  logger:
+    log_path: ${oc.env:RLT_STAGE2_RUN_DIR}
+    project_name: rlinf-rlt
+    experiment_name: ${oc.env:RLT_STAGE2_EXPERIMENT_NAME}
+    logger_backends: ["wandb", "tensorboard"]
+    wandb_entity: c6522513-sustech
+  max_epochs: 5000
+  max_steps: 5000
+  val_check_interval: 25
+  save_interval: 50
+
+env:
+  train:
+    total_num_envs: 64
+    rlt_policy_switch:
+      expert_takeover:
+        # A human VR transition path is validated separately. Never substitute
+        # the optional second OpenPI model for human intervention silently.
+        enable: False
+    init_params:
+      # Each worker sees only its assigned physical GPU as local ordinal zero.
+      sim_backend: "physx_cuda:0"
+      render_backend: "cuda:0"
+  eval:
+    total_num_envs: 256
+    use_fixed_reset_state_ids: True
+    rlt_policy_switch:
+      expert_takeover:
+        enable: False
+    video_cfg:
+      save_video: False
+    init_params:
+      sim_backend: "physx_cuda:0"
+      render_backend: "cuda:0"
+
+rollout:
+  rlt_feature_model:
+    model_path: ${oc.env:RLT_STAGE1_ACTOR}
+    openpi_data:
+      repo_id: ${oc.env:RLT_DATASET_DIR}
+      norm_stats_path: ${oc.env:RLT_DATASET_DIR}/norm_stats.json
+    openpi:
+      torch_compile: False
+  # Formal baseline is autonomous. VR intervention is an external executed
+  # transition source and must not be represented by this model slot.
+  expert_model: null
+  enable_torch_compile: False
+  enable_cuda_graph: False
+
+actor:
+  micro_batch_size: 128
+  global_batch_size: 512

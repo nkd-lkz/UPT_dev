@@ -1,0 +1,128 @@
+defaults:
+  - env/maniskill_rlt@env.eval
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env: 2-2
+    rollout: 2-2
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: ${oc.env:RLT_STAGE1_EVAL_RUN_DIR}
+    project_name: rlinf-rlt-baseline
+    experiment_name: "stage1_eval20"
+    logger_backends: ["tensorboard"]
+  max_epochs: 1
+  max_steps: 1
+  only_eval: True
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    # One non-auto-reset rollout over 20 vector environments is exactly 20
+    # episodes. Fixed reset IDs make repeated checkpoint comparisons stable.
+    rollout_epoch: 1
+    total_num_envs: 20
+    seed: 2026
+    auto_reset: False
+    ignore_terminations: False
+    use_fixed_reset_state_ids: True
+    wrap_obs_mode: rlt_openpi_joint
+    reward_mode: only_success
+    rlt_policy_switch:
+      enable: False
+      expert_takeover:
+        enable: False
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    group_size: 1
+    action_dim: 8
+    num_action_chunks: 10
+    ref_num_action_chunks: 10
+    video_cfg:
+      save_video: False
+      fps: 10
+      record_every: 1
+      video_base_dir: ${runner.logger.log_path}/video/eval
+    init_params:
+      id: "PegInsertionSideWideClearance-v1"
+      sim_backend: "physx_cuda:0"
+      render_backend: ${oc.env:RLT_GPU2_RENDER_DEVICE}
+      obs_mode: "rgb"
+      control_mode: "pd_joint_delta_pos"
+      reward_mode: "sparse"
+      max_episode_steps: 500
+      sim_config:
+        sim_freq: 100
+        control_freq: 10
+      sensor_configs:
+        shader_pack: "default"
+        width: 384
+        height: 384
+      render_mode: all
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+  model:
+    model_type: "openpi"
+    model_path: ${oc.env:RLT_STAGE1_ACTOR}
+    precision: bf16
+    pi05: True
+    num_action_chunks: 10
+    action_dim: 8
+    use_proprio: True
+    num_steps: 5
+    add_value_head: False
+    is_lora: False
+    lora_rank: 32
+    openpi_data:
+      repo_id: ${oc.env:RLT_DATASET_DIR}
+      norm_stats_path: ${oc.env:RLT_DATASET_DIR}/norm_stats.json
+      default_prompt: "insert the peg in the hole"
+    openpi:
+      task: eval
+      torch_compile: False
+      config_name: "pi05_rlt_maniskill_joint"
+      num_images_in_input: 2
+      action_chunk: 10
+      action_horizon: 10
+      action_env_dim: 8
+      num_steps: 5
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      discrete_state_input: True
+      train_expert_only: False
+      add_value_head: False
+      detach_critic_input: True
+      use_rlt: True
+      rlt_alpha: 1.0
+      rlt_input_dim: 2048
+      rlt_embed_dim: 2048
+      rlt_prefix_seq_len: 1024
+      rlt_num_layers: 2
+      rlt_num_heads: 8
+      rlt_mlp_ratio: 4.0
+      rlt_encoder_type: "append_self_attention"
+      rlt_image_only: False
+      rlt_use_mask: True

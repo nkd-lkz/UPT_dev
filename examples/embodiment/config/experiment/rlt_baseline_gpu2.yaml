@@ -1,0 +1,61 @@
+# @package _global_
+
+# Production resource/path overlay for the shipped Stage2 RLT AC baseline.
+# Compose with: maniskill_rlt_stage2_ac_mlp +experiment=rlt_baseline_gpu2
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: 2-2
+    env: 2-2
+    rollout: 2-2
+
+runner:
+  logger:
+    log_path: ${oc.env:RLT_STAGE2_RUN_DIR}
+    project_name: rlinf-rlt-baseline
+    experiment_name: "stage2_baseline"
+    logger_backends: ["tensorboard"]
+  max_epochs: 5000
+  max_steps: 5000
+  val_check_interval: 25
+  save_interval: 50
+
+env:
+  train:
+    # A conservative single-GPU production batch. Algorithm and policy remain
+    # the baseline from maniskill_rlt_stage2_ac_mlp.yaml.
+    total_num_envs: 16
+    rlt_policy_switch:
+      expert_takeover:
+        enable: False
+    init_params:
+      sim_backend: "physx_cuda:0"
+      render_backend: ${oc.env:RLT_GPU2_RENDER_DEVICE}
+  eval:
+    total_num_envs: 20
+    use_fixed_reset_state_ids: True
+    rlt_policy_switch:
+      expert_takeover:
+        enable: False
+    video_cfg:
+      save_video: False
+    init_params:
+      sim_backend: "physx_cuda:0"
+      render_backend: ${oc.env:RLT_GPU2_RENDER_DEVICE}
+
+rollout:
+  rlt_feature_model:
+    model_path: ${oc.env:RLT_STAGE1_ACTOR}
+    openpi_data:
+      repo_id: ${oc.env:RLT_DATASET_DIR}
+      norm_stats_path: ${oc.env:RLT_DATASET_DIR}/norm_stats.json
+    openpi:
+      torch_compile: False
+  # Baseline training is autonomous; no second OpenPI expert is loaded.
+  expert_model: null
+  enable_torch_compile: False
+  enable_cuda_graph: False
+
+actor:
+  micro_batch_size: 32
+  global_batch_size: 128

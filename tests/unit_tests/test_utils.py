@@ -111,6 +111,132 @@ def test_stage2_smoke_launcher_rejects_missing_checkpoint(tmp_path):
     assert "Missing weights:" in result.stderr
 
 
+@pytest.fixture
+def rlt_baseline_configs(monkeypatch, tmp_path):
+    from hydra import compose, initialize_config_dir
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("EMBODIED_PATH", str(root / "examples/embodiment"))
+    monkeypatch.setenv("RLT_STAGE1_ACTOR", str(tmp_path / "stage1/actor"))
+    monkeypatch.setenv("RLT_DATASET_DIR", str(tmp_path / "dataset"))
+    monkeypatch.setenv("RLT_STAGE1_EVAL_RUN_DIR", str(tmp_path / "eval"))
+    monkeypatch.setenv("RLT_STAGE2_RUN_DIR", str(tmp_path / "stage2"))
+    monkeypatch.setenv("RLT_GPU2_RENDER_DEVICE", "pci:0000:e1:00.0")
+
+    with initialize_config_dir(
+        config_dir=str(root / "evaluations/maniskill"), version_base="1.1"
+    ):
+        eval_cfg = compose(config_name="maniskill_rlt_stage1_eval20")
+    with initialize_config_dir(
+        config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+    ):
+        train_cfg = compose(
+            config_name="maniskill_rlt_stage2_ac_mlp",
+            overrides=["+experiment=rlt_baseline_gpu2"],
+        )
+    OmegaConf.resolve(eval_cfg)
+    OmegaConf.resolve(train_cfg)
+    return eval_cfg, train_cfg
+
+
+def test_stage1_release_eval_is_exactly_twenty_episodes(rlt_baseline_configs):
+    cfg, _ = rlt_baseline_configs
+    assert dict(cfg.cluster.component_placement) == {
+        "env": "2-2",
+        "rollout": "2-2",
+    }
+    assert cfg.runner.only_eval
+    assert cfg.env.eval.total_num_envs == 20
+    assert cfg.env.eval.rollout_epoch == 1
+    assert not cfg.env.eval.auto_reset
+    assert cfg.env.eval.use_fixed_reset_state_ids
+    assert not cfg.env.eval.rlt_policy_switch.enable
+    assert cfg.rollout.model.model_type == "openpi"
+    assert cfg.rollout.model.openpi.use_rlt
+    assert cfg.rollout.model.openpi_data.norm_stats_path.endswith(
+        "/dataset/norm_stats.json"
+    )
+
+
+def test_stage2_release_config_is_autonomous_baseline(rlt_baseline_configs):
+    _, cfg = rlt_baseline_configs
+    assert dict(cfg.cluster.component_placement) == {
+        "actor": "2-2",
+        "env": "2-2",
+        "rollout": "2-2",
+    }
+    assert cfg.algorithm.loss_type == "rlt_ac"
+    assert cfg.algorithm.rlt_schedule.enable
+    assert cfg.actor.model.model_type == "rlt_mlp_policy"
+    assert not cfg.actor.model.model_path
+    assert cfg.rollout.rlt_feature_model.openpi.use_rlt
+    assert cfg.rollout.expert_model is None
+    assert not cfg.env.train.rlt_policy_switch.expert_takeover.enable
+    assert not cfg.env.eval.rlt_policy_switch.expert_takeover.enable
+    assert cfg.env.train.total_num_envs == 16
+    assert cfg.env.eval.total_num_envs == 20
+    assert cfg.runner.max_steps == cfg.runner.max_epochs == 5000
+    assert not OmegaConf.select(
+        cfg, "actor.model.interaction_memory.enabled", default=False
+    )
+
+
+def test_stage2_two_l40_config_uses_both_sampling_gpus(monkeypatch, tmp_path):
+    from hydra import compose, initialize_config_dir
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("EMBODIED_PATH", str(root / "examples/embodiment"))
+    monkeypatch.setenv("RLT_STAGE1_ACTOR", str(tmp_path / "stage1/actor"))
+    monkeypatch.setenv("RLT_DATASET_DIR", str(tmp_path / "dataset"))
+    monkeypatch.setenv("RLT_STAGE2_RUN_DIR", str(tmp_path / "stage2"))
+    monkeypatch.setenv("RLT_STAGE2_EXPERIMENT_NAME", "test-stage2")
+    with initialize_config_dir(
+        config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+    ):
+        cfg = compose(
+            config_name="maniskill_rlt_stage2_ac_mlp",
+            overrides=["+experiment=rlt_baseline_2xl40"],
+        )
+    OmegaConf.resolve(cfg)
+
+    assert dict(cfg.cluster.component_placement) == {
+        "actor": "0-0",
+        "env": "0-1",
+        "rollout": "0-1",
+    }
+    assert cfg.runner.logger.wandb_entity == "c6522513-sustech"
+    assert set(cfg.runner.logger.logger_backends) == {"wandb", "tensorboard"}
+    assert cfg.env.train.total_num_envs == 64
+    assert cfg.env.eval.total_num_envs == 256
+    assert cfg.env.train.init_params.sim_backend == "physx_cuda:0"
+    assert cfg.env.train.init_params.render_backend == "cuda:0"
+    assert cfg.rollout.expert_model is None
+    assert not cfg.env.train.rlt_policy_switch.expert_takeover.enable
+    assert not cfg.env.eval.rlt_policy_switch.expert_takeover.enable
+    assert cfg.rollout.rlt_feature_model.model_path.endswith("stage1/actor")
+    assert cfg.actor.micro_batch_size == 128
+    assert cfg.actor.global_batch_size == 512
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    ["run_rlt_stage1_eval20_gpu2.sh", "run_rlt_stage2_baseline_gpu2.sh"],
+)
+def test_rlt_baseline_launchers_reject_missing_checkpoint(tmp_path, launcher):
+    root = Path(__file__).resolve().parents[2]
+    if not (root / ".venv/bin/activate").is_file():
+        pytest.skip("Host-specific launcher needs the configured baseline venv")
+    result = subprocess.run(
+        ["bash", str(root / launcher), "--check"],
+        env={**os.environ, "RLT_STAGE1_ACTOR": str(tmp_path / "missing")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "Missing weights:" in result.stderr
+
+
 def test_compute_evaluate_metrics_reports_interact_delay_wait_time_stats():
     metrics = compute_evaluate_metrics(
         [
