@@ -93,6 +93,10 @@ rollout:
     model_type: "openpi"
     model_path: ${oc.env:RLT_STAGE1_ACTOR}
     precision: bf16
+    # The Stage 1 policy already emits Panda joint-space actions. This keeps
+    # action preparation on the pass-through path used by the Stage 2 RLT
+    # actor instead of interpreting the 8-D action as an end-effector command.
+    policy_setup: "panda-qpos"
     pi05: True
     num_action_chunks: 10
     action_dim: 8

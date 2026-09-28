@@ -99,6 +99,8 @@ def _check_stage1_eval(cfg) -> None:
         raise RuntimeError("Stage1 eval must use the OpenPI policy directly")
     if cfg.rollout.model.model_type != "openpi" or not cfg.rollout.model.openpi.use_rlt:
         raise RuntimeError("Stage1 eval model shape does not match the RLT checkpoint")
+    if cfg.rollout.model.policy_setup != "panda-qpos":
+        raise RuntimeError("Stage1 eval must pass Panda joint-space actions through")
     if not cfg.env.eval.video_cfg.save_video or cfg.env.eval.video_cfg.record_every != 1:
         raise RuntimeError("Stage1 release evaluation must record the full rollout")
 

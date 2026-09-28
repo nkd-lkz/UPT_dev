@@ -159,6 +159,7 @@ def test_stage1_release_eval_is_exactly_twenty_episodes(rlt_baseline_configs):
         "episode.episode_len",
     ]
     assert cfg.rollout.model.model_type == "openpi"
+    assert cfg.rollout.model.policy_setup == "panda-qpos"
     assert cfg.rollout.model.openpi.use_rlt
     assert cfg.rollout.model.openpi_data.norm_stats_path.endswith(
         "/dataset/norm_stats.json"
