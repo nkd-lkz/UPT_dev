@@ -215,7 +215,9 @@ def test_stage2_two_l40_config_uses_both_sampling_gpus(monkeypatch, tmp_path):
     assert cfg.runner.logger.wandb_entity == "c6522513-sustech"
     assert set(cfg.runner.logger.logger_backends) == {"wandb", "tensorboard"}
     assert cfg.env.train.total_num_envs == 64
-    assert cfg.env.eval.total_num_envs == 256
+    assert cfg.env.eval.total_num_envs == 32
+    assert cfg.env.eval.rollout_epoch == 8
+    assert cfg.env.eval.total_num_envs * cfg.env.eval.rollout_epoch == 256
     assert cfg.env.train.init_params.sim_backend == "physx_cuda:0"
     assert cfg.env.train.init_params.render_backend == "cuda:0"
     assert cfg.rollout.expert_model is None

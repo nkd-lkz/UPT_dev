@@ -36,7 +36,12 @@ env:
       sim_backend: "physx_cuda:0"
       render_backend: "cuda:0"
   eval:
-    total_num_envs: 256
+    # Keep the reviewed 256-trajectory evaluation, but create only 32 eval
+    # environments at once.  The base config uses two 384x384 RGB cameras per
+    # environment; constructing 256 eval environments alongside 64 train
+    # environments exhausts SAPIEN's Vulkan camera buffers on two L40s.
+    total_num_envs: 32
+    rollout_epoch: 8
     use_fixed_reset_state_ids: True
     rlt_policy_switch:
       expert_takeover:

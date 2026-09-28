@@ -54,8 +54,17 @@ def check_config(cfg) -> None:
             )
         if mode.init_params.render_backend != "cuda:0":
             raise RuntimeError("Each renderer must use worker-local CUDA ordinal zero")
-    if cfg.env.train.total_num_envs != 64 or cfg.env.eval.total_num_envs != 256:
-        raise RuntimeError("Unexpected two-L40 environment batch")
+    if cfg.env.train.total_num_envs != 64:
+        raise RuntimeError("Unexpected two-L40 training environment batch")
+    if cfg.env.eval.total_num_envs != 32 or cfg.env.eval.rollout_epoch != 8:
+        raise RuntimeError(
+            "Two-L40 evaluation must use 32 parallel environments for 8 epochs"
+        )
+    eval_trajectories = (
+        cfg.env.eval.total_num_envs * cfg.env.eval.rollout_epoch
+    )
+    if eval_trajectories != 256:
+        raise RuntimeError("Formal Stage2 must evaluate 256 trajectories")
 
 
 def check_inputs(cfg) -> tuple[Path, Path]:
@@ -90,7 +99,8 @@ def main() -> None:
     print("Placement: actor=GPU0; env/rollout=GPU0+GPU1")
     print(f"Stage1 weights: {weights} ({weights.stat().st_size:,} bytes)")
     print(f"Norm stats: {stats_path}")
-    print("Training: 5000 RLT AC steps; 64 train envs; 256 fixed eval envs")
+    print("Training: 5000 RLT AC steps; 64 parallel train envs")
+    print("Evaluation: 32 parallel envs x 8 epochs = 256 fixed-seed trajectories")
     print("Intervention: automatic OpenPI expert disabled; VR is not claimed here")
     print(f"Planned output: {os.environ['RLT_STAGE2_RUN_DIR']}")
     print("Preflight OK (read-only; Ray and training were not started).")
