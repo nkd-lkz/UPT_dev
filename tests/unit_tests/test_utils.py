@@ -151,6 +151,13 @@ def test_stage1_release_eval_is_exactly_twenty_episodes(rlt_baseline_configs):
     assert not cfg.env.eval.auto_reset
     assert cfg.env.eval.use_fixed_reset_state_ids
     assert not cfg.env.eval.rlt_policy_switch.enable
+    assert cfg.env.eval.video_cfg.save_video
+    assert cfg.env.eval.video_cfg.record_every == 1
+    assert list(cfg.env.eval.video_cfg.extra_info_on_video) == [
+        "success_current",
+        "episode.success_once",
+        "episode.episode_len",
+    ]
     assert cfg.rollout.model.model_type == "openpi"
     assert cfg.rollout.model.openpi.use_rlt
     assert cfg.rollout.model.openpi_data.norm_stats_path.endswith(

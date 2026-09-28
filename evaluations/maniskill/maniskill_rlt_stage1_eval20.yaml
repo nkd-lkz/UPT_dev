@@ -55,7 +55,14 @@ env:
     num_action_chunks: 10
     ref_num_action_chunks: 10
     video_cfg:
-      save_video: False
+      # Record the complete 20-environment rollout as one tiled MP4. Keeping all
+      # environments in one synchronized video avoids 20 independent encoders.
+      save_video: True
+      info_on_video: True
+      extra_info_on_video:
+        - success_current
+        - episode.success_once
+        - episode.episode_len
       fps: 10
       record_every: 1
       video_base_dir: ${runner.logger.log_path}/video/eval

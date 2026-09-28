@@ -58,6 +58,21 @@ proprioception. The shipped Stage 2 task is
 `PegInsertionSideWideClearance-v1`; it should not be confused with the narrower
 `PegInsertionSide-v1` renderer smoke test.
 
+## Evaluate the Completed Stage 1 Checkpoint
+
+The resumed run reached step 2000 and exported `global_step_2000/actor/model_state_dict/full_weights.pt`. The launcher's final shell parse error happened after training and export; validate the checkpoint through the evaluation preflight rather than interpreting that shell exit code as a missing model.
+
+Run the dedicated GPU 2 launcher to evaluate exactly 20 fixed reset IDs. It loads the Stage 1 OpenPI policy directly, disables RLT phase switching and expert takeover, and records the complete 500-control-step window as one synchronized tiled MP4 containing all 20 environments.
+
+```bash
+cd /home/luokz/rlinf_rlt/UPT_dev
+bash run_rlt_stage1_eval20_gpu2.sh --check
+tmux new-session -d -s rlt_stage1_eval20 \
+  "cd /home/luokz/rlinf_rlt/UPT_dev && bash run_rlt_stage1_eval20_gpu2.sh"
+```
+
+The launcher refuses a busy physical GPU 2, starts a private Ray head, and writes results under NAS `runs/stage1_eval20/eval20_<timestamp>_<pid>/`. Read `eval/success_once` as the success rate over 20 episodes and verify `eval/num_trajectories=20`. The MP4 is under `video/eval/seed_2026/0.mp4`; it is one tiled recording, not 20 separately encoded files.
+
 ## Stage 2 Acceptance Still Required
 
 Before launching Stage 2, select and evaluate a saved Stage 1 checkpoint,

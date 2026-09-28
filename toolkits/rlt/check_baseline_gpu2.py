@@ -99,6 +99,8 @@ def _check_stage1_eval(cfg) -> None:
         raise RuntimeError("Stage1 eval must use the OpenPI policy directly")
     if cfg.rollout.model.model_type != "openpi" or not cfg.rollout.model.openpi.use_rlt:
         raise RuntimeError("Stage1 eval model shape does not match the RLT checkpoint")
+    if not cfg.env.eval.video_cfg.save_video or cfg.env.eval.video_cfg.record_every != 1:
+        raise RuntimeError("Stage1 release evaluation must record the full rollout")
 
 
 def _check_stage2_train(cfg) -> None:
@@ -142,7 +144,7 @@ def main() -> None:
     print(f"Stage1 weights: {weights} ({weights.stat().st_size:,} bytes)")
     print(f"Norm stats: {stats_path}")
     if args.job == "stage1-eval":
-        print("Evaluation: exactly 20 fixed-reset episodes; no video")
+        print("Evaluation: exactly 20 fixed-reset episodes; full tiled MP4 enabled")
     else:
         print("Training: RLT AC baseline; 16 train envs; 20 eval envs; no expert")
     print(f"Planned output: {os.environ['RLT_JOB_RUN_DIR']}")
