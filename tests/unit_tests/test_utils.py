@@ -111,6 +111,25 @@ def test_stage2_smoke_launcher_rejects_missing_checkpoint(tmp_path):
     assert "Missing weights:" in result.stderr
 
 
+def test_stage2_smoke_launcher_rejects_incompatible_intervals():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_stage2_smoke_gpu2.sh"), "--check"],
+        env={
+            **os.environ,
+            "RLT_LONG_RUN": "1",
+            "RLT_SMOKE_STEPS": "100",
+            "RLT_SAVE_INTERVAL": "25",
+            "RLT_VAL_INTERVAL": "10",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert "RLT_SAVE_INTERVAL must be divisible" in result.stderr
+
+
 def test_compute_evaluate_metrics_reports_interact_delay_wait_time_stats():
     metrics = compute_evaluate_metrics(
         [

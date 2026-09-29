@@ -34,6 +34,10 @@ for interval in "$save_interval" "$val_interval"; do
         exit 2
     fi
 done
+if (( save_interval % val_interval != 0 )); then
+    echo 'RLT_SAVE_INTERVAL must be divisible by RLT_VAL_INTERVAL.' >&2
+    exit 2
+fi
 if [[ ! "$episode_steps" =~ ^[0-9]+$ ]] \
     || (( episode_steps < 10 || episode_steps > 500 || episode_steps % 10 != 0 )); then
     echo 'RLT_EPISODE_STEPS must be a multiple of 10 in [10, 500].' >&2
