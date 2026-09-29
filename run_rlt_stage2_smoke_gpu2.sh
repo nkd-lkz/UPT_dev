@@ -27,17 +27,27 @@ if [[ ! "$smoke_steps" =~ ^[0-9]+$ ]] || (( smoke_steps < 1 || smoke_steps > max
 fi
 save_interval=${RLT_SAVE_INTERVAL:-1}
 val_interval=${RLT_VAL_INTERVAL:-1}
+episode_steps=${RLT_EPISODE_STEPS:-40}
 for interval in "$save_interval" "$val_interval"; do
     if [[ ! "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 || interval > smoke_steps )); then
         echo 'RLT_SAVE_INTERVAL and RLT_VAL_INTERVAL must be positive and no larger than RLT_SMOKE_STEPS.' >&2
         exit 2
     fi
 done
+if [[ ! "$episode_steps" =~ ^[0-9]+$ ]] \
+    || (( episode_steps < 10 || episode_steps > 500 || episode_steps % 10 != 0 )); then
+    echo 'RLT_EPISODE_STEPS must be a multiple of 10 in [10, 500].' >&2
+    exit 2
+fi
 world_overrides+=(
     "runner.max_steps=$smoke_steps"
     "runner.max_epochs=$smoke_steps"
     "runner.save_interval=$save_interval"
     "runner.val_check_interval=$val_interval"
+    "env.train.max_episode_steps=$episode_steps"
+    "env.train.max_steps_per_rollout_epoch=$episode_steps"
+    "env.eval.max_episode_steps=$episode_steps"
+    "env.eval.max_steps_per_rollout_epoch=$episode_steps"
 )
 if [[ -n "${RLT_SMOKE_RESUME_DIR:-}" ]]; then
     [[ -d "$RLT_SMOKE_RESUME_DIR/actor" ]] || { echo 'Missing resume actor directory.' >&2; exit 2; }
@@ -113,7 +123,10 @@ assert 1024 <= port <= 65533 and not set(range(port, port + 3)) & {6379, 6385, 6
 print('Config: maniskill_rlt_stage2_smoke_gpu2; RLinf physical rank: 2; worker CUDA ordinal: 0')
 print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
-print(f'Budget: 2 train envs / 1 eval env; 40 control steps; stop at global step {cfg.runner.max_steps}')
+print(
+    f'Budget: 2 train envs / 1 eval env; '
+    f'{cfg.env.train.max_episode_steps} control steps; stop at global step {cfg.runner.max_steps}'
+)
 print(f'Resume: {cfg.runner.resume_dir}')
 print(f'Intervals: evaluate every {cfg.runner.val_check_interval}; save every {cfg.runner.save_interval}')
 print('Batch: global=4, micro=2; at most 2 AC updates per iteration')

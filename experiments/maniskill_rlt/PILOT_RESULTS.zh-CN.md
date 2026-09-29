@@ -84,7 +84,7 @@ bash run_rlt_stage2_smoke_gpu2.sh --world --check
 RLT_SMOKE_RAY_PORT=6412 bash run_rlt_stage2_smoke_gpu2.sh --world
 ```
 
-只有最后一条会启动真实 smoke。GPU 2 忙碌时拒绝启动；不会执行全局 `ray stop`。`RLT_SMOKE_STEPS` 为 1–20 的停止全局 step；`RLT_SMOKE_RESUME_DIR` 可设为已有 `global_step_N`，停止 step 至少再增加 2。续跑恢复模型、optimizer、scheduler、target 和 replay，不保证模拟器状态逐帧延续。
+只有最后一条会启动真实 smoke。GPU 2 忙碌时拒绝启动；不会执行全局 `ray stop`。默认情况下，`RLT_SMOKE_STEPS` 为 1–20 的停止全局 step。设置 `RLT_LONG_RUN=1` 后上限为 5000，并可用 `RLT_EPISODE_STEPS` 将 episode 从 smoke 默认的 40 步扩展到最多 500 步；该值必须是 10 的倍数。长跑时应同时设置 `RLT_VAL_INTERVAL` 和 `RLT_SAVE_INTERVAL`，避免每步评估和保存。`RLT_SMOKE_RESUME_DIR` 可设为已有 `global_step_N`；续跑恢复模型、optimizer、scheduler、target 和 replay，不保证模拟器状态逐帧延续。
 
 离线初试用 `python -m toolkits.rlt.run_offline_pilot --output NEW_OUTPUT`，需显式 `CUDA_VISIBLE_DEVICES=2`，并设置 `RLT_DATASET`、`RLT_NORM_STATS`、`RLT_STAGE1_CHECKPOINT`。它导出 12 条完整轨迹并训练 300 步；输出必须是新目录。`python -m toolkits.rlt.compare_latent_variants --original-config TRAIN_CONFIG --output NEW_OUTPUT --device cuda:0` 使用相同 cache 和预算训练增量版。独立测试入口为 `python -m toolkits.rlt.evaluate_latent_world --checkpoint SIDECAR --cache-dir TEST_CACHE --independent-test`。
 

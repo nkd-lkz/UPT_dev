@@ -84,7 +84,7 @@ bash run_rlt_stage2_smoke_gpu2.sh --world --check
 RLT_SMOKE_RAY_PORT=6412 bash run_rlt_stage2_smoke_gpu2.sh --world
 ```
 
-Only the last command starts training. A busy GPU 2 is rejected; cleanup never calls global `ray stop`. `RLT_SMOKE_STEPS` is the stopping global step, limited to 1–20. Set `RLT_SMOKE_RESUME_DIR` to an existing `global_step_N` and raise the stopping step by at least two. Resume restores models, optimizers, schedulers, targets and replay, not an exact simulator continuation.
+Only the last command starts training. A busy GPU 2 is rejected; cleanup never calls global `ray stop`. By default, `RLT_SMOKE_STEPS` is limited to 1–20. Setting `RLT_LONG_RUN=1` raises the limit to 5000, and `RLT_EPISODE_STEPS` can extend the 40-step smoke episode to at most 500 steps; it must be a multiple of 10. Set `RLT_VAL_INTERVAL` and `RLT_SAVE_INTERVAL` for long runs to avoid evaluation and checkpointing at every step. `RLT_SMOKE_RESUME_DIR` may point to an existing `global_step_N`; resume restores models, optimizers, schedulers, targets and replay, not an exact simulator continuation.
 
 For the first offline pilot, run `python -m toolkits.rlt.run_offline_pilot --output NEW_OUTPUT` with explicit `CUDA_VISIBLE_DEVICES=2` and `RLT_DATASET`, `RLT_NORM_STATS`, `RLT_STAGE1_CHECKPOINT` set. It exports 12 whole episodes and trains 300 steps; output must not exist. `python -m toolkits.rlt.compare_latent_variants --original-config TRAIN_CONFIG --output NEW_OUTPUT --device cuda:0` trains the residual variant on the same cache and budget. Independent evaluation uses `python -m toolkits.rlt.evaluate_latent_world --checkpoint SIDECAR --cache-dir TEST_CACHE --independent-test`.
 
