@@ -17,11 +17,28 @@ if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
 fi
 
 smoke_steps=${RLT_SMOKE_STEPS:-2}
-if [[ ! "$smoke_steps" =~ ^[0-9]+$ ]] || (( smoke_steps < 1 || smoke_steps > 20 )); then
-    echo 'RLT_SMOKE_STEPS must be in [1, 20].' >&2
+max_smoke_steps=20
+if [[ "${RLT_LONG_RUN:-0}" == 1 ]]; then
+    max_smoke_steps=5000
+fi
+if [[ ! "$smoke_steps" =~ ^[0-9]+$ ]] || (( smoke_steps < 1 || smoke_steps > max_smoke_steps )); then
+    echo "RLT_SMOKE_STEPS must be in [1, $max_smoke_steps]. Set RLT_LONG_RUN=1 for a bounded long run." >&2
     exit 2
 fi
-world_overrides+=("runner.max_steps=$smoke_steps" "runner.max_epochs=$smoke_steps")
+save_interval=${RLT_SAVE_INTERVAL:-1}
+val_interval=${RLT_VAL_INTERVAL:-1}
+for interval in "$save_interval" "$val_interval"; do
+    if [[ ! "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 || interval > smoke_steps )); then
+        echo 'RLT_SAVE_INTERVAL and RLT_VAL_INTERVAL must be positive and no larger than RLT_SMOKE_STEPS.' >&2
+        exit 2
+    fi
+done
+world_overrides+=(
+    "runner.max_steps=$smoke_steps"
+    "runner.max_epochs=$smoke_steps"
+    "runner.save_interval=$save_interval"
+    "runner.val_check_interval=$val_interval"
+)
 if [[ -n "${RLT_SMOKE_RESUME_DIR:-}" ]]; then
     [[ -d "$RLT_SMOKE_RESUME_DIR/actor" ]] || { echo 'Missing resume actor directory.' >&2; exit 2; }
     world_overrides+=("runner.resume_dir=$RLT_SMOKE_RESUME_DIR")
@@ -98,6 +115,7 @@ print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
 print(f'Budget: 2 train envs / 1 eval env; 40 control steps; stop at global step {cfg.runner.max_steps}')
 print(f'Resume: {cfg.runner.resume_dir}')
+print(f'Intervals: evaluate every {cfg.runner.val_check_interval}; save every {cfg.runner.save_interval}')
 print('Batch: global=4, micro=2; at most 2 AC updates per iteration')
 print(f'Planned output: {os.environ["RLT_SMOKE_RUN_DIR"]}')
 print('Preflight OK (paths/config only; GPU execution has not been tested).')
@@ -222,11 +240,18 @@ wait "$train_pid"
 train_pid=
 if [[ "$world_enabled" == 1 ]] && (( smoke_steps >= 2 )); then
     audit_root="$RLT_SMOKE_RUN_DIR/stage2_world_smoke/checkpoints"
-    previous="$audit_root/global_step_$((smoke_steps - 1))/actor/model_state_dict/full_weights.pt"
-    if [[ ! -f "$previous" && "${RLT_SMOKE_RESUME_DIR:-}" == */global_step_$((smoke_steps - 1)) ]]; then
+    latest="$audit_root/global_step_$smoke_steps/actor/model_state_dict/full_weights.pt"
+    mapfile -t saved_steps < <(
+        find "$audit_root" -mindepth 1 -maxdepth 1 -type d -name 'global_step_*' -printf '%f\n' 2>/dev/null \
+            | sed 's/^global_step_//' | sort -n
+    )
+    previous=
+    if (( ${#saved_steps[@]} >= 2 )); then
+        previous_step=${saved_steps[$((${#saved_steps[@]} - 2))]}
+        previous="$audit_root/global_step_$previous_step/actor/model_state_dict/full_weights.pt"
+    elif [[ -n "${RLT_SMOKE_RESUME_DIR:-}" ]]; then
         previous="$RLT_SMOKE_RESUME_DIR/actor/model_state_dict/full_weights.pt"
     fi
-    latest="$audit_root/global_step_$smoke_steps/actor/model_state_dict/full_weights.pt"
     if [[ -f "$previous" && -f "$latest" ]]; then
         python -m toolkits.rlt.audit_adapter --before "$previous" --after "$latest" \
             --prefix "latent_world." --require-change
