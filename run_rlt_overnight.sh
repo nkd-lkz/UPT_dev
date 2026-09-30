@@ -15,12 +15,17 @@ export RLT_STAGE1_ACTOR="${RLT_STAGE1_ACTOR:-$RLT_STORAGE/runs/stage1/maniskill_
 if [[ "$variant" == world ]]; then
     export RLT_WORLD_CHECKPOINT="${RLT_WORLD_CHECKPOINT:-$RLT_STORAGE/research/flare_step2000_pilot_20260930_005943/residual/stage1b/best.pt}"
 fi
-export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-$((6510 + RLT_PHYSICAL_GPU * 10))}"
+# Each stage selects fresh ports, including when the previous head is still closing.
+unset RLT_SMOKE_RAY_PORT
 export RLT_OUTPUT_ROOT="${RLT_OUTPUT_ROOT:-$RLT_STORAGE/runs/inspur_${variant}}"
 unset RLT_SMOKE_RESUME_DIR
 night_steps=${RLT_NIGHT_STEPS:-1000}
 [[ "$night_steps" =~ ^[1-9][0-9]*$ ]] && (( night_steps >= 20 && night_steps <= 5000 && night_steps % 10 == 0 )) || {
     echo 'RLT_NIGHT_STEPS must be a multiple of 10 in [20, 5000].' >&2; exit 2;
+}
+night_interval=${RLT_NIGHT_INTERVAL:-50}
+[[ "$night_interval" =~ ^[1-9][0-9]*$ ]] && (( night_interval <= night_steps / 2 && night_steps % night_interval == 0 )) || {
+    echo 'RLT_NIGHT_INTERVAL must divide RLT_NIGHT_STEPS and leave at least two checkpoints.' >&2; exit 2;
 }
 if [[ "${RLT_NIGHT_CHILD:-0}" != 1 ]]; then
     hours=${RLT_NIGHT_HOURS:-12}
@@ -56,6 +61,6 @@ for (( attempt=0; attempt<30; attempt++ )); do
 done
 export RLT_SMOKE_PROFILE=overnight RLT_LONG_RUN=1
 export RLT_SMOKE_STEPS="${RLT_NIGHT_STEPS:-1000}" RLT_EPISODE_STEPS=500
-export RLT_SAVE_INTERVAL=10 RLT_VAL_INTERVAL=10
+export RLT_SAVE_INTERVAL="$night_interval" RLT_VAL_INTERVAL="$night_interval"
 echo 'Smoke passed. Starting a fresh pilot with 512 BC warmup updates and periodic evaluation.'
 bash run_rlt_portable.sh "--$variant"

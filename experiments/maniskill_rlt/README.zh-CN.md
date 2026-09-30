@@ -8,13 +8,13 @@
 bash run_rlt_overnight.sh world 0
 ```
 
-第二个参数是物理 GPU 编号。启动器先核对实际 worker 的 CUDA UUID，再测试一个 RGB 环境的 reset、取图和 step，随后加载 policy。两轮集成 smoke 和新增模块参数更新检查通过后，会重新初始化一个 pilot：2 个训练环境、4 个固定评估环境、每回合 500 控制步、global batch 32、micro batch 8、512 次 BC 热身更新、每轮最多 64 次更新。每 10 轮评估、保存视频和 checkpoint。自动 expert 接管关闭；记忆分支使用 attention 读取器。
+第二个参数是物理 GPU 编号。启动器先核对实际 worker 的 CUDA UUID，再测试一个 RGB 环境的 reset、取图和 step，随后加载 policy。两轮集成 smoke 和新增模块参数更新检查通过后，会重新初始化一个 pilot：2 个训练环境、4 个固定评估环境、每回合 500 控制步、global batch 32、micro batch 8、512 次 BC 热身更新、每轮最多 64 次更新。每 50 轮评估、保存视频和 checkpoint。自动 expert 接管关闭；记忆分支使用 attention 读取器。
 
-默认达到 1000 个外层训练轮次或 12 小时就结束，以先达到者为准。`RLT_NIGHT_HOURS` 支持 1～24；`RLT_NIGHT_STEPS` 支持 20～5000 之间的 10 的倍数。退出码 124 表示达到时间上限，应使用最后一次定期 checkpoint，正在进行的更新不会保存。probe、smoke 或参数更新检查失败会停止对应分支。日志和实际配置保存到 `$RLT_STORAGE/runs/inspur_world`，可用 `RLT_OUTPUT_ROOT` 改目录。这些 pilot 尚不能证明收敛，也不能代替同配置 baseline 对照。
+默认达到 1000 个外层训练轮次或 12 小时就结束，以先达到者为准。`RLT_NIGHT_HOURS` 支持 1～24；`RLT_NIGHT_STEPS` 支持 20～5000 之间的 10 的倍数。`RLT_NIGHT_INTERVAL` 默认 50，必须整除训练轮数且至少留下两个 checkpoint（20 轮实验需设为 10）。退出码 124 表示达到时间上限，应使用最后一次定期 checkpoint，正在进行的更新不会保存。probe、smoke 或参数更新检查失败会停止对应分支。日志和实际配置保存到 `$RLT_STORAGE/runs/inspur_world`，可用 `RLT_OUTPUT_ROOT` 改目录。这些 pilot 尚不能证明收敛，也不能代替同配置 baseline 对照。
 
-每个任务独立管理 Ray head、端口和物理 GPU 锁，显卡忙时拒绝启动。渲染设备使用查询到的 PCI 地址和本机 NVIDIA EGL 库。如果库路径不同，可设置 `SAPIEN_VULKAN_LIBRARY_PATH` 和 `RLT_NVIDIA_EGL_LIBRARY`。优先使用已存在的 `$HOME/.local/rlinf-vulkan/lib/libvulkan.so.1.4.357`，否则使用系统 loader；不复制其他主机的 NVIDIA 驱动或 C++ 库。原 GPU 2 启动脚本保持原样。
+每个任务独立管理 Ray head、端口和物理 GPU 锁，每个阶段自动选择三个连续空闲端口，避免复用 smoke 端口。过夜脚本忽略 `RLT_SMOKE_RAY_PORT`；单独调用 portable 脚本仍可指定端口，已占用时拒绝启动。显卡忙时拒绝启动。渲染设备使用查询到的 PCI 地址和本机 NVIDIA EGL 库。如果库路径不同，可设置 `SAPIEN_VULKAN_LIBRARY_PATH` 和 `RLT_NVIDIA_EGL_LIBRARY`。优先使用已存在的 `$HOME/.local/rlinf-vulkan/lib/libvulkan.so.1.4.357`，否则使用系统 loader；不复制其他主机的 NVIDIA 驱动或 C++ 库。原 GPU 2 启动脚本保持原样。
 
-验证范围：CPU 配置测试覆盖物理 GPU 0/1/2 与错误预算拒绝，共享输入的只读预检通过。A6000 的 CUDA、Ray 和渲染验证由新服务器运行启动器时完成。
+验证范围：9 月 30 日 A6000 实验已通过 CUDA UUID/RGB probe 和两轮新增模块更新 smoke；随后长实验因固定端口仍被占用，在启动 Ray 前失败。新的端口选择和 smoke 到 pilot 切换已通过 CPU 回归测试，修复后的长实验仍需在目标服务器运行。测试还覆盖 head/client/dashboard 端口占用、非法预算和忙卡拒绝。
 
 
 
