@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import math
 import os
+import socket
 import subprocess
 import sys
 import textwrap
@@ -32,6 +33,73 @@ from omegaconf import OmegaConf
 from rlinf.algorithms.utils import compute_entropy_loss
 from rlinf.runners.reasoning_runner import ReasoningRunner
 from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
+
+
+@pytest.mark.parametrize("offset", [0, 1, 2])
+def test_portable_ports_reject_occupied_block_and_find_another(offset):
+    from toolkits.rlt.portable_ports import select_ray_ports
+
+    port = select_ray_ports()
+    with socket.socket() as listener:
+        listener.bind(("0.0.0.0", port + offset))
+        listener.listen()
+        with pytest.raises(OSError):
+            select_ray_ports(port)
+        selected = select_ray_ports()
+        assert port + offset not in range(selected, selected + 3)
+        assert select_ray_ports(selected) == selected
+
+
+@pytest.mark.parametrize("port", [0, 1023, 6377, 6386, 65534])
+def test_portable_ports_reject_invalid_or_protected_block(port):
+    from toolkits.rlt.portable_ports import select_ray_ports
+
+    with pytest.raises(ValueError):
+        select_ray_ports(port)
+
+
+def test_portable_overnight_uses_fresh_ports_and_sparse_saves(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    launcher = tmp_path / "run_rlt_overnight.sh"
+    launcher.write_text((root / launcher.name).read_text())
+    (tmp_path / "run_rlt_portable.sh").write_text(
+        'printf "%s %s %s %s %s\\n" "$RLT_SMOKE_PROFILE" "$RLT_SMOKE_STEPS" '
+        '"$RLT_SAVE_INTERVAL" "$RLT_VAL_INTERVAL" "${RLT_SMOKE_RAY_PORT:-auto}"\n'
+    )
+    fake_smi = tmp_path / "nvidia-smi"
+    fake_smi.write_text("#!/bin/sh\necho 0\n")
+    fake_smi.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(launcher), "world", "0"],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "RLT_NIGHT_CHILD": "1",
+            "RLT_NIGHT_STEPS": "1000",
+            "RLT_NIGHT_INTERVAL": "50",
+            "RLT_SMOKE_RAY_PORT": "6510",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "smoke 2 1 1 auto" in result.stdout
+    assert "overnight 1000 50 50 auto" in result.stdout
+
+
+@pytest.mark.parametrize("interval", ["0", "51", "1000", "bad"])
+def test_portable_overnight_rejects_invalid_save_interval(interval):
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_overnight.sh"), "world", "0"],
+        env={**os.environ, "RLT_NIGHT_STEPS": "1000", "RLT_NIGHT_INTERVAL": interval},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "RLT_NIGHT_INTERVAL must divide" in result.stderr
 
 
 @pytest.mark.parametrize("gpu", [0, 1, 2])

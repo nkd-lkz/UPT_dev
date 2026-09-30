@@ -123,7 +123,9 @@ unset RAY_ADDRESS RLINF_NODE_RANK
 
 run_id="stage2_$(hostname -s)_gpu${RLT_PHYSICAL_GPU}_$(date +%Y%m%d_%H%M%S)_$$"
 export RLT_SMOKE_RUN_DIR="${RLT_OUTPUT_ROOT:-$RLT_STORAGE/runs/portable_pilots}/$run_id"
-export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-$((6510 + RLT_PHYSICAL_GPU * 10))}"
+requested_ray_port=${RLT_SMOKE_RAY_PORT:-}
+# This default is only for config validation; auto-selection happens after the GPU guard.
+export RLT_SMOKE_RAY_PORT="${requested_ray_port:-6510}"
 
 # Read-only preflight: no Ray, CUDA allocation, checkpoint deserialization or mkdir.
 python - "${world_overrides[@]}" <<'PY'
@@ -185,17 +187,19 @@ if [[ ! "$gpu_used" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || (( gpu_used > 1024
     echo "ERROR: GPU $RLT_PHYSICAL_GPU is busy or unreadable (used MiB: $gpu_used); refusing to start." >&2
     exit 1
 fi
-python - <<'PY'
+RLT_SMOKE_RAY_PORT=$(python - "$requested_ray_port" <<'PY'
 import os
 import shutil
-import socket
+import sys
 
-port = int(os.environ['RLT_SMOKE_RAY_PORT'])
-for candidate in (port, port + 1, port + 2):
-    with socket.socket() as sock:
-        sock.bind(('0.0.0.0', candidate))
+from toolkits.rlt.portable_ports import select_ray_ports
+
 assert shutil.disk_usage('/dev/shm').free > 6 * 1024**3, 'Need at least 6 GiB free /dev/shm'
+print(select_ray_ports(int(sys.argv[1]) if sys.argv[1] else None))
 PY
+)
+export RLT_SMOKE_RAY_PORT
+echo "Selected Ray head/client/dashboard ports: $RLT_SMOKE_RAY_PORT/$((RLT_SMOKE_RAY_PORT + 1))/$((RLT_SMOKE_RAY_PORT + 2))"
 
 # Short local socket paths; CIFS is used only for output and object spilling.
 ray_temp_dir=$(mktemp -d "/dev/shm/rlt-gpu${RLT_PHYSICAL_GPU}.XXXXXXXX")
