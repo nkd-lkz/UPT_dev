@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="790" viewBox="0 0 1440 790" role="img" aria-labelledby="title desc">
+  <title id="title">RLT Atomic Decisions — bounded choice with replay learning</title>
+  <desc id="desc">Frozen VLA produces RL features and a reference chunk. A local selector chooses one bounded correction. Original routing executes an action, stored in replay. A twin critic learns from real rewards, and its candidate scores provide a detached distribution to train the selector. No counterfactual simulator is used.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#395069"/></marker>
+    <marker id="learn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b65d20"/></marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #182c43; }
+      .title { font-size: 28px; font-weight: 700; }
+      .head { font-size: 19px; font-weight: 700; }
+      .body { font-size: 16px; }
+      .small { font-size: 14px; fill: #536779; }
+      .flow { fill: none; stroke: #395069; stroke-width: 2.4; marker-end: url(#arrow); }
+      .grad { fill: none; stroke: #b65d20; stroke-width: 2.4; stroke-dasharray: 7 5; marker-end: url(#learn); }
+      .frozen { fill: #e9f0f8; stroke: #718aa6; stroke-width: 1.5; }
+      .added { fill: #e8f6f0; stroke: #308a66; stroke-width: 1.5; }
+      .base { fill: #fff; stroke: #718aa6; stroke-width: 1.5; }
+    </style>
+  </defs>
+  <rect width="1440" height="790" rx="16" fill="#fff"/>
+  <text x="40" y="48" class="title">RLT Atomic Decisions</text>
+  <text x="40" y="77" class="body">A finite correction vocabulary • the same observations and rewards • no simulator look-ahead</text>
+  <rect x="25" y="105" width="1390" height="300" rx="16" fill="#f6f9fc"/>
+  <text x="45" y="136" class="head">EXECUTION</text>
+  <rect x="45" y="181" width="195" height="124" rx="10" class="base"/>
+  <text x="61" y="212" class="head">Current observation</text>
+  <text x="61" y="242" class="body">Images + instruction</text>
+  <text x="61" y="268" class="body">+ robot state</text>
+  <path d="M 240 243 H 278" class="flow"/>
+  <rect x="280" y="181" width="205" height="124" rx="10" class="frozen"/>
+  <text x="297" y="212" class="head">Frozen Stage 1</text>
+  <text x="297" y="242" class="body">VLA + RLT encoder</text>
+  <text x="297" y="268" class="body">z, proprio, reference</text>
+  <path d="M 485 215 H 527" class="flow"/>
+  <rect x="530" y="162" width="240" height="105" rx="10" class="added"/>
+  <text x="547" y="193" class="head">Bounded candidates</text>
+  <text x="547" y="220" class="body">Reference + arm corrections</text>
+  <text x="547" y="244" class="small">Up to 17 intact 10-step chunks</text>
+  <path d="M 485 281 H 508 V 327 H 527" class="flow"/>
+  <rect x="530" y="287" width="240" height="92" rx="10" class="added"/>
+  <text x="547" y="318" class="head">Local MLP selector</text>
+  <text x="547" y="347" class="body">One categorical distribution</text>
+  <path d="M 770 213 H 811 V 233 H 849" class="flow"/>
+  <path d="M 770 333 H 811 V 272 H 849" class="flow"/>
+  <rect x="852" y="201" width="209" height="105" rx="10" class="added"/>
+  <text x="870" y="232" class="head">Choose one chunk</text>
+  <text x="870" y="261" class="body">Sample / argmax</text>
+  <text x="870" y="284" class="small">Never average commands</text>
+  <path d="M 1061 254 H 1104" class="flow"/>
+  <rect x="1107" y="181" width="280" height="124" rx="10" class="base"/>
+  <text x="1124" y="212" class="head">Routing + environment</text>
+  <text x="1124" y="242" class="body">Base / student / intervention</text>
+  <text x="1124" y="268" class="body">Execute actual commands</text>
+  <text x="885" y="365" class="small">No new stage detector • reference gripper is preserved</text>
+  <rect x="25" y="440" width="1390" height="235" rx="16" fill="#fdf8f2"/>
+  <text x="45" y="471" class="head">LEARNING FROM REAL EXECUTION</text>
+  <path d="M 1245 305 V 504" class="flow"/>
+  <rect x="1107" y="507" width="280" height="112" rx="10" class="base"/>
+  <text x="1124" y="538" class="head">Replay</text>
+  <text x="1124" y="566" class="body">Actual action, reward, done</text>
+  <text x="1124" y="592" class="body">Current and next observations</text>
+  <path d="M 1107 561 H 1065" class="flow"/>
+  <rect x="827" y="507" width="235" height="112" rx="10" class="base"/>
+  <text x="844" y="538" class="head">Continuous twin critic</text>
+  <text x="844" y="566" class="body">TD on executed actions</text>
+  <text x="844" y="592" class="small">Expected next-candidate value</text>
+  <path d="M 827 561 H 773" class="flow"/>
+  <rect x="480" y="507" width="290" height="112" rx="10" class="added"/>
+  <text x="497" y="538" class="head">Detached improvement target</text>
+  <text x="497" y="566" class="body">Candidate Q + BC + prior</text>
+  <text x="497" y="592" class="small">Estimated scores, not oracle outcomes</text>
+  <path d="M 626 507 V 381" class="grad"/>
+  <text x="647" y="428" class="small">Cross-entropy update</text>
+  <text x="647" y="448" class="small">actor only</text>
+  <rect x="45" y="507" width="385" height="112" rx="10" fill="#fff" stroke="#d3b693"/>
+  <text x="62" y="538" class="head">Explicit information boundary</text>
+  <text x="62" y="566" class="small">No privileged geometry / contact-force oracle</text>
+  <text x="62" y="592" class="body">No Jev API, world model, or external memory</text>
+  <text x="45" y="713" class="body">Blue: frozen model     Green: added decision modules     White: existing RLT components     Dashed: learning path</text>
+  <text x="45" y="748" class="small">Research implementation, not validated robot performance. Bounded joint corrections are not Cartesian skills or collision guarantees.</text>
+</svg>

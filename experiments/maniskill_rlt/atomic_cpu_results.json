@@ -1,0 +1,122 @@
+{
+  "baseline": "d9ba471e",
+  "scope": "Synthetic CPU regression only. 1024 uniformly sampled training transitions; 256 held-out contexts per seed. Same seeds/data/critic updates in each pair. No simulator or GPU.",
+  "expected-cost": {
+    "scope": "synthetic CPU loss/learning verification; not robot evidence",
+    "runs": [
+      {
+        "seed": 0,
+        "actor_update": "expected-cost",
+        "updates": 1000,
+        "seconds": 17.658042947761714,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.0078125,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": -1.9999998807907104,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 0
+        },
+        "critic_loss": 0.18292656540870667,
+        "actor_loss": 1.7195026874542236
+      },
+      {
+        "seed": 1,
+        "actor_update": "expected-cost",
+        "updates": 1000,
+        "seconds": 17.600198564119637,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.015625,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": -1.9999998807907104,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 0
+        },
+        "critic_loss": 0.13036800920963287,
+        "actor_loss": 1.8557835817337036
+      },
+      {
+        "seed": 2,
+        "actor_update": "expected-cost",
+        "updates": 1000,
+        "seconds": 17.48635080177337,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.015625,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": -1.9999998807907104,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 0
+        },
+        "critic_loss": 0.12426941096782684,
+        "actor_loss": 1.9885703325271606
+      }
+    ]
+  },
+  "distill": {
+    "scope": "synthetic CPU loss/learning verification; not robot evidence",
+    "runs": [
+      {
+        "seed": 0,
+        "actor_update": "distill",
+        "updates": 1000,
+        "seconds": 18.144947963766754,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.0078125,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": 0,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 1
+        },
+        "critic_loss": 0.18292656540870667,
+        "actor_loss": 0.004059145227074623
+      },
+      {
+        "seed": 1,
+        "actor_update": "distill",
+        "updates": 1000,
+        "seconds": 18.17383306939155,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.015625,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": 0,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 1
+        },
+        "critic_loss": 0.13036800920963287,
+        "actor_loss": 0.0004946448607370257
+      },
+      {
+        "seed": 2,
+        "actor_update": "distill",
+        "updates": 1000,
+        "seconds": 18.11707335524261,
+        "before": {
+          "mean_reward": -0.9999999403953552,
+          "greedy_critic_optimal_fraction": 0.015625,
+          "optimal_choice_fraction": 0
+        },
+        "after": {
+          "mean_reward": 0,
+          "greedy_critic_optimal_fraction": 1,
+          "optimal_choice_fraction": 1
+        },
+        "critic_loss": 0.12426941096782684,
+        "actor_loss": 0.0005986925680190325
+      }
+    ]
+  }
+}

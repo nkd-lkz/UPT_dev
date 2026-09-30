@@ -578,6 +578,13 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 drq.apply_drq(batch["next_obs"], pad=4)
             train_micro_batch_list[i] = batch
 
+        atomic_grad_isolation = self.cfg.actor.model.get("atomic_decision", {}).get(
+            "enabled", False
+        )
+        if atomic_grad_isolation:
+            # The atomic objective has disjoint actor/critic graphs. Whole-model
+            # FSDP clipping must not include the previous phase's stale gradients.
+            self.optimizer.zero_grad(set_to_none=True)
         self.qf_optimizer.zero_grad()
         gbs_critic_loss = []
         all_critic_metrics = {}
@@ -605,6 +612,8 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         }
 
         if self.update_step % self.critic_actor_ratio == 0 and train_actor:
+            if atomic_grad_isolation:
+                self.qf_optimizer.zero_grad(set_to_none=True)
             self.optimizer.zero_grad()
             gbs_actor_loss = []
             gbs_entropy = []

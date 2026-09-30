@@ -21,6 +21,7 @@ class ForwardType(Enum):
     SFT = "sft"
     SAC = "sac"
     SAC_Q = "sac_q"
+    RLT_CANDIDATES = "rlt_candidates"
     CROSSQ = "crossq"
     CROSSQ_Q = "crossq_q"
     IQL_ACTOR = "iql_actor"

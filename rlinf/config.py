@@ -1655,6 +1655,12 @@ def adv_requires_group_baseline(
 
 
 def validate_cfg(cfg: DictConfig) -> DictConfig:
+    if cfg.get("actor") and cfg.actor.get("model", {}).get("atomic_decision", {}).get(
+        "enabled", False
+    ):
+        from rlinf.algorithms.rlt.atomic_decision import validate_atomic_config
+
+        validate_atomic_config(cfg)
     OmegaConf.set_struct(cfg, True)
 
     with open_dict(cfg):

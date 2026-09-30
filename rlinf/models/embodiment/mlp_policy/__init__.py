@@ -24,7 +24,17 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
 
     iql_config = cfg.get("iql_config", None)
     if cfg.model_type == "rlt_mlp_policy":
-        model = RLTMLPPolicy(
+        policy_cls = RLTMLPPolicy
+        extra_args = {}
+        atomic_cfg = cfg.get("atomic_decision", {})
+        if atomic_cfg.get("enabled", False):
+            from rlinf.models.embodiment.mlp_policy.rlt_atomic_policy import (
+                RLTAtomicPolicy,
+            )
+
+            policy_cls = RLTAtomicPolicy
+            extra_args["atomic_decision"] = dict(atomic_cfg)
+        model = policy_cls(
             z_dim=cfg.z_dim,
             proprio_dim=cfg.proprio_dim,
             action_dim=cfg.action_dim,
@@ -35,6 +45,7 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
             add_q_head=cfg.get("add_q_head", True),
             q_head_type=cfg.get("q_head_type", "default"),
             fixed_std=cfg.get("fixed_std", 0.002),
+            **extra_args,
         )
     elif cfg.model_type == "rlt_td3_mlp_policy":
         model = RLTTD3MLPPolicy(

@@ -18,6 +18,12 @@ import queue
 import torch
 import torch.nn.functional as F
 
+from rlinf.algorithms.rlt.atomic_decision import (
+    atomic_actor_loss,
+    atomic_decision_enabled,
+    atomic_next_value,
+    validate_atomic_config,
+)
 from rlinf.algorithms.rlt.transition import use_simulator_transition_replay
 from rlinf.data.schema.embodied_types import Trajectory
 from rlinf.models.embodiment.base_policy import ForwardType
@@ -248,9 +254,11 @@ class RLTACLossMixin:
         )
 
         with torch.no_grad():
-            next_actions, _, _ = self._next_actions_for_critic_target(next_obs)
-
-            if not use_crossq:
+            if atomic_decision_enabled(self.cfg):
+                validate_atomic_config(self.cfg)
+                q_next = atomic_next_value(self.model, self.target_model, next_obs)
+            elif not use_crossq:
+                next_actions, _, _ = self._next_actions_for_critic_target(next_obs)
                 all_qf_next_target = self.target_model(
                     forward_type=ForwardType.SAC_Q,
                     obs=next_obs,
@@ -258,6 +266,7 @@ class RLTACLossMixin:
                 )
                 q_next = self._min_twin_q(all_qf_next_target)
             else:
+                next_actions, _, _ = self._next_actions_for_critic_target(next_obs)
                 _, all_qf_next = self.model(
                     forward_type=ForwardType.CROSSQ_Q,
                     obs=curr_obs,
@@ -300,6 +309,9 @@ class RLTACLossMixin:
 
     @Worker.timer("forward_actor")
     def forward_actor(self, batch):
+        if atomic_decision_enabled(self.cfg):
+            validate_atomic_config(self.cfg)
+            return atomic_actor_loss(self, batch)
         use_crossq = self.cfg.algorithm.get("q_head_type", "default") == "crossq"
 
         curr_obs = batch["curr_obs"]
