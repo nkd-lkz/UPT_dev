@@ -4,6 +4,8 @@
 
 ## 代码与分支
 
+如果只运行 ManiSkill 实验，且新主机无法访问 Hugging Face，可在原有 `embodied --model openpi --env maniskill_libero` 安装命令中加上 `--skip-libero-assets`。这个选项保留依赖安装和后续 ManiSkill/OpenPI 配置，跳过两个受支持的 LIBERO 资源下载路径。它仅适用于组合目标 `maniskill_libero`；运行 LIBERO 任务仍需要其资源。不加该选项时，下载失败仍会终止安装。恢复网络后，激活 venv 并运行 `libero-download-assets --skip-existing`，即可补充标准 LIBERO 资源。
+
 - 上游代码快照：`b85c07175b10017bf58ab83e1b1eee99666d0626`。
 - Baseline：`baseline/maniskill-rlt-2026-09-25`。
 - 后续实验：`research/rlt-flare-latent-dynamics`。

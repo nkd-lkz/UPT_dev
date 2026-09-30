@@ -34,6 +34,62 @@ from rlinf.runners.reasoning_runner import ReasoningRunner
 from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
 
 
+@pytest.mark.parametrize("skip", [False, True])
+@pytest.mark.parametrize("hf_variant", [False, True])
+def test_installer_can_skip_unused_libero_assets(tmp_path, skip, hf_variant):
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "requirements/install.sh").read_text()
+    definitions, entrypoint = source.rsplit('\nmain "$@"', 1)
+    assert not entrypoint.strip()
+    # Package managers and download services are the process boundary. An offline
+    # download must still fail the default install, but not the explicit opt-out.
+    harness = (
+        definitions
+        + """
+uv() { echo PACKAGE_INSTALL; }
+materialize_package_files() { :; }
+reset_libero_config() { :; }
+hf_libero_assets_present() { return 1; }
+retry_cmd() { echo DOWNLOAD_ATTEMPT; return 42; }
+install_maniskill_libero_extras() { echo MANISKILL_INSTALLED; }
+parse_args "$@"
+"""
+    )
+    harness += (
+        "\ninstall_hf_libero_env\ninstall_maniskill_libero_extras\n"
+        if hf_variant
+        else "\ninstall_maniskill_libero_env\n"
+    )
+    script = tmp_path / "install-harness.sh"
+    script.write_text(harness)
+    command = ["bash", str(script), "embodied", "--env", "maniskill_libero"]
+    if skip:
+        command.append("--skip-libero-assets")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == (0 if skip else 42), result.stderr
+    assert ("MANISKILL_INSTALLED" in result.stdout) == skip
+    assert ("DOWNLOAD_ATTEMPT" in result.stdout) != skip
+
+
+def test_installer_rejects_asset_skip_for_libero_only():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            "bash",
+            str(root / "requirements/install.sh"),
+            "embodied",
+            "--env",
+            "libero",
+            "--skip-libero-assets",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "--skip-libero-assets requires" in result.stderr
+
+
 @pytest.fixture
 def stage2_smoke_config(monkeypatch, tmp_path):
     from hydra import compose, initialize_config_dir

@@ -6,6 +6,15 @@ not as a claim that Stage 2 results or convergence have been reproduced.
 
 ## Code and Branches
 
+For a ManiSkill-only experiment on a host without Hugging Face access, add
+`--skip-libero-assets` to the existing `embodied --model openpi --env maniskill_libero`
+installation command. This keeps the package installation and all subsequent
+ManiSkill/OpenPI setup, but skips both supported LIBERO asset download paths.
+It is accepted only for the combined `maniskill_libero` target; LIBERO tasks
+still require their assets. Omitting the flag preserves download failures.
+After restoring the network, activate the venv and run
+`libero-download-assets --skip-existing` to fetch the standard LIBERO assets.
+
 - Upstream code snapshot: `b85c07175b10017bf58ab83e1b1eee99666d0626`.
 - Baseline branch: `baseline/maniskill-rlt-2026-09-25`.
 - Follow-up experiment branch: `research/rlt-flare-latent-dynamics`.

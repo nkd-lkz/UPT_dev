@@ -55,6 +55,8 @@ PLATFORM_FLASH_ATTN_PREBUILT=0
 # so the user can skip flash-attn on platforms where it would otherwise
 # install (e.g. when build deps aren't available on the host).
 DISABLE_FLASH_ATTN=0
+# Opt out of unused LIBERO assets when installing the combined ManiSkill target.
+SKIP_LIBERO_ASSETS=0
 # User-level opt-out for apex, set by --no-apex. Wins over the platform default.
 DISABLE_APEX=0
 # User-level opt-out for natten, set by --no-natten.
@@ -166,6 +168,8 @@ Common options:
                            Must be >=3.10. Some envs (behavior, d4rl) require 3.10 and will override this.
     --use-mirror           Use mirrors for faster downloads.
     --no-root              Avoid system dependency installation for non-root users. Only use this if you are certain system dependencies are already installed.
+    --skip-libero-assets   With --env maniskill_libero, install packages but skip LIBERO
+                           asset downloads. LIBERO tasks remain unavailable until assets are installed.
     --no-flash-attn        Skip flash-attn install. Useful when the host lacks a CUDA build
                            toolchain or when the platform has no flash-attn support
                            (Ascend/MUSA/Kunlun).
@@ -287,6 +291,10 @@ parse_args() {
                 NO_ROOT=1
                 shift
                 ;;
+            --skip-libero-assets)
+                SKIP_LIBERO_ASSETS=1
+                shift
+                ;;
             --install-rlinf)
                 NO_INSTALL_RLINF_CMD=""
                 shift
@@ -323,6 +331,10 @@ parse_args() {
 
     if [ -z "$TARGET" ]; then
         TARGET="embodied"
+    fi
+    if [ "$SKIP_LIBERO_ASSETS" -eq 1 ] && { [ "$TARGET" != embodied ] || [ "$ENV_NAME" != maniskill_libero ]; }; then
+        echo '--skip-libero-assets requires embodied --env maniskill_libero.' >&2
+        exit 1
     fi
 }
 
@@ -3003,7 +3015,11 @@ retry_cmd() {
 install_libero_env() {
     uv pip install rlinf-libero
     materialize_package_files rlinf-libero
-    retry_cmd libero-download-assets --skip-existing
+    if [ "$SKIP_LIBERO_ASSETS" -eq 1 ]; then
+        echo '[install.sh] Skipping LIBERO assets as requested; LIBERO tasks require a later asset download.'
+    else
+        retry_cmd libero-download-assets --skip-existing
+    fi
     reset_libero_config
 }
 
@@ -3040,7 +3056,9 @@ EOF
 
 install_hf_libero_env() {
     materialize_package_files hf-libero
-    if hf_libero_assets_present; then
+    if [ "$SKIP_LIBERO_ASSETS" -eq 1 ]; then
+        echo '[install.sh] Skipping LIBERO assets as requested; LIBERO tasks require a later asset download.'
+    elif hf_libero_assets_present; then
         echo "LIBERO assets already present; skipping download."
     else
         retry_cmd download_hf_libero_assets
