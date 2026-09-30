@@ -22,14 +22,24 @@ class ResponseHistory:
     after their outcomes arrive; no prediction can inspect its own outcome.
     """
 
-    def __init__(self, *, adaptive: bool = False, threshold: float = 0.015) -> None:
+    def __init__(
+        self,
+        *,
+        adaptive: bool = False,
+        threshold: float = 0.015,
+        stale_reset_guard: bool = False,
+    ) -> None:
         if not math.isfinite(threshold) or threshold <= 0:
             raise ValueError("threshold must be positive and finite")
         self.adaptive = adaptive
         self.threshold = threshold
+        self.stale_reset_guard = stale_reset_guard
+        self._generation = 0
         self.commands = torch.empty(0, 7)
         self.outcomes = torch.empty(0, 7)
         self.high_errors = 0
+        self._next_ticket = 0
+        self._pending: dict[int, tuple[torch.Tensor, torch.Tensor, bool, int]] = {}
 
     def predict(
         self, command: torch.Tensor, *, half_life: float | None = None
@@ -40,26 +50,77 @@ class ResponseHistory:
         )
 
     def observe(self, command: torch.Tensor, outcome: torch.Tensor) -> bool:
-        """Add an observed transition; return whether older evidence was dropped."""
-        if command.shape != (7,) or outcome.shape != (7,):
-            raise ValueError("Expected seven-joint completed transition")
-        if not torch.isfinite(command).all() or not torch.isfinite(outcome).all():
-            raise ValueError("Cannot store nonfinite completed evidence")
-        command, outcome = command.detach().cpu(), outcome.detach().cpu()
-        prediction, _ = self.predict(command)
-        unexpected = (
-            len(self.commands) >= 4
-            and (prediction - outcome).square().mean().sqrt() > self.threshold
+        """Record synchronous feedback; asynchronous callers use issue/complete."""
+        if self._pending:
+            raise ValueError("Complete pending predictions before synchronous observe")
+        self._validate_vector(outcome)
+        ticket, _, _ = self.issue(command)
+        return self.complete(ticket, outcome)
+
+    @staticmethod
+    def _validate_vector(value: torch.Tensor) -> None:
+        if value.shape != (7,) or not torch.isfinite(value).all():
+            raise ValueError("Wrong shape or nonfinite seven-joint evidence")
+
+    def issue(self, command: torch.Tensor) -> tuple[int, torch.Tensor, torch.Tensor]:
+        """Snapshot a prediction before execution; return ticket/prediction/support.
+
+        At most 32 predictions may await feedback. Returned tensors do not alias
+        the stored evidence. A ticket is never reused, including after reset.
+        """
+        self._validate_vector(command)
+        if len(self._pending) >= 32:
+            raise ValueError("Pending prediction budget exceeded")
+        command = command.detach().cpu().clone()
+        prediction, support = self.predict(command)
+        ticket = self._next_ticket
+        self._next_ticket += 1
+        self._pending[ticket] = (
+            command,
+            prediction.clone(),
+            len(self.commands) >= 4,
+            self._generation,
         )
-        self.high_errors = self.high_errors + 1 if unexpected else 0
+        return ticket, prediction, support
+
+    def complete(self, ticket: int, outcome: torch.Tensor) -> bool:
+        """Compare delayed feedback to its issued prediction, then update history.
+
+        Completion must follow issue order. Unknown, duplicate, reset-invalidated
+        and out-of-order tickets are rejected without changing memory.
+        """
+        if ticket not in self._pending:
+            raise ValueError("Unknown or already completed prediction ticket")
+        if ticket != next(iter(self._pending)):
+            raise ValueError("Complete predictions in issue order")
+        self._validate_vector(outcome)
+        command, prediction, supported, generation = self._pending.pop(ticket)
+        outcome = outcome.detach().cpu().clone()
+        unexpected = (
+            supported and (prediction - outcome).square().mean().sqrt() > self.threshold
+        )
+        # Old predictions remain evidence, but cannot repeatedly reset a newer
+        # estimator generation when their delayed results arrive in a burst.
+        eligible = not self.stale_reset_guard or generation == self._generation
+        if eligible:
+            self.high_errors = self.high_errors + 1 if unexpected else 0
         self.commands = torch.cat((self.commands, command[None]))[-8:]
         self.outcomes = torch.cat((self.outcomes, outcome[None]))[-8:]
-        reset = self.adaptive and self.high_errors >= 2
+        reset = self.adaptive and eligible and self.high_errors >= 2
         if reset:
             self.commands = self.commands[-2:].clone()
             self.outcomes = self.outcomes[-2:].clone()
             self.high_errors = 0
+            self._generation += 1
         return reset
+
+    def reset(self) -> None:
+        """Clear episode evidence and invalidate in-flight predictions."""
+        self.commands = torch.empty(0, 7)
+        self.outcomes = torch.empty(0, 7)
+        self.high_errors = 0
+        self._pending.clear()
+        self._generation += 1
 
 
 def predict_from_history(
@@ -103,8 +164,10 @@ def predict_from_history(
     return response[:7] * proposal, response[7:]
 
 
-def run(output: Path) -> dict:
+def run(output: Path, *, feedback_delay: int = 0) -> dict:
     """Compare declared retention choices on identical noisy action streams."""
+    if not 0 <= feedback_delay <= 16:
+        raise ValueError("feedback_delay must be in [0, 16]")
     output.mkdir(parents=True, exist_ok=False)
     rows = []
     for seed in range(3030, 3036):
@@ -118,21 +181,25 @@ def run(output: Path) -> dict:
             elif condition == "gain_rise":
                 gain[:60] = 0.2
             outcomes = commands * gain + noise
-            for name, half_life, adaptive in (
-                ("uniform", None, False),
-                ("decay_1", 1.0, False),
-                ("decay_2", 2.0, False),
-                ("decay_4", 4.0, False),
-                ("adaptive_reset", None, True),
+            for name, half_life, adaptive, guarded in (
+                ("uniform", None, False, False),
+                ("decay_1", 1.0, False, False),
+                ("decay_2", 2.0, False, False),
+                ("decay_4", 4.0, False, False),
+                ("adaptive_reset", None, True, False),
+                ("adaptive_reset_guard", None, True, True),
             ):
                 errors, supports, resets = [], [], []
-                history = ResponseHistory(adaptive=adaptive)
+                history = ResponseHistory(adaptive=adaptive, stale_reset_guard=guarded)
                 for tick in range(120):
                     # Predict before making this tick's observed outcome available.
                     pred, support = history.predict(commands[tick], half_life=half_life)
                     errors.append(float((pred - outcomes[tick]).square().mean()))
                     supports.append(float(support.mean()))
-                    if history.observe(commands[tick], outcomes[tick]):
+                    ticket, _, _ = history.issue(commands[tick])
+                    if tick >= feedback_delay and history.complete(
+                        ticket - feedback_delay, outcomes[tick - feedback_delay]
+                    ):
                         resets.append(tick)
                 rows.append(
                     {
@@ -153,6 +220,9 @@ def run(output: Path) -> dict:
         "contract": "Predict at t from completed records <t; condition/gain never enters predictor",
         "seeds": list(range(3030, 3036)),
         "change_tick": 60,
+        "feedback_delay": feedback_delay,
+        "pending_tail": feedback_delay,
+        "feedback_order": "Predict and issue at tick t, then observe outcome t-delay; unobserved tail is not flushed into metrics",
         "reset_rule": "After observing two consecutive RMSE > 0.015 with >=4 past records, retain last two; threshold fixed before adaptive follow-up",
         "results": rows,
     }
@@ -165,9 +235,10 @@ def run(output: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--feedback-delay", type=int, default=0)
     args = parser.parse_args()
     torch.set_num_threads(1)
-    run(args.output)
+    run(args.output, feedback_delay=args.feedback_delay)
 
 
 if __name__ == "__main__":

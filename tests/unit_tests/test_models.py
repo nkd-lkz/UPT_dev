@@ -1403,3 +1403,77 @@ def test_response_reset_requires_completed_errors_and_preserves_stationary_histo
         adaptive.observe(command, changed * float("nan"))
     with pytest.raises(ValueError, match="positive"):
         ResponseHistory(threshold=float("inf"))
+
+
+def test_response_delayed_feedback_is_ordered_and_reset_invalidates_tickets():
+    from toolkits.rlt.probe_response_shift import ResponseHistory
+
+    history = ResponseHistory()
+    command = torch.full((7,), 0.05)
+    first, prediction, _ = history.issue(command)
+    second, _, _ = history.issue(command)
+    assert prediction.count_nonzero() == 0
+    assert history.predict(command)[0].count_nonzero() == 0
+    with pytest.raises(ValueError, match="issue order"):
+        history.complete(second, command)
+    with pytest.raises(ValueError, match="nonfinite"):
+        history.complete(first, command * float("nan"))
+    assert history.predict(command)[0].count_nonzero() == 0
+    history.complete(first, command)
+    with pytest.raises(ValueError, match="already completed"):
+        history.complete(first, command)
+    history.reset()
+    with pytest.raises(ValueError, match="Unknown"):
+        history.complete(second, command)
+    third, prediction, _ = history.issue(command)
+    assert third > second
+    assert prediction.count_nonzero() == 0
+
+
+def test_response_completion_uses_issued_prediction_not_updated_history():
+    from toolkits.rlt.probe_response_shift import ResponseHistory
+
+    history = ResponseHistory(adaptive=True)
+    command = torch.full((7,), 0.05)
+    for _ in range(8):
+        history.observe(command, command)
+    first, prediction, _ = history.issue(command)
+    second, _, _ = history.issue(command)
+    # Mutation by the caller must not change the stored prediction or command.
+    prediction.zero_()
+    command.zero_()
+    assert not history.complete(first, torch.zeros(7))
+    assert history.complete(second, torch.zeros(7))
+    torch.testing.assert_close(
+        history.predict(torch.full((7,), 0.05))[0], torch.zeros(7)
+    )
+
+
+def test_response_pending_budget_and_synchronous_contract():
+    from toolkits.rlt.probe_response_shift import ResponseHistory
+
+    history = ResponseHistory()
+    command = torch.ones(7)
+    for _ in range(32):
+        history.issue(command)
+    with pytest.raises(ValueError, match="budget"):
+        history.issue(command)
+    with pytest.raises(ValueError, match="pending"):
+        history.observe(command, command)
+    history.reset()
+    assert not history.observe(command, command)
+
+
+def test_response_generation_guard_prevents_stale_reset_storm():
+    from toolkits.rlt.probe_response_shift import ResponseHistory
+
+    command = torch.full((7,), 0.05)
+    history = ResponseHistory(adaptive=True, stale_reset_guard=True)
+    for _ in range(8):
+        history.observe(command, command)
+    tickets = [history.issue(command)[0] for _ in range(6)]
+    resets = [history.complete(ticket, torch.zeros(7)) for ticket in tickets]
+    assert resets == [False, True, False, False, False, False]
+    # A genuinely new change still re-arms the detector in the new generation.
+    assert not history.observe(command, command)
+    assert history.observe(command, command)
