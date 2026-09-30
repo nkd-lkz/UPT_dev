@@ -43,15 +43,25 @@ export RLT_SMOKE_RENDER_DEVICE=pci:0000:e1:00.0
 unset DISPLAY WAYLAND_DISPLAY VK_LAYER_PATH VK_INSTANCE_LAYERS __NV_PRIME_RENDER_OFFLOAD
 unset RAY_ADDRESS RLINF_NODE_RANK
 
-run_id="atomic_gpu2_$(date +%Y%m%d_%H%M%S)_$$"
-export RLT_SMOKE_RUN_DIR="$RLT_STORAGE/runs/atomic_smoke/$run_id"
+profile="${RLT_ATOMIC_PROFILE:-smoke}"
+case "$profile" in
+    smoke) config_name=maniskill_rlt_stage2_atomic_gpu2; default_steps=2 ;;
+    pilot) config_name=maniskill_rlt_stage2_atomic_pilot_gpu2; default_steps=20 ;;
+    *) echo "ERROR: RLT_ATOMIC_PROFILE must be smoke or pilot." >&2; exit 2 ;;
+esac
+run_id="atomic_${profile}_gpu2_$(date +%Y%m%d_%H%M%S)_$$"
+export RLT_SMOKE_RUN_DIR="${RLT_ATOMIC_OUTPUT_DIR:-$RLT_STORAGE/runs/atomic_smoke/$run_id}"
 export RLT_SMOKE_RAY_PORT="${RLT_SMOKE_RAY_PORT:-6512}"
 
 # Read-only preflight: no Ray, CUDA allocation, checkpoint deserialization or mkdir.
-export RLT_ATOMIC_STEPS="${RLT_ATOMIC_STEPS:-2}"
-python -m toolkits.rlt.check_atomic_gpu2
+export RLT_ATOMIC_STEPS="${RLT_ATOMIC_STEPS:-$default_steps}"
+python -m toolkits.rlt.check_atomic_gpu2 --config-name "$config_name"
 if [[ "${1:---check}" == --check ]]; then
     exit 0
+fi
+if [[ -e "$RLT_SMOKE_RUN_DIR" ]]; then
+    echo "ERROR: refusing to reuse an existing run directory: $RLT_SMOKE_RUN_DIR" >&2
+    exit 1
 fi
 
 # Cooperating launches share a lock; unrelated jobs are protected by busy checks.
@@ -162,17 +172,17 @@ if [[ "$RAY_ADDRESS" != *":$RLT_SMOKE_RAY_PORT" ]]; then
 fi
 echo "Using isolated Ray at $RAY_ADDRESS (head PID $ray_head_pid)"
 
-python toolkits/rlt/probe_gpu2.py --config-name maniskill_rlt_stage2_atomic_gpu2
+python toolkits/rlt/probe_gpu2.py --config-name "$config_name"
 if [[ "${1:-}" == --probe ]]; then
     echo 'GPU 2 placement probe passed; training was not started.'
     exit 0
 fi
 
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_atomic_gpu2 --cfg job --resolve runner.max_steps="$RLT_ATOMIC_STEPS" runner.max_epochs="$RLT_ATOMIC_STEPS" \
+    --config-name "$config_name" --cfg job --resolve runner.max_steps="$RLT_ATOMIC_STEPS" runner.max_epochs="$RLT_ATOMIC_STEPS" \
     > "$RLT_SMOKE_RUN_DIR/resolved-config.yaml"
 python examples/embodiment/train_embodied_agent.py \
-    --config-name maniskill_rlt_stage2_atomic_gpu2 \
+    --config-name "$config_name" \
     runner.max_steps="$RLT_ATOMIC_STEPS" runner.max_epochs="$RLT_ATOMIC_STEPS" &
 train_pid=$!
 wait "$train_pid"

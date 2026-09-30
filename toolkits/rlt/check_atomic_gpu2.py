@@ -3,6 +3,7 @@
 
 """Read-only preflight. No Ray connection, model loading, or CUDA allocation."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,20 @@ from rlinf.utils.logging import get_logger
 
 def main() -> None:
     """Validate config, fixed GPU placement, assets and isolated Ray port."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config-name",
+        choices=(
+            "maniskill_rlt_stage2_atomic_gpu2",
+            "maniskill_rlt_stage2_atomic_pilot_gpu2",
+        ),
+        default="maniskill_rlt_stage2_atomic_gpu2",
+    )
+    args = parser.parse_args()
     with initialize_config_dir(
         config_dir=os.environ["EMBODIED_PATH"] + "/config", version_base="1.1"
     ):
-        cfg = compose(config_name="maniskill_rlt_stage2_atomic_gpu2")
+        cfg = compose(config_name=args.config_name)
     OmegaConf.resolve(cfg)
     validate_atomic_config(cfg)
     if dict(cfg.cluster.component_placement) != {
@@ -51,16 +62,19 @@ def main() -> None:
         raise ValueError("The initial atomic smoke must not load a second VLA expert.")
     if cfg.actor.global_batch_size % cfg.actor.micro_batch_size:
         raise ValueError("Global batch must be divisible by micro batch.")
-    steps = int(os.environ.get("RLT_ATOMIC_STEPS", "2"))
+    steps = int(os.environ.get("RLT_ATOMIC_STEPS", str(cfg.runner.max_steps)))
     if not 1 <= steps <= 20:
         raise ValueError("This launcher is bounded to 1..20 outer steps.")
     port = int(os.environ["RLT_SMOKE_RAY_PORT"])
     if not 6500 <= port <= 6590:
         raise ValueError("Use a separate Ray port in 6500..6590 for this experiment.")
     get_logger().info(
-        "Atomic config/path preflight OK: GPU 2 only, 2 train / 1 eval env, "
-        "500 control steps per episode, %s outer steps, Stage 1=%s. "
+        "Atomic config/path preflight OK: GPU 2 only, %s train / %s eval env, "
+        "%s control steps per episode, %s outer steps, Stage 1=%s. "
         "No GPU or distributed execution was tested.",
+        cfg.env.train.total_num_envs,
+        cfg.env.eval.total_num_envs,
+        cfg.env.train.max_episode_steps,
         steps,
         weights,
     )

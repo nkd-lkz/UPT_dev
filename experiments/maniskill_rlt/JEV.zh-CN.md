@@ -113,8 +113,25 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS
   "$RLINF_VENV/bin/python" -m toolkits.rlt.atomic_cpu_smoke --steps 1000 --actor-update expected-cost
 ```
 
-只有决定开始 GPU 验证后才执行 `bash run_rlt_atomic_gpu2.sh --probe`，再执行 `bash run_rlt_atomic_gpu2.sh --run`。本次开发没有执行这两条命令。无参数时 launcher 仅预检；`--run` 默认 2 次外层迭代，可通过 `RLT_ATOMIC_STEPS` 设为 1–20。GPU 2 忙碌则拒绝启动，不会杀死已有进程；独立 Ray 端口默认 6512，退出只清理自己创建的子进程。它不能阻止其他不使用同一锁的任务在检查后抢占 GPU，仍应先确认机器调度情况。
+只有决定开始 GPU 验证后才执行 `bash run_rlt_atomic_gpu2.sh --probe`，再执行 `bash run_rlt_atomic_gpu2.sh --run`。最初的 CPU 开发交付没有执行这两条命令。无参数时 launcher 仅预检；`--run` 默认 2 次外层迭代，可通过 `RLT_ATOMIC_STEPS` 设为 1–20。GPU 2 忙碌则拒绝启动，不会杀死已有进程；独立 Ray 端口默认 6512，退出只清理自己创建的子进程。它不能阻止其他不使用同一锁的任务在检查后抢占 GPU，仍应先确认机器调度情况。
 
 配置为 [`maniskill_rlt_stage2_atomic_gpu2.yaml`](../../examples/embodiment/config/maniskill_rlt_stage2_atomic_gpu2.yaml)，2 个训练环境、1 个评估环境、500 控制步，global batch 4、micro batch 2。日志用本地 TensorBoard，位于 `$RLT_STORAGE/runs/atomic_smoke/`；沿用 runner 的 checkpoint 目录结构。VLA 加载 Stage 1 step 2000，selector/critic 从头初始化；baseline 的 Stage 2 actor checkpoint 不能当作新 actor 的续跑权重。
+
+## GPU 2 空闲后自动继续实验
+
+下面的队列先等待 GPU 2 空闲，再运行包含物理设备探针的 2-step smoke。只有 learner 指标和最终权重通过有限值检查、确实发生更新，才会从头启动 20-step pilot。检查或任务失败会停止队列。成功率为零仍可通过工程 smoke，但不能据此说明任务能力有改善。
+
+```bash
+cd /home/luokz/rlinf_rlt/UPT_jev_dev
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+  /home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python -m toolkits.rlt.atomic_experiment \
+  --run --output "$RLT_STORAGE/runs/atomic_experiments/jev_$(date +%Y%m%d_%H%M%S)"
+```
+
+执行前将 `RLT_STORAGE` 设为现有实验存储目录。输出目录必须尚不存在。不加 `--run` 时只预检两份配置。默认等待预算为 6 小时，每 30 秒检查一次；每个阶段要求连续两次空闲，launcher 还会重新检查。smoke 最多运行 1 小时，pilot 最多运行 4 小时。每个阶段启动前核对 Git 提交和干净工作区，避免混用等待期间修改的代码。这些检查不能为 GPU 建立跨用户独占预约。
+
+pilot 使用 2 个训练环境、4 个固定种子评估环境、500 控制步的 episode、micro/global batch 8/32，每轮最多 16 次更新，共最多 320 次。前 32 次更新中 Q 对 selector 的权重为零，完成热身前执行 reference；之后用 128 次更新把 Q 权重逐步提高到 1。候选幅度、reference prior 和 temperature 沿用 smoke 设置。每 5 轮评估和保存 checkpoint，并保存评估视频。这是工程与学习诊断，尚不是匹配 baseline 的对照或收敛实验。
+
+`<output>/status.json` 记录当前阶段；完成后，各阶段的 `<output>/<smoke|pilot>/summary.json` 包含指标、成功率、权重和视频路径。新增的 `atomic/greedy_nonreference_fraction`、`atomic/target_nonreference_fraction`、`atomic/best_q_advantage` 和 `atomic/target_kl` 衡量 learner replay batch 上的选择情况，不是实际执行次数，可用于发现 selector 始终沿用 reference prior 的问题。pilot 从头初始化，不会继承 smoke 权重；分布式 checkpoint 续跑仍需单独验证。
 
 验证记录见 [JEV_VERIFICATION.md](JEV_VERIFICATION.md)。本分支保持独立，没有合并到 baseline、FLARE、Zeva 或 VR。

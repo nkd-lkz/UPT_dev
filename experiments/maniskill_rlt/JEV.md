@@ -100,8 +100,25 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS
   "$RLINF_VENV/bin/python" -m toolkits.rlt.atomic_cpu_smoke --steps 1000 --actor-update expected-cost
 ```
 
-When GPU validation is explicitly scheduled, run `bash run_rlt_atomic_gpu2.sh --probe` before `bash run_rlt_atomic_gpu2.sh --run`. Neither was executed during this development. No arguments means preflight only. The default run has two outer iterations; `RLT_ATOMIC_STEPS` permits 1–20. The launcher rejects a busy GPU 2, uses an isolated Ray port (6512), and cleans up only owned child processes. Its cooperative lock cannot prevent unrelated launchers racing after the busy check; coordinate GPU scheduling.
+When GPU validation is explicitly scheduled, run `bash run_rlt_atomic_gpu2.sh --probe` before `bash run_rlt_atomic_gpu2.sh --run`. Neither was executed in the initial CPU-only delivery. No arguments means preflight only. The default run has two outer iterations; `RLT_ATOMIC_STEPS` permits 1–20. The launcher rejects a busy GPU 2, uses an isolated Ray port (6512), and cleans up only owned child processes. Its cooperative lock cannot prevent unrelated launchers racing after the busy check; coordinate GPU scheduling.
 
 [`maniskill_rlt_stage2_atomic_gpu2.yaml`](../../examples/embodiment/config/maniskill_rlt_stage2_atomic_gpu2.yaml) uses two train environments, one eval environment, 500-control-step episodes, global batch four and micro batch two. Local TensorBoard logs go under `$RLT_STORAGE/runs/atomic_smoke/`, with the runner's normal checkpoint layout. The feature model loads Stage 1 step 2000; selector/critic initialize from scratch. A continuous baseline Stage 2 checkpoint is not a valid atomic actor resume checkpoint.
+
+## Continue Automatically When GPU 2 Becomes Idle
+
+The queue below waits for an idle GPU 2, executes a two-step smoke including the physical-device probe, then starts a fresh 20-step pilot only after finite learner metrics and final weights pass inspection. It stops on a failed check or run. A zero success rate passes the engineering smoke but supplies no evidence of task improvement.
+
+```bash
+cd /home/luokz/rlinf_rlt/UPT_jev_dev
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+  /home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python -m toolkits.rlt.atomic_experiment \
+  --run --output "$RLT_STORAGE/runs/atomic_experiments/jev_$(date +%Y%m%d_%H%M%S)"
+```
+
+Set `RLT_STORAGE` to the existing experiment storage before running. The output directory must be new. Without `--run`, the command only checks both configurations. The default waiting budget is six hours, sampled every 30 seconds; each phase requires two consecutive idle observations and the existing launcher repeats the checks. The smoke has a one-hour runtime limit; the pilot has a four-hour limit. The queue verifies that the research commit and clean worktree have not changed before launching each phase. These checks do not reserve the GPU against unrelated users.
+
+The pilot uses two training environments, four fixed-seed evaluation environments, 500-control-step episodes, micro/global batches of 8/32 and at most 16 updates per outer step (at most 320 total). For the first 32 updates, Q has zero weight in the selector objective and execution follows the reference until that warmup completes. Q weight then ramps to one over 128 updates. Candidate radius, reference prior and temperature retain smoke values. Evaluation and checkpoint saving occur every five outer steps; evaluation videos are enabled. This is an engineering/learning pilot, not a matched baseline experiment or convergence run.
+
+Read `<output>/status.json` for the current phase and `<output>/<smoke|pilot>/summary.json` for completed metrics, evaluation rates, weights and video paths. The added `atomic/greedy_nonreference_fraction`, `atomic/target_nonreference_fraction`, `atomic/best_q_advantage` and `atomic/target_kl` describe decisions on learner replay batches, not counts of actions actually executed. They help detect a selector that simply retains its reference prior. The queue does not resume smoke weights into the pilot; distributed checkpoint resume remains a separate test.
 
 See [JEV_VERIFICATION.md](JEV_VERIFICATION.md) for checked scope and pending GPU validation. No changes were merged into baseline, FLARE, Zeva or VR.

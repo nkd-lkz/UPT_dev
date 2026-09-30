@@ -274,7 +274,11 @@ def test_routing_preserves_actual_execution_and_proposed_id():
     assert not output.result["forward_inputs"]["actor_switch"].any()
 
 
-def test_overlay_config(monkeypatch):
+@pytest.mark.parametrize(
+    "config_name",
+    ["maniskill_rlt_stage2_atomic_gpu2", "maniskill_rlt_stage2_atomic_pilot_gpu2"],
+)
+def test_overlay_config(monkeypatch, config_name):
     root = Path(__file__).resolve().parents[2]
     config_dir = root / "examples/embodiment/config"
     for key, value in {
@@ -286,17 +290,106 @@ def test_overlay_config(monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     with initialize_config_dir(config_dir=str(config_dir), version_base="1.1"):
-        cfg = compose(config_name="maniskill_rlt_stage2_atomic_gpu2")
+        cfg = compose(config_name=config_name)
     OmegaConf.resolve(cfg)
     validate_atomic_config(cfg)
     assert set(cfg.cluster.component_placement.values()) == {"2-2"}
     assert cfg.rollout.expert_model is None
     assert cfg.env.train.max_episode_steps == 500
+    assert cfg.actor.global_batch_size % cfg.actor.micro_batch_size == 0
+    if "pilot" in config_name:
+        assert cfg.runner.max_steps == cfg.runner.max_epochs == 20
+        assert cfg.env.train.total_num_envs == 2
+        assert cfg.env.eval.total_num_envs == 4
+        assert cfg.runner.val_check_interval == cfg.runner.save_interval == 5
+        assert cfg.env.eval.video_cfg.save_video
+        assert cfg.algorithm.actor_weight_schedule.warmup_q_weight == 0
+        assert cfg.algorithm.actor_weight_schedule.warmup_updates == 32
+        assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates == 32
+        assert cfg.algorithm.rlt_schedule.max_updates_per_train_step == 16
     model = get_model(cfg.actor.model)
     assert isinstance(model, RLTAtomicPolicy)
     cfg.algorithm.loss_type = "rlt_td3"
     with pytest.raises(ValueError, match="rlt_ac"):
         validate_atomic_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "memory,pids,expected",
+    [
+        ("12", "", True),
+        ("1024", "\n", True),
+        ("1025", "", False),
+        ("12", "1234", False),
+        ("[N/A]", "", False),
+        ("", "", False),
+        ("12\n12", "", False),
+    ],
+)
+def test_experiment_respects_other_gpu_users(memory, pids, expected):
+    from toolkits.rlt.atomic_experiment import gpu_idle
+
+    assert gpu_idle(memory, pids) is expected
+
+
+def test_experiment_gate_requires_finite_real_learning_evidence():
+    from toolkits.rlt.atomic_experiment import summarize_scalars
+
+    series = {
+        "train/rlt/actor_updates_run": [(0, 2.0), (1, 2.0)],
+        "train/rlt/critic_updates_run": [(0, 2.0), (1, 2.0)],
+        "train/atomic/reference_probability": [(0, 0.9), (1, 0.85)],
+        "eval/success_once": [(0, 0.0), (1, 0.0)],
+    }
+    report = summarize_scalars(series)
+    assert report["actor_updates"] == report["critic_updates"] == 4
+    assert report["evaluations"][-1]["success_once"] == 0.0
+    # Zero success does not invalidate a plumbing smoke, but NaN or no updates do.
+    bad = copy.deepcopy(series)
+    bad["train/loss"] = [(0, float("nan"))]
+    with pytest.raises(ValueError, match="Non-finite"):
+        summarize_scalars(bad)
+    bad = copy.deepcopy(series)
+    bad["train/rlt/actor_updates_run"] = [(0, 0.0)]
+    with pytest.raises(ValueError, match="actor"):
+        summarize_scalars(bad)
+    with pytest.raises(ValueError, match="No scalar"):
+        summarize_scalars({})
+
+
+def test_experiment_reads_real_events_and_rejects_invalid_checkpoint(tmp_path):
+    import sys
+
+    from rlinf.utils.metric_logger import _TensorboardLogger
+    from toolkits.rlt.atomic_experiment import summarize_run
+
+    logger = _TensorboardLogger(str(tmp_path / "tensorboard"))
+    for step in (0, 1):
+        logger.log(
+            {
+                "train/rlt/actor_updates_run": 2,
+                "train/rlt/critic_updates_run": 2,
+                "train/atomic/reference_probability": 0.9,
+                "eval/success_once": 0,
+            },
+            step,
+        )
+    logger.finish()
+    checkpoint = (
+        tmp_path / "checkpoints/global_step_2/actor/model_state_dict/full_weights.pt"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    weights = make_model().state_dict()
+    torch.save(weights, checkpoint)
+    tensorflow_present = "tensorflow" in sys.modules
+    report = summarize_run(tmp_path, 2)
+    assert ("tensorflow" in sys.modules) == tensorflow_present
+    assert report["actor_updates"] == 4
+    assert (tmp_path / "summary.json").is_file()
+    weights["selector.weight"][0, 0] = float("nan")
+    torch.save(weights, checkpoint)
+    with pytest.raises(ValueError, match="Non-finite final weights"):
+        summarize_run(tmp_path, 2)
 
 
 @pytest.mark.parametrize("reward_horizon", [1, 2])

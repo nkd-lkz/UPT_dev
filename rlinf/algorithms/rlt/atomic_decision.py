@@ -180,6 +180,27 @@ def atomic_actor_loss(
             "atomic/disagreement_weight": penalty,
             "atomic/temperature": temperature,
             "atomic/target_reference_probability": target_probs[:, 0].mean().item(),
+            "atomic/greedy_nonreference_fraction": (probs.argmax(-1) != 0)
+            .float()
+            .mean()
+            .item(),
+            "atomic/target_nonreference_fraction": (target_probs.argmax(-1) != 0)
+            .float()
+            .mean()
+            .item(),
+            "atomic/best_q_advantage": (
+                q[..., 0].masked_fill(~decision["valid"], -torch.inf).max(-1).values
+                - q[:, 0, 0]
+            )
+            .mean()
+            .item(),
+            "atomic/target_kl": (
+                target_probs * (target_probs.clamp_min(1e-12).log() - safe_log_probs)
+            )
+            .sum(-1)
+            .mean()
+            .detach()
+            .item(),
             "atomic/expected_cost": (probs * cost).sum(-1).mean().detach().item(),
             "atomic/reference_clip_fraction": (worker._ref_chunk(obs).abs() > 1)
             .float()

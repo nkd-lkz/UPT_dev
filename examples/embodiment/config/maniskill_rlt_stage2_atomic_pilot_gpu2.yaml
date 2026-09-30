@@ -1,0 +1,40 @@
+# Bounded learning pilot after the two-step smoke passes.
+defaults:
+  - maniskill_rlt_stage2_atomic_gpu2
+  - _self_
+
+runner:
+  logger:
+    project_name: rlinf-rlt-atomic-pilot
+    experiment_name: rlt_atomic_gpu2_pilot
+  max_epochs: 20
+  max_steps: 20
+  val_check_interval: 5
+  save_interval: 5
+
+algorithm:
+  rlt_schedule:
+    max_updates_per_train_step: 16
+    warmup_min_size: 32
+    warmup_post_collect_updates: 32
+  # Allow the critic to see reference transitions before Q affects the selector.
+  actor_weight_schedule:
+    enable: True
+    warmup_updates: 32
+    ramp_updates: 128
+    warmup_bc_weight: 1.0
+    warmup_q_weight: 0.0
+    online_bc_weight: 1.0
+    online_q_weight: 1.0
+  replay_buffer:
+    min_buffer_size: 32
+
+actor:
+  micro_batch_size: 8
+  global_batch_size: 32
+
+env:
+  eval:
+    total_num_envs: 4
+    video_cfg:
+      save_video: True
