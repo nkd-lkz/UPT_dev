@@ -1269,3 +1269,26 @@ def test_adapter_checkpoint_audit_detects_updates_and_rejects_invalid_weights(tm
         compare(before, after, "adapter.")
     with pytest.raises(ValueError, match="No matching"):
         compare(before, after, "missing.")
+
+
+def test_response_residual_starts_at_empirical_prior_without_target_leakage():
+    from torch.utils.data import default_collate
+
+    from toolkits.rlt.probe_interaction_memory import episode_examples
+    from toolkits.rlt.probe_memory_dynamics import (
+        ResidualResponseProbe,
+        empirical_prediction,
+    )
+
+    states = torch.arange(31).float()[:, None].expand(-1, 9) * 0.001
+    actions = torch.full((31, 8), 0.02)
+    batch = default_collate(episode_examples(states, actions))
+    model = ResidualResponseProbe()
+    expected = empirical_prediction(batch)
+    torch.testing.assert_close(model(batch, memory=True), expected, rtol=0, atol=0)
+    poisoned = {**batch, "target": torch.full_like(batch["target"], float("nan"))}
+    torch.testing.assert_close(model(poisoned, memory=True), expected, rtol=0, atol=0)
+    loss = (model(batch, memory=True) - batch["target"]).square().mean()
+    loss.backward()
+    assert torch.isfinite(model.head[-1].weight.grad).all()
+    assert model.head[-1].weight.grad.abs().sum() > 0

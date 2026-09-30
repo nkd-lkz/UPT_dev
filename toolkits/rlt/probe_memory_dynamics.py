@@ -33,7 +33,7 @@ def mask_memory(batch: dict, mode: str) -> dict:
         valid[:, 4:] = False
     elif mode == "archive":
         valid[:, :4] = False
-    elif mode not in ("full", "response"):
+    elif mode not in ("full", "response", "response_residual"):
         raise ValueError("Unknown memory ablation")
     return {**batch, "memory_valid": valid}
 
@@ -60,6 +60,27 @@ class ResponseProbe(ConsequenceProbe):
         return self.head(
             torch.cat((batch["memory_query"], batch["commands"], context), -1)
         )
+
+
+class ResidualResponseProbe(ResponseProbe):
+    """Start at the empirical response and learn its error from training data.
+
+    The analytic term reads only completed transitions and known controller
+    scaling. Validation selection can retain step zero if fitting hurts.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        torch.nn.init.zeros_(self.head[-1].weight)
+        torch.nn.init.zeros_(self.head[-1].bias)
+
+    def forward(self, batch: dict, *, memory: bool) -> torch.Tensor:
+        prior = (
+            empirical_prediction(batch)
+            if memory
+            else torch.zeros_like(batch["memory_query"])
+        )
+        return prior + super().forward(batch, memory=memory)
 
 
 def pair_split(pair: int) -> str:
@@ -252,10 +273,18 @@ def audit_empirical(data_dir: Path, output: Path) -> dict:
     return report
 
 
-def fit(data_dir: Path, output: Path, *, updates: int = 600) -> dict:
+def fit(
+    data_dir: Path,
+    output: Path,
+    *,
+    updates: int = 600,
+    seeds: tuple[int, ...] = (2026, 2027, 2028),
+) -> dict:
     """Compare learned and empirical memory; select on validation only."""
     if not 1 <= updates <= 1000:
         raise ValueError("Use 1..1000 updates")
+    if not 1 <= len(seeds) <= 10:
+        raise ValueError("Use 1..10 seeds")
     path = data_dir / "trajectories.pt"
     manifest = json.loads((data_dir / "manifest.json").read_text())
     if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["sha256"]:
@@ -266,14 +295,31 @@ def fit(data_dir: Path, output: Path, *, updates: int = 600) -> dict:
     batches = build_splits(payload["trajectories"])
     output.mkdir(parents=True, exist_ok=False)
     rows = []
-    for seed in (2026, 2027, 2028):
-        for mode in ("none", "recent", "archive", "full", "response"):
+    for seed in seeds:
+        for mode in (
+            "none",
+            "recent",
+            "archive",
+            "full",
+            "response",
+            "response_residual",
+        ):
             torch.manual_seed(seed)
-            model = ResponseProbe() if mode == "response" else ConsequenceProbe()
+            model = (
+                ResidualResponseProbe()
+                if mode == "response_residual"
+                else ResponseProbe()
+                if mode == "response"
+                else ConsequenceProbe()
+            )
             optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
             generator = torch.Generator().manual_seed(seed + 1)
             best, best_step = float("inf"), 0
             checkpoint = output / f"seed{seed}_{mode}.pt"
+            # All modes may select their untrained initialization; the residual
+            # path must never lose the useful fixed prior merely by fitting.
+            best = evaluate(model, batches["validation"], mode)["mse"]
+            torch.save(model.state_dict(), checkpoint)
             for step in range(1, updates + 1):
                 ids = torch.randint(
                     len(batches["train"]["target"]), (32,), generator=generator
@@ -309,6 +355,7 @@ def fit(data_dir: Path, output: Path, *, updates: int = 600) -> dict:
                 "kind": "supervised_response_not_RL_or_task_transfer",
                 "data": manifest,
                 "updates_per_model": updates,
+                "seeds": list(seeds),
                 "samples": {k: len(v["target"]) for k, v in batches.items()},
                 "results": rows,
             }
