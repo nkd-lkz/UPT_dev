@@ -1,5 +1,23 @@
 # 验收 RLT 交互记忆分支
 
+## 在新服务器运行有界实验
+
+先在相邻的 `UPT_dev/.venv` 安装 OpenPI/ManiSkill 环境，并准备共享数据集、Stage 1 第 2000 步权重、tokenizer 和仿真资源。然后在本分支目录执行：
+
+```bash
+bash run_rlt_overnight.sh memory 1
+```
+
+第二个参数是物理 GPU 编号。启动器先核对实际 worker 的 CUDA UUID，再测试一个 RGB 环境的 reset、取图和 step，随后加载 policy。两轮集成 smoke 和新增模块参数更新检查通过后，会重新初始化一个 pilot：2 个训练环境、4 个固定评估环境、每回合 500 控制步、global batch 32、micro batch 8、512 次 BC 热身更新、每轮最多 64 次更新。每 10 轮评估、保存视频和 checkpoint。自动 expert 接管关闭；记忆分支使用 attention 读取器。
+
+默认达到 1000 个外层训练轮次或 12 小时就结束，以先达到者为准。`RLT_NIGHT_HOURS` 支持 1～24；`RLT_NIGHT_STEPS` 支持 20～5000 之间的 10 的倍数。退出码 124 表示达到时间上限，应使用最后一次定期 checkpoint，正在进行的更新不会保存。probe、smoke 或参数更新检查失败会停止对应分支。日志和实际配置保存到 `$RLT_STORAGE/runs/inspur_memory`，可用 `RLT_OUTPUT_ROOT` 改目录。这些 pilot 尚不能证明收敛，也不能代替同配置 baseline 对照。
+
+每个任务独立管理 Ray head、端口和物理 GPU 锁，显卡忙时拒绝启动。渲染设备使用查询到的 PCI 地址和本机 NVIDIA EGL 库。如果库路径不同，可设置 `SAPIEN_VULKAN_LIBRARY_PATH` 和 `RLT_NVIDIA_EGL_LIBRARY`。优先使用已存在的 `$HOME/.local/rlinf-vulkan/lib/libvulkan.so.1.4.357`，否则使用系统 loader；不复制其他主机的 NVIDIA 驱动或 C++ 库。原 GPU 2 启动脚本保持原样。
+
+验证范围：CPU 配置测试覆盖物理 GPU 0/1/2 与错误预算拒绝，共享输入的只读预检通过。A6000 的 CUDA、Ray 和渲染验证由新服务器运行启动器时完成。
+
+
+
 最新证据见 [2026-09-30 审查与小实验](AUDIT_2026-09-30.zh-CN.md)：包含本轮修改、可复查命令及验证边界。下文保留先前设计和验收历史。
 
 这份入口说明帮助你检查独立记忆分支，不启动训练。先读 [算法设计与代码索引](DESIGN.zh-CN.md)，再用下面的 CPU 测试和只读预检确认安装与接口；[最新小规模实验](PILOT_RESULTS.zh-CN.md) 提供架构图、真实 GPU 更新与续跑证据，以及预测探针的负结果。[验收记录](VERIFICATION.md) 保留初版历史记录。

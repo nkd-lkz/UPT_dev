@@ -1,0 +1,32 @@
+# @package _global_
+# Bounded exploratory budget. Success improvement still requires matched controls.
+algorithm:
+  rlt_schedule:
+    max_updates_per_train_step: 64
+    warmup_min_size: 64
+    warmup_post_collect_updates: 512
+  actor_weight_schedule:
+    enable: True
+    warmup_updates: 512
+    ramp_updates: 512
+    warmup_bc_weight: 7.0
+    warmup_q_weight: 0.0
+    online_bc_weight: 7.0
+    online_q_weight: 0.05
+  replay_buffer:
+    cache_size: 2048
+    sample_window_size: 2048
+    max_num_samples: 4096
+    min_buffer_size: 64
+
+actor:
+  micro_batch_size: 8
+  global_batch_size: 32
+  fsdp_config:
+    use_orig_params: True
+
+env:
+  eval:
+    total_num_envs: 4
+    video_cfg:
+      save_video: True
