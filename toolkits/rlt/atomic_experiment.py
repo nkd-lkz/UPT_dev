@@ -106,10 +106,20 @@ def summarize_run(run_dir: Path, steps: int) -> dict:
         if blocked:
             sys.modules.pop("tensorflow", None)
     report = summarize_scalars(series)
-    checkpoint = (
-        run_dir
-        / f"checkpoints/global_step_{steps}/actor/model_state_dict/full_weights.pt"
+    checkpoint_suffix = Path(
+        f"checkpoints/global_step_{steps}/actor/model_state_dict/full_weights.pt"
     )
+    checkpoint_candidates = [run_dir / checkpoint_suffix]
+    checkpoint_candidates.extend(run_dir.glob(f"*/{checkpoint_suffix}"))
+    checkpoints = sorted(
+        {path.resolve() for path in checkpoint_candidates if path.is_file()}
+    )
+    if len(checkpoints) != 1:
+        raise FileNotFoundError(
+            f"Expected exactly one step-{steps} checkpoint below {run_dir}, "
+            f"found {len(checkpoints)}: {checkpoints}"
+        )
+    checkpoint = checkpoints[0]
     weights = torch.load(checkpoint, map_location="cpu", weights_only=True)
     if not any("selector.weight" in key for key in weights):
         raise ValueError("Final weights do not contain the atomic selector.")
@@ -202,6 +212,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--start-phase", choices=("smoke", "pilot"), default="smoke")
+    parser.add_argument("--validated-smoke", type=Path)
     parser.add_argument("--wait-seconds", type=int, default=21600)
     parser.add_argument("--poll-seconds", type=int, default=30)
     args = parser.parse_args()
@@ -209,6 +221,8 @@ def main() -> None:
         parser.error("Wait must be 30..86400 seconds; poll must be 5..60 seconds.")
     if args.run and args.output is None:
         parser.error("--run requires a new --output directory.")
+    if args.start_phase == "pilot" and args.validated_smoke is None:
+        parser.error("--start-phase pilot requires --validated-smoke.")
     # The orchestrator's report reading is CPU-only. The child launcher sets GPU 2.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     for profile in ("smoke", "pilot"):
@@ -243,7 +257,13 @@ def main() -> None:
 
         signal.signal(signal.SIGTERM, terminate)
         try:
-            for profile, steps, timeout in (("smoke", 2, 3600), ("pilot", 20, 14400)):
+            phases = [("smoke", 2, 3600), ("pilot", 20, 14400)]
+            if args.start_phase == "pilot":
+                status["completed"]["smoke"] = summarize_run(
+                    args.validated_smoke.resolve(), 2
+                )
+                phases = phases[1:]
+            for profile, steps, timeout in phases:
                 status.update(status="waiting", next_phase=profile)
                 save_status()
                 waiting_started = time.monotonic()

@@ -474,8 +474,8 @@ def test_experiment_reads_real_events_and_rejects_invalid_checkpoint(tmp_path):
             step,
         )
     logger.finish()
-    checkpoint = (
-        tmp_path / "checkpoints/global_step_2/actor/model_state_dict/full_weights.pt"
+    checkpoint = tmp_path / (
+        "experiment/checkpoints/global_step_2/actor/model_state_dict/full_weights.pt"
     )
     checkpoint.parent.mkdir(parents=True)
     weights = make_model().state_dict()
