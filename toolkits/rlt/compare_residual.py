@@ -29,6 +29,9 @@ def run(
     data_mode: str = "candidate",
     actor_start: int = 0,
     actor_lr: float = 1e-3,
+    bc_weight: float = 0.1,
+    reference_fraction: float = 0.0,
+    seeds: tuple[int, ...] = (2026, 2027, 2028),
 ) -> dict:
     """Use sampled-action rewards only; neither model sees oracle candidate labels."""
     if not 1 <= steps <= 2000:
@@ -37,9 +40,13 @@ def run(
         raise ValueError("data_mode must be candidate or mixed")
     if not 0 <= actor_start < steps or not 0 < actor_lr <= 1e-3:
         raise ValueError("Invalid actor warmup or learning rate")
+    if not 0 <= bc_weight <= 1000:
+        raise ValueError("bc_weight must be finite and in [0, 1000]")
+    if not 0 <= reference_fraction <= 0.5 or not 1 <= len(seeds) <= 10:
+        raise ValueError("Invalid anchor fraction or seed budget")
     output.mkdir(parents=True, exist_ok=False)
     rows = []
-    for seed in (2026, 2027, 2028):
+    for seed in seeds:
         generator = torch.Generator().manual_seed(seed + 1000)
         train_obs = observations(2048, generator)
         test_obs = observations(256, generator)
@@ -53,6 +60,13 @@ def run(
             residual = (torch.rand((1024, 2, 8), generator=generator) * 2 - 1) * 0.1
             residual[..., -1] = 0
             actions[1024:] = (train_obs["ref_chunk"][1024:] + residual).clamp(-1, 1)
+        anchor_count = int(len(actions) * reference_fraction)
+        if anchor_count:
+            # Real sampled reference transitions, never all-action oracle labels.
+            anchor_ids = torch.randperm(len(actions), generator=generator)[
+                :anchor_count
+            ]
+            actions[anchor_ids] = train_obs["ref_chunk"][anchor_ids]
         rewards = reward(train_obs, actions)[:, None]
         train_obs, test_obs = (
             {k: v.to(device) for k, v in obs.items()} for obs in (train_obs, test_obs)
@@ -91,7 +105,7 @@ def run(
                     },
                     "algorithm": {
                         "gamma": 0.9,
-                        "bc_weight": 0.1,
+                        "bc_weight": bc_weight,
                         "q_weight": 1.0,
                         "reference_dropout_prob": 0.0,
                         "loss_type": "rlt_ac",
@@ -118,6 +132,8 @@ def run(
                     with torch.no_grad():
                         chosen = model.predict_action_batch(test_obs, mode="eval")[0]
                         score = reward(test_obs, chosen)
+                        q = model.sac_q_forward(test_obs, chosen)
+                        q_min = q.min(-1).values
                         curve.append(
                             {
                                 "step": step,
@@ -126,6 +142,9 @@ def run(
                                 .float()
                                 .mean()
                                 .item(),
+                                "chosen_q_bias": (q_min - score).mean().item(),
+                                "chosen_q_mae": (q_min - score).abs().mean().item(),
+                                "twin_q_gap": (q[:, 0] - q[:, 1]).abs().mean().item(),
                             }
                         )
                 if step == steps:
@@ -164,8 +183,8 @@ def run(
                     "mode": mode,
                     "seconds": time.perf_counter() - start,
                     "curve": curve,
-                    "critic_loss": float(loss),
-                    "actor_loss": float(actor_loss),
+                    "critic_loss": float(loss.detach()),
+                    "actor_loss": float(actor_loss.detach()),
                 }
             )
             report = {
@@ -173,6 +192,9 @@ def run(
                 "data_mode": data_mode,
                 "actor_start": actor_start,
                 "actor_lr": actor_lr,
+                "bc_weight": bc_weight,
+                "reference_fraction": reference_fraction,
+                "seeds": list(seeds),
                 "device": device,
                 "steps": steps,
                 "results": rows,
@@ -193,6 +215,8 @@ def main() -> None:
     )
     parser.add_argument("--actor-start", type=int, default=0)
     parser.add_argument("--actor-lr", type=float, default=1e-3)
+    parser.add_argument("--bc-weight", type=float, default=0.1)
+    parser.add_argument("--reference-fraction", type=float, default=0.0)
     args = parser.parse_args()
     torch.set_num_threads(1)
     run(
@@ -201,6 +225,8 @@ def main() -> None:
         data_mode=args.data_mode,
         actor_start=args.actor_start,
         actor_lr=args.actor_lr,
+        bc_weight=args.bc_weight,
+        reference_fraction=args.reference_fraction,
     )
 
 

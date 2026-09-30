@@ -664,3 +664,26 @@ def test_worker_update_clips_only_active_optimizer_gradients():
     for critic_group, actor_group in zip(clipped_groups[::2], clipped_groups[1::2]):
         assert critic_group and all("q_head" in name for name in critic_group)
         assert actor_group and all("q_head" not in name for name in actor_group)
+
+
+def test_residual_diagnostic_records_matched_anchors_and_q_errors(tmp_path):
+    from toolkits.rlt.compare_residual import run
+
+    report = run(
+        tmp_path / "fit",
+        steps=1,
+        seeds=(13,),
+        bc_weight=7,
+        reference_fraction=0.25,
+        data_mode="mixed",
+    )
+    assert report["reference_fraction"] == 0.25
+    assert report["bc_weight"] == 7
+    atomic, continuous = report["results"]
+    assert atomic["seed"] == continuous["seed"] == 13
+    assert atomic["critic_loss"] == continuous["critic_loss"]
+    for row in report["results"]:
+        assert row["curve"][0]["mean_reward"] == pytest.approx(-1.0)
+        assert row["curve"][-1]["chosen_q_mae"] >= 0
+    with pytest.raises(ValueError):
+        run(tmp_path / "invalid", steps=1, bc_weight=float("nan"))
