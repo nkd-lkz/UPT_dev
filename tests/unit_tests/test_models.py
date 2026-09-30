@@ -1585,3 +1585,39 @@ def test_world_action_controls_do_not_leak_suffix_or_mutate_actions():
     torch.testing.assert_close(action_controls(actions, 1)[1], actions)
     with pytest.raises(ValueError):
         action_controls(actions, 6)
+
+
+def test_world_matched_pilot_preserves_baseline_training_contract(monkeypatch):
+    from hydra import compose, initialize_config_dir
+
+    config = Path(__file__).parents[2] / "examples/embodiment/config"
+    for name, value in {
+        "EMBODIED_PATH": str(config.parent),
+        "RLT_STAGE1_ACTOR": "/example/stage1",
+        "RLT_WORLD_CHECKPOINT": "/example/world.pt",
+        "RLT_DATASET_DIR": "/example/data",
+        "RLT_SMOKE_RUN_DIR": "/example/run",
+        "RLT_SMOKE_RENDER_DEVICE": "pci:0000:e1:00.0",
+    }.items():
+        monkeypatch.setenv(name, value)
+    with initialize_config_dir(config_dir=str(config), version_base="1.1"):
+        baseline = compose(
+            config_name="maniskill_rlt_stage2_smoke_gpu2",
+            overrides=["+pilot=rlt_matched"],
+        )
+        world = compose(
+            config_name="maniskill_rlt_stage2_smoke_gpu2",
+            overrides=["+experiment=rlt_latent_world", "+pilot=rlt_matched"],
+        )
+    assert baseline.actor.fsdp_config.use_orig_params
+    assert baseline.actor.fsdp_config == world.actor.fsdp_config
+    assert baseline.env == world.env
+    assert baseline.algorithm.rlt_schedule == world.algorithm.rlt_schedule
+    assert (
+        baseline.algorithm.actor_weight_schedule
+        == world.algorithm.actor_weight_schedule
+    )
+    assert baseline.actor.global_batch_size == world.actor.global_batch_size == 32
+    assert baseline.rollout.expert_model is world.rollout.expert_model is None
+    assert world.actor.model.latent_world.enabled
+    assert world.algorithm.rlt_schedule.warmup_post_collect_updates == 512

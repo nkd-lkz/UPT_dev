@@ -4,11 +4,18 @@ set -euo pipefail
 
 world_overrides=()
 world_enabled=0
+case "${RLT_SMOKE_PROFILE:-smoke}" in
+    smoke|matched) ;;
+    *) echo 'RLT_SMOKE_PROFILE must be smoke or matched.' >&2; exit 2 ;;
+esac
 if [[ "${1:-}" == --world ]]; then
     world_enabled=1
     : "${RLT_WORLD_CHECKPOINT:?Set RLT_WORLD_CHECKPOINT to a trained sidecar}"
     world_overrides=(+experiment=rlt_latent_world runner.logger.experiment_name=stage2_world_smoke)
     shift
+fi
+if [[ "${RLT_SMOKE_PROFILE:-smoke}" == matched ]]; then
+    world_overrides+=(+pilot=rlt_matched)
 fi
 
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
@@ -124,16 +131,18 @@ assert cfg.actor.global_batch_size % cfg.actor.micro_batch_size == 0
 assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates > 0
 port = int(os.environ['RLT_SMOKE_RAY_PORT'])
 assert 1024 <= port <= 65533 and not set(range(port, port + 3)) & {6379, 6385, 6386, 6387}, 'Ray ports overlap Stage 1'
-print('Config: maniskill_rlt_stage2_smoke_gpu2; RLinf physical rank: 2; worker CUDA ordinal: 0')
+print(f'Config: maniskill_rlt_stage2_smoke_gpu2, profile={os.environ.get("RLT_SMOKE_PROFILE", "smoke")}; RLinf physical rank: 2; worker CUDA ordinal: 0')
 print(f'Stage 1: {weights} ({weights.stat().st_size:,} bytes)')
 print(f'Norm stats: {stats_path}')
 print(
-    f'Budget: 2 train envs / 1 eval env; '
+    f'Budget: {cfg.env.train.total_num_envs} train envs / {cfg.env.eval.total_num_envs} eval envs; '
     f'{cfg.env.train.max_episode_steps} control steps; stop at global step {cfg.runner.max_steps}'
 )
 print(f'Resume: {cfg.runner.resume_dir}')
 print(f'Intervals: evaluate every {cfg.runner.val_check_interval}; save every {cfg.runner.save_interval}')
-print('Batch: global=4, micro=2; at most 2 AC updates per iteration')
+print(f'Batch: global={cfg.actor.global_batch_size}, micro={cfg.actor.micro_batch_size}; '
+      f'at most {cfg.algorithm.rlt_schedule.max_updates_per_train_step} AC updates per iteration; '
+      f'warmup={cfg.algorithm.rlt_schedule.warmup_post_collect_updates}')
 print(f'Planned output: {os.environ["RLT_SMOKE_RUN_DIR"]}')
 print('Preflight OK (paths/config only; GPU execution has not been tested).')
 PY
@@ -142,6 +151,8 @@ if [[ "${1:-}" == --check ]]; then
 fi
 
 # Reject a busy GPU or occupied port before creating any run or starting Ray.
+exec {rlt_gpu2_lease}>/tmp/rlt-atomic-gpu2.lock
+flock -n "$rlt_gpu2_lease" || { echo 'GPU 2 project lease is held; refusing to start.' >&2; exit 1; }
 gpu_used=$(nvidia-smi -i 2 --query-gpu=memory.used --format=csv,noheader,nounits)
 if [[ ! "$gpu_used" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || (( gpu_used > 1024 )); then
     echo "ERROR: GPU 2 is busy or unreadable (used MiB: $gpu_used); refusing to start." >&2
