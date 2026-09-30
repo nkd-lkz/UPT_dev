@@ -33,7 +33,7 @@ def mask_memory(batch: dict, mode: str) -> dict:
         valid[:, 4:] = False
     elif mode == "archive":
         valid[:, :4] = False
-    elif mode not in ("full", "response", "response_residual"):
+    elif mode not in ("full", "response", "response_residual", "response_supported"):
         raise ValueError("Unknown memory ablation")
     return {**batch, "memory_valid": valid}
 
@@ -69,8 +69,9 @@ class ResidualResponseProbe(ResponseProbe):
     scaling. Validation selection can retain step zero if fitting hurts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, preserve_supported: bool = False) -> None:
         super().__init__()
+        self.preserve_supported = preserve_supported
         torch.nn.init.zeros_(self.head[-1].weight)
         torch.nn.init.zeros_(self.head[-1].bias)
 
@@ -80,7 +81,15 @@ class ResidualResponseProbe(ResponseProbe):
             if memory
             else torch.zeros_like(batch["memory_query"])
         )
-        return prior + super().forward(batch, memory=memory)
+        correction = super().forward(batch, memory=memory)
+        if memory and self.preserve_supported:
+            # Excitation support is not confidence or a contact/safety estimate.
+            # Finger responses have no corresponding arm-command prior.
+            gate = torch.nn.functional.pad(
+                1 - response_summary(batch)[:, 7:], (0, 2), value=1
+            )
+            correction = gate * correction
+        return prior + correction
 
 
 def pair_split(pair: int) -> str:
@@ -279,12 +288,31 @@ def fit(
     *,
     updates: int = 600,
     seeds: tuple[int, ...] = (2026, 2027, 2028),
+    modes: tuple[str, ...] = (
+        "none",
+        "recent",
+        "archive",
+        "full",
+        "response",
+        "response_residual",
+    ),
 ) -> dict:
     """Compare learned and empirical memory; select on validation only."""
     if not 1 <= updates <= 1000:
         raise ValueError("Use 1..1000 updates")
-    if not 1 <= len(seeds) <= 10:
-        raise ValueError("Use 1..10 seeds")
+    if not 1 <= len(seeds) <= 10 or len(set(seeds)) != len(seeds):
+        raise ValueError("Use 1..10 distinct seeds")
+    allowed = {
+        "none",
+        "recent",
+        "archive",
+        "full",
+        "response",
+        "response_residual",
+        "response_supported",
+    }
+    if not modes or len(set(modes)) != len(modes) or set(modes) - allowed:
+        raise ValueError("Use distinct known readout modes")
     path = data_dir / "trajectories.pt"
     manifest = json.loads((data_dir / "manifest.json").read_text())
     if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["sha256"]:
@@ -296,18 +324,11 @@ def fit(
     output.mkdir(parents=True, exist_ok=False)
     rows = []
     for seed in seeds:
-        for mode in (
-            "none",
-            "recent",
-            "archive",
-            "full",
-            "response",
-            "response_residual",
-        ):
+        for mode in modes:
             torch.manual_seed(seed)
             model = (
-                ResidualResponseProbe()
-                if mode == "response_residual"
+                ResidualResponseProbe(preserve_supported=mode == "response_supported")
+                if mode in ("response_residual", "response_supported")
                 else ResponseProbe()
                 if mode == "response"
                 else ConsequenceProbe()
@@ -356,6 +377,7 @@ def fit(
                 "data": manifest,
                 "updates_per_model": updates,
                 "seeds": list(seeds),
+                "modes": list(modes),
                 "samples": {k: len(v["target"]) for k, v in batches.items()},
                 "results": rows,
             }
@@ -376,6 +398,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--data", type=Path)
     parser.add_argument("--updates", type=int, default=600)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[2026, 2027, 2028])
+    parser.add_argument("--modes", nargs="+")
     args = parser.parse_args()
     torch.set_num_threads(2)
     if args.mode == "collect":
@@ -386,7 +410,14 @@ def main() -> None:
         if args.mode == "audit":
             print(json.dumps(audit_empirical(args.data, args.output), indent=2))
         else:
-            fit(args.data, args.output, updates=args.updates)
+            options = {"modes": tuple(args.modes)} if args.modes else {}
+            fit(
+                args.data,
+                args.output,
+                updates=args.updates,
+                seeds=tuple(args.seeds),
+                **options,
+            )
 
 
 if __name__ == "__main__":

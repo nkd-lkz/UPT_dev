@@ -1292,3 +1292,35 @@ def test_response_residual_starts_at_empirical_prior_without_target_leakage():
     loss.backward()
     assert torch.isfinite(model.head[-1].weight.grad).all()
     assert model.head[-1].weight.grad.abs().sum() > 0
+
+
+def test_response_residual_respects_past_excitation_support():
+    from torch.utils.data import default_collate
+
+    from toolkits.rlt.probe_interaction_memory import episode_examples
+    from toolkits.rlt.probe_memory_dynamics import (
+        ResidualResponseProbe,
+        empirical_prediction,
+        response_summary,
+    )
+
+    states = torch.arange(51).float()[:, None].expand(-1, 9) * 0.001
+    actions = torch.full((51, 8), 0.02)
+    batch = default_collate(episode_examples(states, actions))
+    ordinary = ResidualResponseProbe()
+    supported = ResidualResponseProbe(preserve_supported=True)
+    with torch.no_grad():
+        ordinary.head[-1].bias.fill_(0.1)
+    supported.load_state_dict(ordinary.state_dict())
+    prior = empirical_prediction(batch)
+    raw = ordinary(batch, memory=True) - prior
+    actual = supported(batch, memory=True) - prior
+    support = response_summary(batch)[:, 7:]
+    assert support.max() > 0
+    torch.testing.assert_close(actual[:, :7], raw[:, :7] * (1 - support))
+    torch.testing.assert_close(actual[:, 7:], raw[:, 7:])
+    torch.testing.assert_close(
+        ordinary(batch, memory=False), supported(batch, memory=False), rtol=0, atol=0
+    )
+    poisoned = {**batch, "target": torch.full_like(batch["target"], float("nan"))}
+    torch.testing.assert_close(supported(poisoned, memory=True), prior + actual)
