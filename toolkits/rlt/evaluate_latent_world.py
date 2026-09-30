@@ -15,6 +15,23 @@ from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
 from toolkits.rlt.train_latent_world import device_batch
 
 
+def action_controls(
+    actions: torch.Tensor, horizon: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Remove arm commands or reverse only the executed prefix, preserving grip.
+
+    A full-chunk reversal would leak commands beyond the prediction horizon.
+    These perturbations diagnose sensitivity; they are not causal rollouts.
+    """
+    if actions.ndim != 3 or not 1 <= horizon <= actions.shape[1]:
+        raise ValueError("Expected a valid prefix of [batch, time, action]")
+    stationary = actions.clone()
+    stationary[:, :horizon, :-1] = 0
+    reversed_prefix = actions.clone()
+    reversed_prefix[:, :horizon] = actions[:, :horizon].flip(1)
+    return stationary, reversed_prefix
+
+
 def episode_error_summary(episode_ids: torch.Tensor, fields: dict) -> dict:
     """Summarize independent trajectories rather than treating frames as trials.
 
@@ -27,8 +44,7 @@ def episode_error_summary(episode_ids: torch.Tensor, fields: dict) -> dict:
         rows[str(episode)] = {
             key: float(values[mask].mean())
             for key, values in fields.items()
-            if key
-            in ("cosine_error", "persistence_cosine_error", "shuffled_cosine_error")
+            if key.endswith("cosine_error")
         }
     if not rows:
         return {
@@ -120,6 +136,8 @@ def evaluate_checkpoint(
                 "cosine_error",
                 "persistence_cosine_error",
                 "shuffled_cosine_error",
+                "zero_arm_cosine_error",
+                "reversed_prefix_cosine_error",
                 "proprio_mae",
                 "latent_mse",
                 "disagreement",
@@ -149,6 +167,9 @@ def evaluate_checkpoint(
         for i, horizon in enumerate(model.config.horizons):
             predictions, delta = model(batch, batch["actions"], horizon)
             shuffled, _ = model(batch, shuffled_actions, horizon)
+            zero_arm, reversed_prefix = action_controls(batch["actions"], horizon)
+            stationary, _ = model(batch, zero_arm, horizon)
+            reversed_predictions, _ = model(batch, reversed_prefix, horizon)
             target = F.layer_norm(batch["future_z"][:, i], (model.config.z_dim,))
             current = F.layer_norm(batch["z_rl"], (model.config.z_dim,))
             valid = batch["valid"][:, i]
@@ -159,6 +180,10 @@ def evaluate_checkpoint(
                 - F.cosine_similarity(current, target, dim=-1),
                 "shuffled_cosine_error": 1
                 - F.cosine_similarity(shuffled.mean(0), target, dim=-1),
+                "zero_arm_cosine_error": 1
+                - F.cosine_similarity(stationary.mean(0), target, dim=-1),
+                "reversed_prefix_cosine_error": 1
+                - F.cosine_similarity(reversed_predictions.mean(0), target, dim=-1),
                 "proprio_mae": (
                     delta.mean(0) - (batch["future_proprio"][:, i] - batch["proprio"])
                 )

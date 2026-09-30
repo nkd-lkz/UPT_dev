@@ -1569,3 +1569,19 @@ def test_adapter_checkpoint_audit_detects_updates_and_rejects_invalid_weights(tm
         compare(before, after, "adapter.")
     with pytest.raises(ValueError, match="No matching"):
         compare(before, after, "missing.")
+
+
+def test_world_action_controls_do_not_leak_suffix_or_mutate_actions():
+    from toolkits.rlt.evaluate_latent_world import action_controls
+
+    actions = torch.arange(40).reshape(1, 5, 8).float()
+    original = actions.clone()
+    zero, reverse = action_controls(actions, 3)
+    torch.testing.assert_close(actions, original)
+    assert not zero[:, :3, :-1].any()
+    torch.testing.assert_close(zero[:, :, -1], actions[:, :, -1])
+    torch.testing.assert_close(reverse[:, :3], actions[:, :3].flip(1))
+    torch.testing.assert_close(reverse[:, 3:], actions[:, 3:])
+    torch.testing.assert_close(action_controls(actions, 1)[1], actions)
+    with pytest.raises(ValueError):
+        action_controls(actions, 6)

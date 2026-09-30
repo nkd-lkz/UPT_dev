@@ -15,15 +15,23 @@ from toolkits.rlt.train_latent_world import train
 
 
 def run(
-    config_path: Path, test_cache: Path, output: Path, *, device: str, steps: int = 1000
+    config_path: Path,
+    test_cache: Path,
+    output: Path,
+    *,
+    device: str,
+    steps: int = 1000,
+    seeds: tuple[int, ...] = (2026, 2027, 2028),
 ) -> dict:
     """Compare direct, residual and action-free models on one unchanged split."""
     if not 1 <= steps <= 1000:
         raise ValueError("A diagnostic model is limited to 1..1000 updates")
+    if not 1 <= len(seeds) <= 10:
+        raise ValueError("Use 1..10 seeds")
     base = OmegaConf.load(config_path)
     output.mkdir(parents=True, exist_ok=False)
     rows = []
-    for seed in (2026, 2027, 2028):
+    for seed in seeds:
         for name, residual, actions in (
             ("direct", False, True),
             ("residual", True, True),
@@ -50,6 +58,7 @@ def run(
             report = {
                 "scope": "Repeated development-test prediction; not sealed test or control success",
                 "steps_per_model": steps,
+                "seeds": list(seeds),
                 "results": rows,
             }
             (output / "results.json").write_text(
