@@ -18,6 +18,9 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 
+from rlinf.algorithms.rlt.interaction_memory import InteractionMemoryConfig
+from rlinf.models.embodiment.modules.rlt_memory_encoder import response_features
+
 from .probe_interaction_memory import ConsequenceProbe, episode_examples
 
 
@@ -42,17 +45,9 @@ def response_summary(batch: dict) -> torch.Tensor:
     is an empirical controller-response descriptor, not a physical parameter or
     contact label. Padding and future targets are excluded before arithmetic.
     """
-    events = torch.where(batch["memory_valid"][..., None], batch["memory_events"], 0.0)
-    if events.shape[1:] != (8, 110):
+    if batch["memory_events"].shape[1:] != (8, 110):
         raise ValueError("Response diagnostic expects default Panda memory schema")
-    commands = events[:, :, 9:89].reshape(-1, 8, 10, 8)
-    ticks = events[:, :, 98:108]
-    commanded = (commands[..., :7] * ticks[..., None]).sum(-2) * 0.1
-    delta = events[:, :, 89:96]
-    energy = commanded.square().sum(1)
-    slope = ((commanded * delta).sum(1) / (energy + 1e-4)).clamp(-2, 2)
-    support = energy / (energy + 1e-4)
-    return torch.cat((slope, support), -1)
+    return response_features(batch, InteractionMemoryConfig())
 
 
 class ResponseProbe(ConsequenceProbe):

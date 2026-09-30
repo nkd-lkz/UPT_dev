@@ -9,6 +9,7 @@ the exact decision-time context even while the neural reader is being updated.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 
 import torch
@@ -30,6 +31,8 @@ class InteractionMemoryConfig:
     hidden_dim: int = 64
     num_heads: int = 4
     retain_on_identical_reset: bool = False
+    reader_type: str = "attention"
+    joint_delta_scale: float = 0.1
 
     def __post_init__(self) -> None:
         if (
@@ -49,6 +52,16 @@ class InteractionMemoryConfig:
             raise ValueError("retrieval_size must be between zero and archive_size")
         if self.hidden_dim % self.num_heads:
             raise ValueError("hidden_dim must be divisible by num_heads")
+        if self.reader_type not in ("attention", "response"):
+            raise ValueError("reader_type must be attention or response")
+        if self.reader_type == "response" and (
+            self.action_dim < 2
+            or self.proprio_dim < self.action_dim - 1
+            or self.hidden_dim < 2 * (self.action_dim - 1)
+        ):
+            raise ValueError("Response reader needs arm joints and slope/support slots")
+        if not math.isfinite(self.joint_delta_scale) or self.joint_delta_scale <= 0:
+            raise ValueError("joint_delta_scale must be finite and positive")
 
     @property
     def event_dim(self) -> int:
@@ -198,9 +211,11 @@ class InteractionMemory:
 
     def load_state_dict(self, state: dict) -> None:
         """Restore only the same schema; do not change simulator state here."""
-        if state.get("format_version") != 1 or state.get("config") != asdict(
-            self.config
-        ):
+        try:
+            saved_config = InteractionMemoryConfig(**state["config"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Missing or invalid interaction-memory schema") from exc
+        if state.get("format_version") != 1 or saved_config != self.config:
             raise ValueError("Interaction-memory schema mismatch")
         brief, archive = state["brief"], state["archive"]
         if (

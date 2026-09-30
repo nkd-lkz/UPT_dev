@@ -1,5 +1,7 @@
 # 验收 RLT 交互记忆分支
 
+最新证据见 [2026-09-30 审查与小实验](AUDIT_2026-09-30.zh-CN.md)：包含本轮修改、可复查命令及验证边界。下文保留先前设计和验收历史。
+
 这份入口说明帮助你检查独立记忆分支，不启动训练。先读 [算法设计与代码索引](DESIGN.zh-CN.md)，再用下面的 CPU 测试和只读预检确认安装与接口；[最新小规模实验](PILOT_RESULTS.zh-CN.md) 提供架构图、真实 GPU 更新与续跑证据，以及预测探针的负结果。[验收记录](VERIFICATION.md) 保留初版历史记录。
 
 分支：`research/rlt-zeva-interaction-memory`。baseline 起点：`ff56663769fd00f6108c39195888f5d55cb8a737`。Stage 1、FLARE 和 VR 分支保持独立。

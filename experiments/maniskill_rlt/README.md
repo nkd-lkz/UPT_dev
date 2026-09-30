@@ -1,5 +1,7 @@
 # Inspect the RLT Interaction-Memory Branch
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 Use this entry point to inspect the independent memory branch without starting training. Read the [design and code map](DESIGN.md), then run CPU tests and read-only preflight. The [latest pilot results](PILOT_RESULTS.md) include the architecture figure, actual GPU updates, resume and negative predictive-probe results; [verification](VERIFICATION.md) preserves the initial implementation record.
 
 Branch: `research/rlt-zeva-interaction-memory`. Baseline: `ff56663769fd00f6108c39195888f5d55cb8a737`. Stage 1, FLARE, and VR work remain separate.

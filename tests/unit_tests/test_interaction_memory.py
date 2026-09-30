@@ -289,7 +289,8 @@ def test_transport_and_replay_keep_terminal_snapshot_not_reset_memory(config):
 @pytest.mark.parametrize(
     "name", ["maniskill_rlt_stage2_ac_mlp", "maniskill_rlt_stage2_smoke_gpu2"]
 )
-def test_hydra_overlays_compose_without_starting_ray(name, monkeypatch):
+@pytest.mark.parametrize("overlay", ["rlt_memory", "rlt_memory_response"])
+def test_hydra_overlays_compose_without_starting_ray(name, overlay, monkeypatch):
     root = Path(__file__).resolve().parents[2]
     for key in ("RLT_SMOKE_RUN_DIR", "RLT_STAGE1_ACTOR", "RLT_DATASET_DIR"):
         monkeypatch.setenv(key, "/validation-only/not-used")
@@ -298,7 +299,7 @@ def test_hydra_overlays_compose_without_starting_ray(name, monkeypatch):
     with initialize_config_dir(
         config_dir=str(root / "examples/embodiment/config"), version_base=None
     ):
-        cfg = compose(config_name=name, overrides=["+experiment=rlt_memory"])
+        cfg = compose(config_name=name, overrides=[f"+experiment={overlay}"])
         validate_interaction_memory_cfg(cfg)
         cfg.actor.fsdp_config.use_orig_params = False
         with pytest.raises(ValueError, match="use_orig_params"):
@@ -488,3 +489,51 @@ def test_offline_probe_uses_past_only_evidence():
     other = episode_examples(changed, actions)
     torch.testing.assert_close(rows[1]["memory_events"], other[1]["memory_events"])
     assert not torch.equal(rows[1]["target"], other[1]["target"])
+
+
+def test_response_reader_matches_empirical_descriptor_and_has_no_parameters():
+    from dataclasses import replace
+
+    from toolkits.rlt.probe_memory_dynamics import response_summary
+
+    c = replace(InteractionMemoryConfig(), reader_type="response")
+    obs = _obs(c)
+    reader = RLTMemoryEncoder(c)
+    context = reader(obs)
+    torch.testing.assert_close(context[:, :14], response_summary(obs))
+    assert torch.count_nonzero(context[:, 14:]) == 0
+    assert list(reader.parameters()) == []
+    assert torch.count_nonzero(reader(_obs(c, empty=True))) == 0
+    policy = _policy(c)
+    action = policy.sac_forward(obs, deterministic=True)[0]
+    q = policy.sac_q_forward(obs, action.detach())
+    (action.mean() + q.mean()).backward()
+    assert torch.isfinite(action).all() and torch.isfinite(q).all()
+    assert any(p.grad is not None for p in policy.q_head.parameters())
+
+
+def test_response_reader_partial_commands_and_old_checkpoint(config):
+    from dataclasses import replace
+
+    c = replace(config, reader_type="response")
+    memory = InteractionMemory(c)
+    memory.begin_attempt("partial")
+    start = torch.zeros(c.proprio_dim)
+    end = start.clone()
+    end[0] = 0.05
+    memory.append_completed(start, torch.tensor([[0.5, 1.0]]), end)
+    obs = {k: v.unsqueeze(0) for k, v in memory.snapshot(end).items()}
+    expected = RLTMemoryEncoder(c)(obs)
+    assert expected[0, 0] == pytest.approx(0.0025 / 0.0026)
+    # A padded action is not an executed command, even inside a valid record.
+    slot = torch.nonzero(obs["memory_valid"][0])[0, 0]
+    obs["memory_events"][0, slot, c.proprio_dim + c.action_dim] = torch.nan
+    torch.testing.assert_close(RLTMemoryEncoder(c)(obs), expected)
+    legacy = InteractionMemory(config)
+    legacy.begin_attempt("legacy")
+    state = legacy.state_dict()
+    for key in ("reader_type", "joint_delta_scale"):
+        state["config"].pop(key)
+    restored = InteractionMemory(config)
+    restored.load_state_dict(state)
+    assert restored.instance_id == "legacy"

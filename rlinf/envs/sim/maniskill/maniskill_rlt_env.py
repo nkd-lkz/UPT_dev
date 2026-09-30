@@ -169,6 +169,17 @@ class ManiskillRLTEnv(ManiskillEnv):
                 raise ValueError(
                     "Interaction memory requires normalized joint controls"
                 )
+            if memory_cfg.reader_type == "response":
+                arm_cfg = self.env.unwrapped.agent.controller.controllers["arm"].config
+                scale = memory_cfg.joint_delta_scale
+                if not (
+                    np.allclose(arm_cfg.lower, -scale)
+                    and np.allclose(arm_cfg.upper, scale)
+                    and arm_cfg.normalize_action
+                ):
+                    raise ValueError(
+                        "Response reader scale differs from the arm controller"
+                    )
         self.interaction_memory = (
             JointMemoryCollector(memory_cfg, self.num_envs)
             if memory_cfg is not None

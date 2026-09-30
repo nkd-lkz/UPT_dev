@@ -16,7 +16,12 @@ for arg in "$@"; do
 done
 config_overrides=()
 if [[ "$RLT_SMOKE_MEMORY" == 1 ]]; then
-    config_overrides=(+experiment=rlt_memory runner.logger.experiment_name=stage2_memory_smoke)
+    case "${RLT_MEMORY_READER:-attention}" in
+        attention) memory_overlay=rlt_memory ;;
+        response) memory_overlay=rlt_memory_response ;;
+        *) echo 'RLT_MEMORY_READER must be attention or response.' >&2; exit 2 ;;
+    esac
+    config_overrides=("+experiment=$memory_overlay" runner.logger.experiment_name=stage2_memory_smoke)
 fi
 
 smoke_steps=${RLT_SMOKE_STEPS:-2}

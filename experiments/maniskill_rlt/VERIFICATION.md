@@ -1,5 +1,7 @@
 # Interaction-Memory Verification — 2026-09-26
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 This record preserves the initial CPU/configuration checks. The subsequent [pilot report](PILOT_RESULTS.md) / [中文实验记录](PILOT_RESULTS.zh-CN.md) supersedes the pending GPU gates below: real smoke, optimizer updates and resume passed; 195 CPU tests now pass. Predictive benefit remains unproven. Baseline parent: `ff56663769fd00f6108c39195888f5d55cb8a737`; branch: `research/rlt-zeva-interaction-memory`.
 
 At the initial implementation milestone, no training, Ray cluster, GPU probe, real simulator, or weight download was started. The existing baseline virtualenv was reused without installing or upgrading packages. Synthetic backward passes verify gradient routing; they are not learning experiments.

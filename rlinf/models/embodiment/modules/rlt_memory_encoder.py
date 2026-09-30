@@ -9,6 +9,30 @@ from torch import nn
 from rlinf.algorithms.rlt.interaction_memory import InteractionMemoryConfig
 
 
+def response_features(
+    obs: dict[str, torch.Tensor], c: InteractionMemoryConfig
+) -> torch.Tensor:
+    """Estimate empirical arm response and excitation from completed records.
+
+    The ratio relates summed delta targets to net joint motion. It is a local
+    controller-response descriptor, not a stiffness estimate or a contact label.
+    The last action component is the gripper and is excluded. Inputs must use
+    the controller scale declared by ``joint_delta_scale``.
+    """
+    valid = obs["memory_valid"]
+    events = torch.where(valid[..., None], obs["memory_events"], 0.0)
+    p, a, h = c.proprio_dim, c.action_dim, c.chunk_len
+    commands = events[..., p : p + h * a].reshape(*events.shape[:2], h, a)
+    ticks = events[..., 2 * p + h * a : 2 * p + h * a + h].bool()
+    commands = torch.where(ticks[..., None], commands, 0.0)
+    commanded = commands[..., : a - 1].sum(-2) * c.joint_delta_scale
+    delta = events[..., p + h * a : p + h * a + a - 1]
+    energy = commanded.square().sum(1)
+    slope = ((commanded * delta).sum(1) / (energy + 1e-4)).clamp(-2, 2)
+    support = energy / (energy + 1e-4)
+    return torch.cat((slope, support), -1)
+
+
 class RLTMemoryEncoder(nn.Module):
     """Read decision-time raw evidence with a current-proprio attention query."""
 
@@ -16,6 +40,9 @@ class RLTMemoryEncoder(nn.Module):
         super().__init__()
         self.config = config
         c = config
+        if c.reader_type == "response":
+            # Parameter-free comparator with the same downstream context width.
+            return
         self.event = nn.Sequential(
             nn.Linear(c.event_dim, c.hidden_dim),
             nn.LayerNorm(c.hidden_dim),
@@ -46,6 +73,11 @@ class RLTMemoryEncoder(nn.Module):
             raise ValueError("Memory observation does not match configured schema")
         if valid.dtype != torch.bool:
             raise ValueError("memory_valid must be boolean")
+        if c.reader_type == "response":
+            features = response_features(obs, c)
+            return torch.nn.functional.pad(
+                features, (0, c.hidden_dim - features.shape[-1])
+            )
         dtype, device = self.position.dtype, self.position.device
         valid = valid.to(device)
         events = events.to(device=device, dtype=dtype)

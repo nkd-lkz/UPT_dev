@@ -1,0 +1,11 @@
+# @package _global_
+# Parameter-free past-response comparator. Same snapshots and context width.
+defaults:
+  - rlt_memory
+  - _self_
+
+actor:
+  model:
+    interaction_memory:
+      reader_type: response
+      joint_delta_scale: 0.1
