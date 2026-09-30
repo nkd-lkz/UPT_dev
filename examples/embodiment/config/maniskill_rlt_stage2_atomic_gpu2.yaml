@@ -310,6 +310,10 @@ actor:
   fsdp_config:
     strategy: "fsdp"
     sharding_strategy: "no_shard"
+    # Keep the small actor/critic under one FSDP root. Nested Q-head wrapping
+    # breaks the FSDP1 state-dict hook used by actor-to-rollout synchronization
+    # when use_orig_params preserves the two optimizer parameter groups.
+    disable: True
     # Preserve actor/critic parameter names for separate optimizers.
     use_orig_params: True
     mixed_precision:

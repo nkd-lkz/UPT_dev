@@ -403,6 +403,11 @@ def test_overlay_config(monkeypatch, config_name):
                 validate_atomic_config(invalid)
     else:
         assert isinstance(model, RLTAtomicPolicy)
+        assert cfg.actor.fsdp_config.disable is True
+        invalid = copy.deepcopy(cfg)
+        invalid.actor.fsdp_config.disable = False
+        with pytest.raises(ValueError, match="auto-wrap"):
+            validate_atomic_config(invalid)
     cfg.algorithm.loss_type = "rlt_td3"
     with pytest.raises(ValueError, match="rlt_ac"):
         validate_atomic_config(cfg)

@@ -78,6 +78,11 @@ def validate_atomic_config(cfg: Any) -> None:
     fsdp = cfg.actor.get("fsdp_config", {})
     if fsdp and not fsdp.get("use_orig_params", False):
         raise ValueError("Atomic actor/critic optimizers require use_orig_params=True.")
+    if fsdp and not fsdp.get("disable", False):
+        raise ValueError(
+            "Atomic actor/critic synchronization requires nested FSDP auto-wrap "
+            "to be disabled with fsdp_config.disable=True."
+        )
     atomic = cfg.actor.model.atomic_decision
     radius = float(atomic.get("radius", 0.08))
     prior = float(atomic.get("reference_prior", 0.9))
