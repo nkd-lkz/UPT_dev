@@ -1655,8 +1655,9 @@ def adv_requires_group_baseline(
 
 
 def validate_cfg(cfg: DictConfig) -> DictConfig:
-    if cfg.get("actor") and cfg.actor.get("model", {}).get("atomic_decision", {}).get(
-        "enabled", False
+    if cfg.get("actor") and any(
+        cfg.actor.get("model", {}).get(name, {}).get("enabled", False)
+        for name in ("atomic_decision", "bounded_residual")
     ):
         from rlinf.algorithms.rlt.atomic_decision import validate_atomic_config
 

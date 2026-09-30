@@ -18,6 +18,52 @@ def atomic_decision_enabled(cfg: Any) -> bool:
 
 def validate_atomic_config(cfg: Any) -> None:
     """Reject unsupported objective/controller combinations before starting Ray."""
+    residual = cfg.actor.model.get("bounded_residual", {})
+    if residual.get("enabled", False):
+        radius = float(residual.get("radius", 0.08))
+        if not math.isfinite(radius) or not 0 < radius <= 1:
+            raise ValueError("Residual radius must be finite and in (0, 1].")
+        if atomic_decision_enabled(cfg):
+            raise ValueError(
+                "Atomic and continuous residual actors are mutually exclusive"
+            )
+        if cfg.rollout.model.get("bounded_residual", {}) != residual:
+            raise ValueError("Actor and rollout must share bounded_residual settings")
+        entropy = cfg.algorithm.get("entropy_tuning", {})
+        if (
+            entropy.get("alpha_type") != "fixed_alpha"
+            or entropy.get("initial_alpha") != 0
+        ):
+            raise ValueError("Clipped residual comparator requires fixed zero entropy")
+        if (
+            cfg.algorithm.loss_type != "rlt_ac"
+            or cfg.actor.model.model_type != "rlt_mlp_policy"
+        ):
+            raise ValueError("Residual comparator requires rlt_ac")
+        if (
+            cfg.actor.model.get("q_head_type", "default") != "default"
+            or cfg.algorithm.get("q_head_type", "default") != "default"
+        ):
+            raise ValueError("Residual comparator does not support CrossQ")
+        if cfg.actor.get("fsdp_config", {}) and not cfg.actor.fsdp_config.get(
+            "use_orig_params", False
+        ):
+            raise ValueError("Residual comparator requires use_orig_params=True")
+        if (
+            cfg.rollout.get("enable_cuda_graph", False)
+            or cfg.rollout.get("enable_torch_compile", False)
+            or cfg.actor.get("compile_model", False)
+        ):
+            raise ValueError("Residual comparator compilation is not verified")
+        for name in ("train", "eval"):
+            env = cfg.env.get(name)
+            if env and (
+                env.env_type != "maniskill_rlt"
+                or env.init_params.control_mode != "pd_joint_delta_pos"
+            ):
+                raise ValueError(
+                    "Residual comparator requires ManiSkill joint-delta controls"
+                )
     if not atomic_decision_enabled(cfg):
         return
     if cfg.actor.model.model_type != "rlt_mlp_policy":

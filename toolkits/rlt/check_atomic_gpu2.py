@@ -23,6 +23,7 @@ def main() -> None:
         choices=(
             "maniskill_rlt_stage2_atomic_gpu2",
             "maniskill_rlt_stage2_atomic_pilot_gpu2",
+            "maniskill_rlt_stage2_residual_pilot_gpu2",
         ),
         default="maniskill_rlt_stage2_atomic_gpu2",
     )

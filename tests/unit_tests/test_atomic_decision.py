@@ -110,6 +110,80 @@ def test_candidates_bound_gripper_dedup_and_names():
     assert valid.sum() == 15
 
 
+def test_continuous_comparator_matches_reference_bounds_and_gradient_contract():
+    from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
+        RLTBoundedResidualPolicy,
+    )
+
+    model = RLTBoundedResidualPolicy(
+        z_dim=4,
+        proprio_dim=3,
+        action_dim=3,
+        num_action_chunks=2,
+        bounded_residual={"enabled": True, "radius": 0.1},
+    )
+    obs = make_obs()
+    action = model.sac_forward(obs, deterministic=True)[0].reshape(4, 2, 3)
+    torch.testing.assert_close(action, obs["ref_chunk"], rtol=0, atol=0)
+    action[..., :2].sum().backward()
+    assert model.actor_mean.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        model.actor_mean.bias.fill_(100)
+    obs["ref_chunk"][:, :, 1] = 2.0
+    action = model.sac_forward(obs)[0].reshape(4, 2, 3)
+    ref = obs["ref_chunk"].clamp(-1, 1)
+    assert (action - ref).abs().max() <= 0.100001
+    assert action.abs().max() <= 1
+    torch.testing.assert_close(action[..., -1], ref[..., -1], rtol=0, atol=0)
+    other = RLTBoundedResidualPolicy(
+        z_dim=4,
+        proprio_dim=3,
+        action_dim=3,
+        num_action_chunks=2,
+        bounded_residual={"enabled": True, "radius": 0.2},
+    )
+    with pytest.raises(ValueError, match="radius contract"):
+        other.load_state_dict(model.state_dict())
+
+
+def test_continuous_comparator_uses_actual_rlt_actor_critic_losses():
+    from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
+        RLTBoundedResidualPolicy,
+    )
+
+    model = RLTBoundedResidualPolicy(
+        z_dim=4,
+        proprio_dim=3,
+        action_dim=3,
+        num_action_chunks=2,
+        bounded_residual={"radius": 0.1},
+    )
+    worker = make_worker(model)
+    worker.cfg.actor.model.atomic_decision.enabled = False
+    obs = make_obs()
+    batch = {
+        "curr_obs": obs,
+        "next_obs": obs,
+        "actions": obs["ref_chunk"].flatten(1),
+        "rewards": torch.zeros(4, 2),
+        "dones": torch.zeros(4, 2, dtype=torch.bool),
+        "terminations": torch.zeros(4, 2, dtype=torch.bool),
+    }
+
+    def unwrapped(fn):
+        while hasattr(fn, "__wrapped__"):
+            fn = fn.__wrapped__
+        return fn
+
+    critic_loss, _ = unwrapped(RLTACLossMixin.forward_critic)(worker, batch)
+    critic_loss.backward()
+    model.zero_grad(set_to_none=True)
+    actor_loss, _, _ = unwrapped(RLTACLossMixin.forward_actor)(worker, batch)
+    actor_loss.backward()
+    assert torch.isfinite(actor_loss) and torch.isfinite(critic_loss)
+    assert model.actor_mean.weight.grad.abs().sum() > 0
+
+
 @pytest.mark.parametrize("radius", [0, -1, 1.1, float("nan"), float("inf")])
 def test_invalid_radius(radius):
     with pytest.raises(ValueError, match="radius"):
@@ -276,7 +350,11 @@ def test_routing_preserves_actual_execution_and_proposed_id():
 
 @pytest.mark.parametrize(
     "config_name",
-    ["maniskill_rlt_stage2_atomic_gpu2", "maniskill_rlt_stage2_atomic_pilot_gpu2"],
+    [
+        "maniskill_rlt_stage2_atomic_gpu2",
+        "maniskill_rlt_stage2_atomic_pilot_gpu2",
+        "maniskill_rlt_stage2_residual_pilot_gpu2",
+    ],
 )
 def test_overlay_config(monkeypatch, config_name):
     root = Path(__file__).resolve().parents[2]
@@ -308,7 +386,23 @@ def test_overlay_config(monkeypatch, config_name):
         assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates == 32
         assert cfg.algorithm.rlt_schedule.max_updates_per_train_step == 16
     model = get_model(cfg.actor.model)
-    assert isinstance(model, RLTAtomicPolicy)
+    if "residual" in config_name:
+        from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
+            RLTBoundedResidualPolicy,
+        )
+
+        assert isinstance(model, RLTBoundedResidualPolicy)
+        for path, value, message in (
+            ("algorithm.entropy_tuning.initial_alpha", 0.1, "zero entropy"),
+            ("actor.fsdp_config.use_orig_params", False, "use_orig_params"),
+            ("algorithm.q_head_type", "crossq", "CrossQ"),
+        ):
+            invalid = copy.deepcopy(cfg)
+            OmegaConf.update(invalid, path, value, force_add=True)
+            with pytest.raises(ValueError, match=message):
+                validate_atomic_config(invalid)
+    else:
+        assert isinstance(model, RLTAtomicPolicy)
     cfg.algorithm.loss_type = "rlt_td3"
     with pytest.raises(ValueError, match="rlt_ac"):
         validate_atomic_config(cfg)
@@ -473,6 +567,34 @@ def test_real_replay_preserves_executed_action_and_proposal_separately():
         assert torch.equal(batch["forward_inputs"]["model_action"], proposal.flatten(1))
     finally:
         replay.close()
+
+
+def test_continuous_residual_can_fit_a_known_in_range_correction():
+    from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
+        RLTBoundedResidualPolicy,
+    )
+
+    torch.manual_seed(56)
+    model = RLTBoundedResidualPolicy(
+        z_dim=4,
+        proprio_dim=3,
+        action_dim=3,
+        num_action_chunks=2,
+        bounded_residual={"radius": 0.1},
+    )
+    obs = make_obs(4)
+    target = obs["ref_chunk"].clone()
+    target[..., 0] += 0.04
+    optimizer = torch.optim.Adam(
+        [p for n, p in model.named_parameters() if "q_head" not in n], lr=1e-3
+    )
+    for _ in range(100):
+        action = model.sac_forward(obs, deterministic=True)[0].reshape_as(target)
+        loss = (action - target).square().mean()
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+    assert loss < 1e-6
 
 
 def test_worker_update_clips_only_active_optimizer_gradients():

@@ -27,6 +27,11 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
         policy_cls = RLTMLPPolicy
         extra_args = {}
         atomic_cfg = cfg.get("atomic_decision", {})
+        residual_cfg = cfg.get("bounded_residual", {})
+        if atomic_cfg.get("enabled", False) and residual_cfg.get("enabled", False):
+            raise ValueError(
+                "Choose either atomic decisions or the continuous comparator"
+            )
         if atomic_cfg.get("enabled", False):
             from rlinf.models.embodiment.mlp_policy.rlt_atomic_policy import (
                 RLTAtomicPolicy,
@@ -34,6 +39,13 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
 
             policy_cls = RLTAtomicPolicy
             extra_args["atomic_decision"] = dict(atomic_cfg)
+        elif residual_cfg.get("enabled", False):
+            from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
+                RLTBoundedResidualPolicy,
+            )
+
+            policy_cls = RLTBoundedResidualPolicy
+            extra_args["bounded_residual"] = dict(residual_cfg)
         model = policy_cls(
             z_dim=cfg.z_dim,
             proprio_dim=cfg.proprio_dim,

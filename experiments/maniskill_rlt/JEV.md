@@ -1,5 +1,7 @@
 # Learning to select bounded action corrections
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 This branch tests whether a finite correction vocabulary can reduce unproductive exploration under the same RLT observations, frozen VLA and reward. **RLT Atomic Decisions** branches from baseline `d9ba471e` as `research/rlt-jev-atomic-decisions`. It borrows Jev's bounded-decision interface, not its model or unpublished training recipe. Read the execution path first, then the learning objectives and verification commands. CPU checks and configuration preflight are complete; real ManiSkill, GPU/FSDP execution and transfer remain unverified.
 
 ![Inference and learning paths](figures/rlt_atomic_architecture.svg)

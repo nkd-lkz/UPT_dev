@@ -47,7 +47,8 @@ profile="${RLT_ATOMIC_PROFILE:-smoke}"
 case "$profile" in
     smoke) config_name=maniskill_rlt_stage2_atomic_gpu2; default_steps=2 ;;
     pilot) config_name=maniskill_rlt_stage2_atomic_pilot_gpu2; default_steps=20 ;;
-    *) echo "ERROR: RLT_ATOMIC_PROFILE must be smoke or pilot." >&2; exit 2 ;;
+    residual) config_name=maniskill_rlt_stage2_residual_pilot_gpu2; default_steps=20 ;;
+    *) echo "ERROR: RLT_ATOMIC_PROFILE must be smoke, pilot or residual." >&2; exit 2 ;;
 esac
 run_id="atomic_${profile}_gpu2_$(date +%Y%m%d_%H%M%S)_$$"
 export RLT_SMOKE_RUN_DIR="${RLT_ATOMIC_OUTPUT_DIR:-$RLT_STORAGE/runs/atomic_smoke/$run_id}"

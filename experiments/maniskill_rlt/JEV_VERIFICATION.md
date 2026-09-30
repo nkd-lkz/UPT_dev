@@ -1,5 +1,7 @@
 # RLT Atomic Decisions verification
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 This record separates verified CPU behavior from pending robot validation for `research/rlt-jev-atomic-decisions`, based on `d9ba471e`. Development used `/home/luokz/rlinf_rlt/UPT_jev_dev` and the existing baseline virtual environment. No new GPU process, Ray cluster, VLA inference or ManiSkill training was launched. No shared dependencies were installed or modified.
 
 ## 2026-09-30 bounded experiment queue

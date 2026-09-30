@@ -1,0 +1,21 @@
+# Same resource, reward, rollout and update budgets as the atomic pilot.
+# Same per-component radius; continuous corrections have a larger action class.
+defaults:
+  - maniskill_rlt_stage2_atomic_pilot_gpu2
+  - _self_
+
+runner:
+  logger:
+    experiment_name: rlt_residual_gpu2_pilot
+
+actor:
+  model:
+    atomic_decision:
+      enabled: False
+    bounded_residual:
+      enabled: True
+      radius: 0.08
+
+rollout:
+  model:
+    bounded_residual: ${actor.model.bounded_residual}
