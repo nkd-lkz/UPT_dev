@@ -1,0 +1,25 @@
+# One Windows environment; incompatible with the production ten-step head.
+horizon: 1
+z_dim: 2048
+proprio_dim: 9
+action_dim: 8
+reference_horizon: 10
+seed: 2026
+gamma: 0.99
+tau: 0.005
+lr: 0.0001
+batch_size: 32
+min_replay: 64
+capacity: 4096
+demo_ratio: 0.5
+critic_actor_ratio: 1
+reference_dropout: 0.5
+bc_weight: 7.0
+q_weight: 0.05
+actor_after_updates: 128
+# Normalized action MSE on the last publication minibatch, not a safety test.
+actor_max_bc_loss: 0.01
+publish_interval: 8
+max_updates: 5000
+checkpoint_interval: 50
+bootstrap_truncation: false

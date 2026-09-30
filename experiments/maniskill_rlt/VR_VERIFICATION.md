@@ -2,7 +2,13 @@
 
 This record separates server-side evidence from Windows/PICO hardware acceptance. 本记录区分服务器侧软件验证与 Windows/PICO 实机验收，不能把前者当作后者。
 
-## Online Update — 2026-09-27 / 在线更新
+## Continuation — 2026-09-30 / 较长人工验收入口
+
+`run_rlt_vr_hil_pilot.sh check` passed with Stage 1 step 2000, without CUDA allocation. CPU RPC/learner/control regression: **34 passed, 2 optional hardware skips**. Added update-budget reporting, publication imitation gate, resumed gate/metrics state, shared GPU-2 lease, per-run takeover summary and pre-allocation configuration validation. This does not add production ten-step/multi-environment integration. No new full VLA GPU smoke or physical PICO acceptance was run in this continuation.
+
+已通过 step 2000 路径与 pilot 配置预检；CPU 回归 34 项通过、2 项硬件可选跳过。新增训练预算、发布时 imitation 门槛、门槛与指标恢复、GPU 2 互斥锁、接管统计和加载权重前的配置校验。本次仍未验证正式 10 步多环境接管，也没有将脚本样本记为真人实验。
+
+## Original Online Update — 2026-09-27 / 原在线更新
 
 The standalone single-step learner now passes real GPU 2 simulation/RPC/update smoke. Run instructions: [English](VR_ONLINE.md) / [中文](VR_ONLINE.zh-CN.md). 新增的是独立单步 learner，不是正式 64 环境 worker 集成；Windows/PICO 到在线 learner 的跨机器验收仍待操作者完成。
 

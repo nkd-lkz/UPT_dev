@@ -5,6 +5,23 @@
 
 import os
 import subprocess
+from contextlib import contextmanager
+
+
+@contextmanager
+def gpu2_lease():
+    """Hold the shared project GPU-2 lock for the complete server lifetime."""
+    import fcntl
+
+    with open("/tmp/rlt-atomic-gpu2.lock", "a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another RLT job owns the GPU-2 lease") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def isolate_gpu2(*, require_idle: bool = True) -> dict[str, str]:

@@ -174,6 +174,7 @@ class OnlineService:
         ):
             raise ValueError("Invalid behavior policy version")
         action = validate_actions([message["action"]])[0]
+        started = time.monotonic()
         record = {
             "obs": self._features(obs),
             "next_obs": self._features(next_obs),
@@ -201,6 +202,10 @@ class OnlineService:
                         "episode": episode,
                         "human": message["human"],
                         "behavior_version": policy_version,
+                        "reward": reward,
+                        "terminated": message["terminated"],
+                        "truncated": message["truncated"],
+                        "service_ms": (time.monotonic() - started) * 1000,
                         "time": time.time(),
                         **metrics,
                     },

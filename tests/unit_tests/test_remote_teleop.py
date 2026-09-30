@@ -246,6 +246,74 @@ def test_online_training_fault_is_fail_closed(online_rpc, monkeypatch):
         service.checkpoint()
 
 
+def test_online_budget_and_release_gate_survive_resume(online_config, tmp_path):
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+
+    online_config.update(max_updates=2, actor_max_bc_loss=0.0)
+    learner = OnlineLearner(online_config)
+    sample = online_transition(online_config)
+    for _ in range(5):
+        learner.observe(sample)
+    assert learner.status()["update_budget_exhausted"]
+    assert learner.update_step == 2 and learner.accepted == 5
+    assert learner.predict(sample["obs"])[1] == "reference"
+    assert learner.status()["published_bc_loss"] > 0
+    learner.save(tmp_path / "learner.pt", {})
+    resumed = OnlineLearner(online_config)
+    resumed.load(tmp_path / "learner.pt")
+    assert resumed.status() == learner.status()
+    assert resumed.predict(sample["obs"])[1] == "reference"
+
+
+def test_online_report_counts_segments_without_calling_them_success(
+    online_rpc, tmp_path
+):
+    from toolkits.rlt_vr.summarize_online import summarize
+
+    service, payload, _ = online_rpc
+    service(payload)
+    service(payload)  # Retry must not become another human step.
+    service({**payload, "sequence": 1, "human": False})
+    service({**payload, "sequence": 2, "truncated": True})
+    report = summarize(tmp_path / "metrics.jsonl")
+    assert report["declared_human_steps"] == 2
+    assert report["declared_human_segments"] == 2
+    assert report["completed_episodes"] == 1
+    assert report["success_among_completed"] == 0
+
+
+def test_online_gpu_lease_is_exclusive_and_recoverable(tmp_path, monkeypatch):
+    from toolkits.rlt_vr.gpu_guard import gpu2_lease
+
+    original_open = open
+    monkeypatch.setattr(
+        "builtins.open", lambda path, mode: original_open(tmp_path / "gpu.lock", mode)
+    )
+    with gpu2_lease():
+        with pytest.raises(RuntimeError, match="lease"):
+            with gpu2_lease():
+                pass
+    with gpu2_lease():
+        pass
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("tau", float("nan")),
+        ("demo_ratio", 2),
+        ("batch_size", 1.5),
+        ("bootstrap_truncation", "false"),
+        ("typo", 1),
+    ],
+)
+def test_online_config_rejects_invalid_before_cuda(online_config, key, value):
+    from toolkits.rlt_vr.online_settings import validate_config
+
+    with pytest.raises(ValueError):
+        validate_config({**online_config, key: value})
+
+
 def test_online_background_upload_uses_authenticated_real_socket(online_rpc):
     import time
 

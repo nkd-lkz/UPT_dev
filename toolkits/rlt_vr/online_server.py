@@ -9,7 +9,8 @@ import logging
 import os
 from pathlib import Path
 
-from .gpu_guard import isolate_gpu2, verify_cuda
+from .gpu_guard import gpu2_lease, isolate_gpu2, verify_cuda
+from .online_settings import validate_config
 
 
 def main() -> None:
@@ -21,20 +22,51 @@ def main() -> None:
     parser.add_argument("--port", default=8775, type=int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check paths/config without CUDA, token or server startup",
+    )
+    parser.add_argument(
         "--config", type=Path, default=Path(__file__).with_name("online_smoke.yaml")
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    token = os.environ.get("RLT_VR_TOKEN", "")
-    if len(token) < 32:
-        parser.error("Set RLT_VR_TOKEN to a secret of at least 32 characters")
     weights = args.stage1 / "model_state_dict/full_weights.pt"
     stats = args.dataset / "norm_stats.json"
     if not weights.is_file() or not stats.is_file():
         parser.error("Stage1 full_weights.pt and dataset norm_stats.json are required")
+    from omegaconf import OmegaConf
+
+    config = validate_config(
+        OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
+    )
+    if (
+        config["z_dim"],
+        config["proprio_dim"],
+        config["action_dim"],
+        config["reference_horizon"],
+    ) != (2048, 9, 8, 10):
+        parser.error("Server requires the existing Panda/Stage1 feature dimensions")
+    if args.resume and not args.resume.is_file():
+        parser.error("Resume checkpoint does not exist")
+    if args.check:
+        logging.info(
+            "Path/config check passed: %s; Stage1=%s; no GPU/RPC tested",
+            config,
+            weights,
+        )
+        return
+    token = os.environ.get("RLT_VR_TOKEN", "")
+    if len(token) < 32:
+        parser.error("Set RLT_VR_TOKEN to a secret of at least 32 characters")
+    with gpu2_lease():
+        serve(args, config, token)
+
+
+def serve(args: argparse.Namespace, config: dict, token: str) -> None:
+    """Own GPU isolation, model lifetime and resumable authenticated service."""
     gpu = isolate_gpu2()
     verify_cuda(gpu["uuid"])
-    from omegaconf import OmegaConf
 
     from .online_learner import OnlineLearner
     from .online_service import OnlineService, frozen_feature_identity
@@ -43,7 +75,6 @@ def main() -> None:
     # File identity and content hash of stats prevent accidentally mixing feature
     # spaces. Checkpoint files are immutable exports; never overwrite them.
     feature_id = frozen_feature_identity(args.stage1, args.dataset)
-    config = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "config.json").write_text(
         json.dumps({"learner": config, "gpu": gpu, "feature_id": feature_id}, indent=2)

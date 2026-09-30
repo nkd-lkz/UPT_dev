@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$root"
-source /home/luokz/rlinf_rlt/UPT_dev/.venv/bin/activate
+source "${RLINF_VENV:-/home/luokz/rlinf_rlt/UPT_dev/.venv}/bin/activate"
 export PYTHONPATH="$root:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
@@ -19,11 +19,14 @@ unset DISPLAY WAYLAND_DISPLAY RAY_ADDRESS
 dataset="$RLT_STORAGE/datasets/lerobot/maniskill_peginsertionside_joint"
 mode=${1:---help}
 case "$mode" in
-  run) module=toolkits.rlt_vr.online_server ;;
+  run|check) module=toolkits.rlt_vr.online_server ;;
   smoke) module=toolkits.rlt_vr.smoke_online ;;
-  *) echo 'Usage: bash run_rlt_vr_online_gpu2.sh run|smoke [extra CLI arguments]'; exit 0 ;;
+  *) echo 'Usage: bash run_rlt_vr_online_gpu2.sh run|check|smoke [extra CLI arguments]'; exit 0 ;;
 esac
 shift
-: "${RLT_STAGE1_ACTOR:?Set RLT_STAGE1_ACTOR to a completed Stage1 actor export}"
+export RLT_STAGE1_ACTOR="${RLT_STAGE1_ACTOR:-$RLT_STORAGE/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor}"
 output="$RLT_STORAGE/runs/vr_online/$(date +%Y%m%d_%H%M%S)_$$"
+if [[ "$mode" == check ]]; then
+  set -- --check "$@"
+fi
 python -m "$module" --stage1 "$RLT_STAGE1_ACTOR" --dataset "$dataset" --output "$output" "$@"

@@ -25,11 +25,21 @@ GPU 2：冻结 Stage 1 → 特征 replay + 人工样本 replay
 
 ## 启动隔离的服务器
 
+需要较长的人工验收时，在本目录运行以下入口。它默认使用已完成的 Stage 1 step 2000，使用 `online_pilot.yaml`：最少 64 条 replay、batch 32、最多 5000 次 learner 更新、每 8 次发布、每 50 条保存。actor 至少热身 128 次，且最近发布 minibatch 的 imitation MSE 不超过 0.01 才能参与模型控制；否则继续参考动作。这个门槛不是独立评估或安全认证。
+
+```bash
+cd /home/luokz/rlinf_rlt/UPT_vr_dev
+bash run_rlt_vr_hil_pilot.sh check
+tmux new-session -s rlt_vr_hil 'bash run_rlt_vr_hil_pilot.sh run; exec bash'
+```
+
+在 tmux 提示中输入至少 32 字符的连接口令，Windows 使用相同口令。新入口与研究训练共用 GPU 2 互斥锁，并继续拒绝 GPU 2 已被占用的情况；`check` 只校验配置和路径，不分配 GPU。不会修改正在运行的 GPU 0/1 baseline。这里仍是一个 Windows 环境和 `horizon=1`，不能加载正式 10 步 Stage 2 head，也没有合并至 64 环境训练。下面保留较短的 128 次更新 smoke 命令。
+
 服务器固定按物理 GPU 2 的 UUID 设置 CUDA 可见性，并验证唯一可见设备；GPU 2 已占用超过 1 GiB 时拒绝启动。真实 smoke 另用 PCI 地址固定 Vulkan。不会连接 Stage 1 的 Ray，也不会执行 `ray stop`。请使用一个新的 tmux 会话，在其中执行：
 
 ```bash
 cd /home/luokz/rlinf_rlt/UPT_vr_dev
-export RLT_STAGE1_ACTOR=/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_1500/actor
+export RLT_STAGE1_ACTOR=/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor
 read -rsp '输入至少32字符的本次连接口令: ' RLT_VR_TOKEN
 export RLT_VR_TOKEN
 bash run_rlt_vr_online_gpu2.sh run
@@ -55,11 +65,20 @@ $vrRecord = "C:\Users\lkz\Desktop\rlt-records\online-" + (Get-Date -Format 'yyyy
 conda run --no-capture-output --name rlt-vr python -X faulthandler -u -m toolkits.rlt_vr.client --online --port 8775 --render-backend cpu --record "$vrRecord" --max-episode-steps 1000 --log-interval 1
 ```
 
-先保持暂停，检查画面与手柄跟踪。按 `P` 请求模型动作；随后握住侧握键，缓慢移动手柄，确认控制权切为 human。新按一次扳机切换夹爪开闭。松开 grip 后保持暂停，再按 `P` 才回到模型。`R` 重置回合，空格暂停，`Q` 退出。1000 步只用于人工验收，不与 baseline 的 100 步成功率直接比较。
+先保持暂停，检查画面与手柄跟踪。按 `P` 请求模型动作；随后握住侧握键，缓慢移动手柄，确认控制权切为 human。新按一次扳机切换夹爪开闭。松开 grip 后保持暂停，再按 `P` 才回到模型。`R` 重置回合，空格暂停，`Q` 退出。1000 步只用于人工验收，不与正式 baseline 评估配置的成功率直接比较。
 
 终端的 `Online learner` 显示 `ack`、待上传数量和服务器指标。验收应同时看到 `human_accepted` 增加、`update_step` 增加、`policy_version` 增加，而不是仅有机械臂跟随。保留本地 `.npz`；服务器仅保存特征 replay，本地记录才包含原始图像。
 
 ## 中断与恢复
+
+pilot 必须用相同配置恢复，统计入口读取原始执行日志：
+
+```bash
+bash run_rlt_vr_hil_pilot.sh run --resume /绝对路径/旧run/learner.pt
+python -m toolkits.rlt_vr.summarize_online /绝对路径/run
+```
+
+报告包含接管步数、连续接管段数、已结束回合结果和实际 learner 更新数。`human` 是客户端声明的控制来源，脚本注入也可以设置它，因此不能单凭该字段宣称真实人类实验。日志里的 `service_ms` 衡量服务端提特征与学习处理时间，不是端到端控制延迟。训练预算用完会显示 `update_budget_exhausted=true`；采集和推理继续，优化停止。
 
 恢复须先停止旧客户端，再在服务器按 Ctrl-C。请求执行期间强制中断可能使 learner 进入故障状态，此时不会覆盖上一个有效 checkpoint。正常退出保存完整网络、target、两个 optimizer、replay、发布版本与 RNG。显式指定已有 checkpoint 启动新 run：
 

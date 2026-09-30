@@ -25,11 +25,21 @@ Uploads and local control are asynchronous; server inference and learning are se
 
 ## Start the Isolated Server
 
+For longer operator acceptance, use this entrypoint. It defaults to Stage 1 step 2000 and `online_pilot.yaml`: 64 transitions before learning, batch 32, at most 5000 updates, publication every eight updates and checkpointing every 50 accepted transitions. Deployment requires at least 128 published updates and publication-minibatch imitation MSE at most 0.01; otherwise reference actions continue. This is a training diagnostic, not held-out evaluation or a safety certificate.
+
+```bash
+cd /home/luokz/rlinf_rlt/UPT_vr_dev
+bash run_rlt_vr_hil_pilot.sh check
+tmux new-session -s rlt_vr_hil 'bash run_rlt_vr_hil_pilot.sh run; exec bash'
+```
+
+Enter a secret of at least 32 characters in tmux and use the same secret on Windows. The server holds the shared project GPU-2 lease and refuses an occupied GPU. `check` validates paths/settings without allocating CUDA. GPU 0/1 baseline jobs remain unchanged. This remains one Windows environment with `horizon=1`, incompatible with the production ten-step Stage 2 head and not integrated into 64-environment training. The shorter 128-update smoke command follows.
+
 CUDA is selected by physical GPU 2 UUID and verified before model allocation. The launcher rejects GPU 2 when over 1 GiB is occupied. Real simulator smoke also pins Vulkan by PCI address. It neither joins Stage 1's Ray cluster nor runs `ray stop`. In a fresh tmux session, run:
 
 ```bash
 cd /home/luokz/rlinf_rlt/UPT_vr_dev
-export RLT_STAGE1_ACTOR=/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_1500/actor
+export RLT_STAGE1_ACTOR=/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor
 read -rsp 'Enter a random connection secret of at least 32 characters: ' RLT_VR_TOKEN
 export RLT_VR_TOKEN
 bash run_rlt_vr_online_gpu2.sh run
@@ -55,11 +65,20 @@ $vrRecord = "C:\Users\lkz\Desktop\rlt-records\online-" + (Get-Date -Format 'yyyy
 conda run --no-capture-output --name rlt-vr python -X faulthandler -u -m toolkits.rlt_vr.client --online --port 8775 --render-backend cpu --record "$vrRecord" --max-episode-steps 1000 --log-interval 1
 ```
 
-Check images and tracking while paused. Press `P` to request policy actions, then hold grip and move slowly to take control. A fresh trigger press toggles the gripper. Releasing grip pauses; `P` explicitly returns to policy control. `R` resets, Space pauses and `Q` exits. The 1000-step manual acceptance horizon must not be compared directly with baseline's 100-step success rate.
+Check images and tracking while paused. Press `P` to request policy actions, then hold grip and move slowly to take control. A fresh trigger press toggles the gripper. Releasing grip pauses; `P` explicitly returns to policy control. `R` resets, Space pauses and `Q` exits. The 1000-step manual acceptance horizon must not be compared directly with the production baseline evaluation configuration.
 
 The terminal's `Online learner` line shows `ack`, pending uploads and server metrics. Acceptance requires increases in `human_accepted`, `update_step` and `policy_version`, not just visible robot following. Retain local `.npz` records: server replay stores features, while local records contain the original images.
 
 ## Interrupt and Resume
+
+For the longer pilot, restore with the same pilot configuration and inspect accepted execution metrics:
+
+```bash
+bash run_rlt_vr_hil_pilot.sh run --resume /absolute/path/previous-run/learner.pt
+python -m toolkits.rlt_vr.summarize_online /absolute/path/run
+```
+
+The report counts takeover steps, contiguous takeover segments, completed episodes and actual learner updates. Human flags describe the client-declared action route; scripted clients can set them too. `service_ms` measures server feature/update processing, not end-to-end control latency. `update_budget_exhausted=true` means optimization stopped; collection and inference continue.
 
 Stop the client before pressing Ctrl-C on the server. Interrupting an in-flight update can fault the learner; a fault never overwrites the previous good checkpoint. Normal shutdown saves networks, target, both optimizers, replay, published version and RNG. Start a new run with an explicit checkpoint:
 

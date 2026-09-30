@@ -17,6 +17,8 @@ import torch.nn.functional as F
 
 from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
 
+from .online_settings import validate_config
+
 
 class OnlineLearner:
     """Own bounded replay, RLT actor/twin-Q updates, and published weights.
@@ -27,23 +29,8 @@ class OnlineLearner:
     """
 
     def __init__(self, config: dict, device: str = "cpu") -> None:
-        self.cfg = dict(config)
+        self.cfg = validate_config(config)
         c = self.cfg
-        if c["horizon"] != 1:
-            raise ValueError("Online VR smoke requires horizon=1")
-        if not 1 <= c["min_replay"] <= c["capacity"]:
-            raise ValueError("Invalid replay bounds")
-        if not 0 <= c["demo_ratio"] <= 1 or not 0 < c["gamma"] <= 1:
-            raise ValueError("Invalid sampling ratio or discount")
-        for key in (
-            "batch_size",
-            "publish_interval",
-            "critic_actor_ratio",
-            "max_updates",
-            "checkpoint_interval",
-        ):
-            if c[key] < 1:
-                raise ValueError(f"{key} must be positive")
         self.device = torch.device(device)
         self.rng = random.Random(c["seed"])
         torch.manual_seed(c["seed"])
@@ -67,6 +54,7 @@ class OnlineLearner:
         self.update_step = self.actor_updates = self.version = 0
         self.accepted = self.human_accepted = 0
         self.last_metrics: dict[str, float] = {}
+        self.published_bc_loss: float | None = None
 
     def features(self, values: dict) -> dict[str, torch.Tensor]:
         """Validate frozen features and store owned, float32 CPU tensors."""
@@ -196,13 +184,28 @@ class OnlineLearner:
         if self.update_step % c["publish_interval"] == 0:
             self.published.load_state_dict(self.model.state_dict())
             self.version = self.update_step
+            with torch.no_grad():
+                prediction, _, _ = self.published.sac_forward(obs, deterministic=True)
+                target = torch.where(human, actions, obs["ref_chunk"][:, 0])
+                self.published_bc_loss = float(F.mse_loss(prediction, target))
         return metrics
+
+    def actor_ready(self) -> bool:
+        """Gate deployment on warmup and optional published-batch imitation error.
+
+        This training-batch diagnostic is not a held-out success or safety test.
+        """
+        limit = self.cfg.get("actor_max_bc_loss")
+        return self.version >= self.cfg["actor_after_updates"] and (
+            limit is None
+            or (self.published_bc_loss is not None and self.published_bc_loss <= limit)
+        )
 
     def predict(self, features: dict) -> tuple[torch.Tensor, str]:
         """Read a completed actor snapshot, or reference actions during warmup."""
         obs = {k: v.to(self.device) for k, v in self.features(features).items()}
         with torch.inference_mode():
-            if self.version < self.cfg["actor_after_updates"]:
+            if not self.actor_ready():
                 return obs["ref_chunk"][0, :1].cpu(), "reference"
             action, _, _ = self.published.sac_forward(obs, deterministic=True)
             return action.reshape(1, self.cfg["action_dim"]).cpu(), "actor"
@@ -218,6 +221,9 @@ class OnlineLearner:
             "update_step": self.update_step,
             "actor_updates": self.actor_updates,
             "policy_version": self.version,
+            "actor_ready": self.actor_ready(),
+            "update_budget_exhausted": self.update_step >= self.cfg["max_updates"],
+            "published_bc_loss": self.published_bc_loss,
         }
 
     def save(self, path: Path, metadata: dict) -> None:
@@ -248,6 +254,8 @@ class OnlineLearner:
                     "human_accepted",
                 )
             },
+            "published_bc_loss": self.published_bc_loss,
+            "last_metrics": self.last_metrics,
         }
         temporary = path.with_suffix(".tmp")
         torch.save(state, temporary)
@@ -266,6 +274,8 @@ class OnlineLearner:
         self.demos.extend(state["demos"])
         for key, value in state["counters"].items():
             setattr(self, key, value)
+        self.published_bc_loss = state.get("published_bc_loss")
+        self.last_metrics = state.get("last_metrics", {})
         self.rng.setstate(state["rng"])
         torch.set_rng_state(state["torch_rng"])
         if self.device.type == "cuda":
