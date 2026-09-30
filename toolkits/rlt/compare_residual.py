@@ -16,7 +16,10 @@ from rlinf.models.embodiment.mlp_policy.rlt_atomic_policy import RLTAtomicPolicy
 from rlinf.models.embodiment.mlp_policy.rlt_bounded_policy import (
     RLTBoundedResidualPolicy,
 )
-from rlinf.models.embodiment.modules.rlt_action_candidates import JointActionCandidates
+from rlinf.models.embodiment.modules.rlt_action_candidates import (
+    JointActionCandidates,
+    select_supported_candidate,
+)
 from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACLossMixin
 from toolkits.rlt.atomic_cpu_smoke import observations, plain_method, reward
 
@@ -174,6 +177,9 @@ def run(
                         score = diagnostic_reward(test_obs, chosen, target_mode)
                         q = model.sac_q_forward(test_obs, chosen)
                         q_min = q.min(-1).values
+                        selection = audit_candidate_selection(
+                            model, test_obs, bank, target_mode
+                        )
                         curve.append(
                             {
                                 "step": step,
@@ -187,6 +193,7 @@ def run(
                                 "twin_q_gap": (q[:, 0] - q[:, 1]).abs().mean().item(),
                                 "finite_bank_oracle_reward": oracle.mean().item(),
                                 "finite_bank_gap": (oracle - score).mean().item(),
+                                "candidate_selection": selection,
                             }
                         )
                 if step == steps:
@@ -246,6 +253,48 @@ def run(
                 json.dumps(report, indent=2, allow_nan=False) + "\n"
             )
             print(json.dumps(rows[-1]), flush=True)
+    return report
+
+
+@torch.no_grad()
+def audit_candidate_selection(
+    model: RLTAtomicPolicy | RLTBoundedResidualPolicy,
+    obs: dict,
+    bank: JointActionCandidates,
+    target_mode: str,
+) -> dict:
+    """Compare selectors using learned Q only; oracle rewards are reporting-only."""
+    candidates, valid = bank(obs["ref_chunk"])
+    batch_size, count = valid.shape
+    repeated = {key: value.repeat_interleave(count, 0) for key, value in obs.items()}
+    q = model.sac_q_forward(repeated, candidates.flatten(0, 1)).reshape(
+        batch_size, count, -1
+    )
+    batch = torch.arange(batch_size, device=q.device)
+    base_reward = diagnostic_reward(obs, candidates[:, 0], target_mode)
+    choices = {"reference": torch.zeros(batch_size, dtype=torch.long, device=q.device)}
+    choices["min_q_argmax"] = (
+        q.min(-1).values.masked_fill(~valid, -torch.inf).argmax(-1)
+    )
+    for margin in (0.0, 0.25, 1.0):
+        choices[f"paired_margin_{margin}"] = select_supported_candidate(
+            q, valid, minimum_advantage=margin
+        )["choice"]
+    report = {}
+    for name, choice in choices.items():
+        actual = diagnostic_reward(obs, candidates[batch, choice], target_mode)
+        report[name] = {
+            "mean_reward": actual.mean().item(),
+            "correction_fraction": (choice != 0).float().mean().item(),
+            "worse_than_reference_fraction": (actual < base_reward - 1e-6)
+            .float()
+            .mean()
+            .item(),
+            "better_than_reference_fraction": (actual > base_reward + 1e-6)
+            .float()
+            .mean()
+            .item(),
+        }
     return report
 
 

@@ -26,7 +26,10 @@ from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.mlp_policy import get_model
 from rlinf.models.embodiment.mlp_policy.rlt_atomic_policy import RLTAtomicPolicy
 from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
-from rlinf.models.embodiment.modules.rlt_action_candidates import JointActionCandidates
+from rlinf.models.embodiment.modules.rlt_action_candidates import (
+    JointActionCandidates,
+    select_supported_candidate,
+)
 from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACLossMixin
 
 
@@ -48,6 +51,62 @@ def make_model(**overrides):
     }
     args.update(overrides)
     return RLTAtomicPolicy(**args)
+
+
+def test_paired_candidate_gate_keeps_reference_for_disagreement_and_ties():
+    q = torch.tensor([[[0.0, 0.0], [0.0, 0.0], [10.0, -1.0], [2.0, 2.0]]])
+    valid = torch.ones(1, 4, dtype=torch.bool)
+    decision = select_supported_candidate(q, valid)
+    assert decision["choice"].item() == 3
+    valid[:, 3] = False
+    assert select_supported_candidate(q, valid)["choice"].item() == 0
+    valid[:, 3] = True
+    assert (
+        select_supported_candidate(q, valid, minimum_advantage=2.0)["choice"].item()
+        == 0
+    )
+
+
+def test_paired_candidate_gate_is_invariant_to_per_critic_offsets():
+    q = torch.tensor([[[0.0, 0.0], [3.0, 2.0], [1.0, 1.0]]])
+    valid = torch.ones(1, 3, dtype=torch.bool)
+    a = select_supported_candidate(q, valid)
+    b = select_supported_candidate(q + torch.tensor([100.0, -100.0]), valid)
+    torch.testing.assert_close(a["choice"], b["choice"])
+    torch.testing.assert_close(a["paired_advantage"], b["paired_advantage"])
+
+
+def test_paired_candidate_gate_reports_bad_q_without_selecting_it():
+    q = torch.tensor([[[0.0, 0.0], [float("nan"), 10.0], [float("inf"), 8.0]]])
+    valid = torch.ones(1, 3, dtype=torch.bool)
+    result = select_supported_candidate(q, valid)
+    assert result["choice"].item() == 0
+    assert result["invalid_candidate_q"].sum() == 2
+    q[:, 0] = float("nan")
+    result = select_supported_candidate(q, valid)
+    assert result["invalid_reference_q"].all()
+    assert not result["admissible"].any()
+
+
+@pytest.mark.parametrize("margin", [-1.0, float("nan"), float("inf")])
+def test_paired_candidate_gate_rejects_invalid_margin(margin):
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        select_supported_candidate(
+            torch.zeros(1, 2, 2),
+            torch.ones(1, 2, dtype=torch.bool),
+            minimum_advantage=margin,
+        )
+
+
+def test_paired_candidate_gate_is_not_a_safety_certificate():
+    # Both critics can be confidently wrong; actual reward is deliberately absent.
+    q = torch.tensor([[[0.0, 0.0], [10.0, 10.0]]])
+    assert (
+        select_supported_candidate(q, torch.ones(1, 2, dtype=torch.bool))[
+            "choice"
+        ].item()
+        == 1
+    )
 
 
 def make_obs(batch=4):

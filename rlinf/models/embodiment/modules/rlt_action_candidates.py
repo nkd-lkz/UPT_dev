@@ -9,6 +9,57 @@ import torch
 from torch import nn
 
 
+@torch.no_grad()
+def select_supported_candidate(
+    q_values: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    minimum_advantage: float = 0.0,
+    disagreement_penalty: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """Rank finite candidates against reference ID 0 using paired critic gains.
+
+    Inputs are [batch, candidate, critic] scores and a boolean candidate mask.
+    Every critic must predict an improvement above the margin after penalizing
+    disagreement of the gains. Ties and invalid reference scores retain ID 0.
+    This is an inference diagnostic, not a calibrated confidence or safety test;
+    mutually biased critics can still accept a harmful correction.
+    """
+    if (
+        q_values.ndim != 3
+        or min(q_values.shape) < 1
+        or q_values.shape[-1] < 2
+        or not q_values.is_floating_point()
+        or valid.shape != q_values.shape[:2]
+        or valid.dtype != torch.bool
+        or valid.device != q_values.device
+        or not valid[:, 0].all()
+    ):
+        raise ValueError("Expected [B,K,E>=2] Q and boolean [B,K] valid reference")
+    if any(
+        not math.isfinite(v) or v < 0 for v in (minimum_advantage, disagreement_penalty)
+    ):
+        raise ValueError("Admission margin and penalty must be finite and nonnegative")
+    finite = torch.isfinite(q_values).all(-1)
+    reference_finite = finite[:, 0]
+    safe_q = torch.where(torch.isfinite(q_values), q_values, 0)
+    gains = safe_q - safe_q[:, :1]
+    score = gains.min(-1).values - disagreement_penalty * gains.std(-1, unbiased=False)
+    admissible = valid & finite & reference_finite[:, None]
+    admissible[:, 0] = False
+    admissible &= torch.isfinite(score) & (score > minimum_advantage)
+    ranked = score.masked_fill(~admissible, -torch.inf)
+    choice = ranked.argmax(-1)
+    choice = torch.where(admissible.any(-1), choice, 0)
+    return {
+        "choice": choice,
+        "admissible": admissible,
+        "paired_advantage": score,
+        "invalid_reference_q": ~reference_finite,
+        "invalid_candidate_q": ~finite,
+    }
+
+
 class JointActionCandidates(nn.Module):
     """Build reference-relative chunks in normalized joint-delta coordinates.
 
