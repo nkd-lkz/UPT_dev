@@ -34,6 +34,148 @@ from rlinf.runners.reasoning_runner import ReasoningRunner
 from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
 
 
+@pytest.mark.parametrize("gpu", [0, 1, 2])
+def test_portable_pilot_preserves_budget_and_physical_placement(
+    monkeypatch, tmp_path, gpu
+):
+    from hydra import compose, initialize_config_dir
+
+    from toolkits.rlt.probe_portable import validate_placement
+
+    root = Path(__file__).resolve().parents[2]
+    for key, value in {
+        "EMBODIED_PATH": str(root / "examples/embodiment"),
+        "RLT_STAGE1_ACTOR": str(tmp_path / "actor"),
+        "RLT_DATASET_DIR": str(tmp_path / "data"),
+        "RLT_SMOKE_RUN_DIR": str(tmp_path / "run"),
+        "RLT_SMOKE_RENDER_DEVICE": "pci:0000:46:00.0",
+        "RLT_WORLD_CHECKPOINT": str(tmp_path / "world.pt"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    experiment = (
+        "rlt_latent_world"
+        if (
+            root / "examples/embodiment/config/experiment/rlt_latent_world.yaml"
+        ).exists()
+        else "rlt_memory"
+    )
+    with initialize_config_dir(
+        config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+    ):
+        cfg = compose(
+            config_name="maniskill_rlt_stage2_smoke_gpu2",
+            overrides=[
+                f"+experiment={experiment}",
+                "+pilot=rlt_overnight",
+                *[
+                    f"cluster.component_placement.{name}={gpu}-{gpu}"
+                    for name in ("actor", "env", "rollout")
+                ],
+            ],
+        )
+    OmegaConf.resolve(cfg)
+    validate_placement(cfg, gpu)
+    with pytest.raises(ValueError, match="physical placement"):
+        validate_placement(cfg, gpu + 1)
+    assert cfg.algorithm.rlt_schedule.warmup_post_collect_updates == 512
+    assert cfg.algorithm.actor_weight_schedule.warmup_q_weight == 0.0
+    assert cfg.actor.global_batch_size == 32
+    assert cfg.actor.micro_batch_size == 8
+    assert cfg.env.eval.total_num_envs == 4
+    assert cfg.env.eval.video_cfg.save_video
+    assert cfg.rollout.expert_model is None
+    assert not cfg.env.train.rlt_policy_switch.expert_takeover.enable
+    if experiment == "rlt_memory":
+        from rlinf.algorithms.rlt.interaction_memory import (
+            validate_interaction_memory_cfg,
+        )
+
+        validate_interaction_memory_cfg(cfg)
+
+
+def test_portable_launcher_rejects_unsafe_budgets_before_loading_models():
+    root = Path(__file__).resolve().parents[2]
+    for overrides in [
+        {"RLT_SMOKE_STEPS": "0"},
+        {"RLT_SMOKE_STEPS": "5001", "RLT_LONG_RUN": "1"},
+        {"RLT_EPISODE_STEPS": "501"},
+        {"RLT_SMOKE_STEPS": "20", "RLT_SAVE_INTERVAL": "10", "RLT_VAL_INTERVAL": "3"},
+    ]:
+        result = subprocess.run(
+            ["bash", str(root / "run_rlt_portable.sh"), "--check"],
+            env={**os.environ, "RLT_PHYSICAL_GPU": "0", **overrides},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 2, result.stderr
+
+
+def test_portable_busy_gpu_stops_before_ray_or_output_creation(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    venv = Path(sys.prefix)
+    if not (venv / "bin/activate").is_file():
+        pytest.skip("Launcher requires an activated virtualenv")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_smi = bin_dir / "nvidia-smi"
+    fake_smi.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        "*memory.used*) echo 18077;;\n"
+        "*) echo 00000000:46:00.0;;\nesac\n"
+    )
+    fake_smi.chmod(0o755)
+    actor = tmp_path / "actor"
+    (actor / "model_state_dict").mkdir(parents=True)
+    (actor / "model_state_dict/full_weights.pt").write_bytes(b"preflight-only")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "norm_stats.json").write_text('{"norm_stats":{"state":{}, "actions":{}}}')
+    lib = tmp_path / "placeholder"
+    lib.touch()
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "RLINF_VENV": str(venv),
+        "RLT_PHYSICAL_GPU": "0",
+        "RLT_STAGE1_ACTOR": str(actor),
+        "RLT_DATASET_DIR": str(data),
+        "RLT_OUTPUT_ROOT": str(tmp_path / "runs"),
+        "RLT_SMOKE_STEPS": "2",
+        "RLT_SMOKE_PROFILE": "smoke",
+        "RLT_SAVE_INTERVAL": "1",
+        "RLT_VAL_INTERVAL": "1",
+        "SAPIEN_VULKAN_LIBRARY_PATH": str(lib),
+        "RLT_NVIDIA_EGL_LIBRARY": str(lib),
+        "__EGL_VENDOR_LIBRARY_FILENAMES": str(lib),
+    }
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_portable.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "GPU 0 is busy" in result.stderr, result.stdout + result.stderr
+    assert not (tmp_path / "runs").exists()
+
+
+def test_portable_launcher_requires_explicit_device():
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env.pop("RLT_PHYSICAL_GPU", None)
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_portable.sh"), "--check"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "Set RLT_PHYSICAL_GPU" in result.stderr
+
+
 @pytest.fixture
 def stage2_smoke_config(monkeypatch, tmp_path):
     from hydra import compose, initialize_config_dir
