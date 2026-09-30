@@ -75,12 +75,12 @@ pilot 必须用相同配置恢复，统计入口读取原始执行日志：
 
 ```bash
 bash run_rlt_vr_hil_pilot.sh run --resume /绝对路径/旧run/learner.pt
-python -m toolkits.rlt_vr.summarize_online /绝对路径/run
+/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python -m toolkits.rlt_vr.summarize_online /绝对路径/run
 ```
 
 报告包含接管步数、连续接管段数、已结束回合结果和实际 learner 更新数。`human` 是客户端声明的控制来源，脚本注入也可以设置它，因此不能单凭该字段宣称真实人类实验。日志里的 `service_ms` 衡量服务端提特征与学习处理时间，不是端到端控制延迟。训练预算用完会显示 `update_budget_exhausted=true`；采集和推理继续，优化停止。
 
-恢复须先停止旧客户端，再在服务器按 Ctrl-C。请求执行期间强制中断可能使 learner 进入故障状态，此时不会覆盖上一个有效 checkpoint。正常退出保存完整网络、target、两个 optimizer、replay、发布版本与 RNG。显式指定已有 checkpoint 启动新 run：
+恢复须先停止旧客户端，再在服务器按 Ctrl-C。请求执行期间强制中断可能使 learner 进入故障状态，此时不会覆盖上一个有效 checkpoint。正常退出保存完整网络、target、两个 optimizer、replay、发布版本与 RNG。只有原来使用 `online_smoke.yaml` 的短 smoke 才用下面命令；pilot 必须使用上面的 `run_rlt_vr_hil_pilot.sh`，不能混用配置：
 
 ```bash
 bash run_rlt_vr_online_gpu2.sh run --resume /绝对路径/旧run/learner.pt

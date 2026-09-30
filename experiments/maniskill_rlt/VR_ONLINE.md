@@ -75,12 +75,12 @@ For the longer pilot, restore with the same pilot configuration and inspect acce
 
 ```bash
 bash run_rlt_vr_hil_pilot.sh run --resume /absolute/path/previous-run/learner.pt
-python -m toolkits.rlt_vr.summarize_online /absolute/path/run
+/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python -m toolkits.rlt_vr.summarize_online /absolute/path/run
 ```
 
 The report counts takeover steps, contiguous takeover segments, completed episodes and actual learner updates. Human flags describe the client-declared action route; scripted clients can set them too. `service_ms` measures server feature/update processing, not end-to-end control latency. `update_budget_exhausted=true` means optimization stopped; collection and inference continue.
 
-Stop the client before pressing Ctrl-C on the server. Interrupting an in-flight update can fault the learner; a fault never overwrites the previous good checkpoint. Normal shutdown saves networks, target, both optimizers, replay, published version and RNG. Start a new run with an explicit checkpoint:
+Stop the client before pressing Ctrl-C on the server. Interrupting an in-flight update can fault the learner; a fault never overwrites the previous good checkpoint. Normal shutdown saves networks, target, both optimizers, replay, published version and RNG. Use the following only for a short run originally started with `online_smoke.yaml`; pilot checkpoints require `run_rlt_vr_hil_pilot.sh` above, with the same configuration:
 
 ```bash
 bash run_rlt_vr_online_gpu2.sh run --resume /absolute/path/previous-run/learner.pt
