@@ -10,14 +10,19 @@ from rlinf.algorithms.rlt.interaction_memory import InteractionMemoryConfig
 
 
 def response_features(
-    obs: dict[str, torch.Tensor], c: InteractionMemoryConfig
+    obs: dict[str, torch.Tensor],
+    c: InteractionMemoryConfig,
+    *,
+    record_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Estimate empirical arm response and excitation from completed records.
 
     The ratio relates summed delta targets to net joint motion. It is a local
     controller-response descriptor, not a stiffness estimate or a contact label.
     The last action component is the gripper and is excluded. Inputs must use
-    the controller scale declared by ``joint_delta_scale``.
+    the controller scale declared by ``joint_delta_scale``. Optional [B, slots]
+    nonnegative weights are supplied by the caller using past-record metadata;
+    the default retains the existing unweighted estimator exactly.
     """
     valid = obs["memory_valid"]
     events = torch.where(valid[..., None], obs["memory_events"], 0.0)
@@ -27,8 +32,19 @@ def response_features(
     commands = torch.where(ticks[..., None], commands, 0.0)
     commanded = commands[..., : a - 1].sum(-2) * c.joint_delta_scale
     delta = events[..., p + h * a : p + h * a + a - 1]
-    energy = commanded.square().sum(1)
-    slope = ((commanded * delta).sum(1) / (energy + 1e-4)).clamp(-2, 2)
+    if record_weights is None:
+        energy = commanded.square().sum(1)
+        cross = (commanded * delta).sum(1)
+    else:
+        if record_weights.shape != valid.shape:
+            raise ValueError("Record weights must match the memory slot shape")
+        weights = record_weights.to(commanded)
+        if not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("Record weights must be finite and nonnegative")
+        weights = torch.where(valid, weights, 0)[..., None]
+        energy = (weights * commanded.square()).sum(1)
+        cross = (weights * commanded * delta).sum(1)
+    slope = (cross / (energy + 1e-4)).clamp(-2, 2)
     support = energy / (energy + 1e-4)
     return torch.cat((slope, support), -1)
 

@@ -1324,3 +1324,82 @@ def test_response_residual_respects_past_excitation_support():
     )
     poisoned = {**batch, "target": torch.full_like(batch["target"], float("nan"))}
     torch.testing.assert_close(supported(poisoned, memory=True), prior + actual)
+
+
+def test_response_weighted_history_preserves_default_and_empty_contract():
+    from torch.utils.data import default_collate
+
+    from rlinf.algorithms.rlt.interaction_memory import InteractionMemoryConfig
+    from rlinf.models.embodiment.modules.rlt_memory_encoder import response_features
+    from toolkits.rlt.probe_interaction_memory import episode_examples
+
+    states = torch.arange(51).float()[:, None].expand(-1, 9) * 0.001
+    actions = torch.full((51, 8), 0.02)
+    batch = default_collate(episode_examples(states, actions))
+    c = InteractionMemoryConfig()
+    weights = torch.ones_like(batch["memory_valid"], dtype=torch.float32)
+    torch.testing.assert_close(
+        response_features(batch, c),
+        response_features(batch, c, record_weights=weights),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        response_features(batch, c, record_weights=weights * 0),
+        torch.zeros(len(weights), 14),
+    )
+    for bad in (weights * -1, weights * float("nan"), weights[:, :-1]):
+        with pytest.raises(ValueError):
+            response_features(batch, c, record_weights=bad)
+
+
+def test_response_forgetting_reads_past_and_adapts_after_new_evidence():
+    from toolkits.rlt.probe_response_shift import predict_from_history
+
+    commands = torch.full((8, 7), 0.1)
+    outcomes = commands.clone()
+    proposal = torch.full((7,), 0.1)
+    empty, support = predict_from_history(
+        commands[:0], outcomes[:0], proposal, half_life=1
+    )
+    assert empty.count_nonzero() == support.count_nonzero() == 0
+    old, support = predict_from_history(commands, outcomes, proposal, half_life=None)
+    assert support.min() > 0.99  # High excitation is not confidence in a changed plant.
+    outcomes[-2:] *= 0.2
+    uniform, _ = predict_from_history(commands, outcomes, proposal, half_life=None)
+    recent, _ = predict_from_history(commands, outcomes, proposal, half_life=1)
+    target = proposal * 0.2
+    assert (recent - target).square().mean() < (uniform - target).square().mean()
+    assert (old - target).square().mean() > (uniform - target).square().mean()
+    for bad in (0, -1, float("nan")):
+        with pytest.raises(ValueError):
+            predict_from_history(commands, outcomes, proposal, half_life=bad)
+
+
+def test_response_reset_requires_completed_errors_and_preserves_stationary_history():
+    from toolkits.rlt.probe_response_shift import ResponseHistory
+
+    adaptive = ResponseHistory(adaptive=True)
+    uniform = ResponseHistory()
+    command = torch.full((7,), 0.05)
+    for _ in range(12):
+        assert not adaptive.observe(command, command)
+        assert not uniform.observe(command, command)
+    before, _ = adaptive.predict(command)
+    torch.testing.assert_close(before, uniform.predict(command)[0])
+    # Reading repeatedly cannot update evidence or detect an unobserved change.
+    torch.testing.assert_close(before, adaptive.predict(command)[0], rtol=0, atol=0)
+    changed = command * 0.2
+    assert not adaptive.observe(command, changed)
+    assert adaptive.observe(command, changed)
+    uniform.observe(command, changed)
+    uniform.observe(command, changed)
+    adapted, _ = adaptive.predict(command)
+    stale, _ = uniform.predict(command)
+    assert (adapted - changed).square().mean() < (stale - changed).square().mean()
+    for _ in range(12):
+        assert not adaptive.observe(command, changed)
+    with pytest.raises(ValueError, match="nonfinite"):
+        adaptive.observe(command, changed * float("nan"))
+    with pytest.raises(ValueError, match="positive"):
+        ResponseHistory(threshold=float("inf"))
