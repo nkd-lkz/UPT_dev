@@ -5,6 +5,7 @@
 
 import argparse
 import json
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,23 @@ def action_controls(
     reversed_prefix = actions.clone()
     reversed_prefix[:, :horizon] = actions[:, :horizon].flip(1)
     return stationary, reversed_prefix
+
+
+def mean_arm_prefix(actions: torch.Tensor, horizon: int) -> torch.Tensor:
+    """Keep total arm command but remove its within-prefix temporal variation.
+
+    Gripper commands and the unavailable suffix remain unchanged. This is an
+    input perturbation, not a physically executed alternative trajectory.
+    """
+    if (
+        actions.ndim != 3
+        or actions.shape[-1] < 2
+        or not 1 <= horizon <= actions.shape[1]
+    ):
+        raise ValueError("Expected a valid prefix with arm and gripper commands")
+    result = actions.clone()
+    result[:, :horizon, :-1] = actions[:, :horizon, :-1].mean(1, keepdim=True)
+    return result
 
 
 def episode_error_summary(episode_ids: torch.Tensor, fields: dict) -> dict:
@@ -138,6 +156,11 @@ def evaluate_checkpoint(
                 "shuffled_cosine_error",
                 "zero_arm_cosine_error",
                 "reversed_prefix_cosine_error",
+                "mean_prefix_cosine_error",
+                "reverse_input_rms",
+                "mean_prefix_input_rms",
+                "reverse_prediction_rms",
+                "mean_prefix_prediction_rms",
                 "proprio_mae",
                 "latent_mse",
                 "disagreement",
@@ -170,6 +193,8 @@ def evaluate_checkpoint(
             zero_arm, reversed_prefix = action_controls(batch["actions"], horizon)
             stationary, _ = model(batch, zero_arm, horizon)
             reversed_predictions, _ = model(batch, reversed_prefix, horizon)
+            averaged_actions = mean_arm_prefix(batch["actions"], horizon)
+            averaged_predictions, _ = model(batch, averaged_actions, horizon)
             target = F.layer_norm(batch["future_z"][:, i], (model.config.z_dim,))
             current = F.layer_norm(batch["z_rl"], (model.config.z_dim,))
             valid = batch["valid"][:, i]
@@ -184,6 +209,32 @@ def evaluate_checkpoint(
                 - F.cosine_similarity(stationary.mean(0), target, dim=-1),
                 "reversed_prefix_cosine_error": 1
                 - F.cosine_similarity(reversed_predictions.mean(0), target, dim=-1),
+                "mean_prefix_cosine_error": 1
+                - F.cosine_similarity(averaged_predictions.mean(0), target, dim=-1),
+                "reverse_input_rms": (
+                    reversed_prefix[:, :horizon] - batch["actions"][:, :horizon]
+                )
+                .square()
+                .mean((1, 2))
+                .sqrt(),
+                "mean_prefix_input_rms": (
+                    averaged_actions[:, :horizon] - batch["actions"][:, :horizon]
+                )
+                .square()
+                .mean((1, 2))
+                .sqrt(),
+                "reverse_prediction_rms": (
+                    reversed_predictions.mean(0) - predictions.mean(0)
+                )
+                .square()
+                .mean(-1)
+                .sqrt(),
+                "mean_prefix_prediction_rms": (
+                    averaged_predictions.mean(0) - predictions.mean(0)
+                )
+                .square()
+                .mean(-1)
+                .sqrt(),
                 "proprio_mae": (
                     delta.mean(0) - (batch["future_proprio"][:, i] - batch["proprio"])
                 )
@@ -239,20 +290,21 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--independent-test", action="store_true")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    print(
-        json.dumps(
-            evaluate_checkpoint(
-                args.checkpoint,
-                args.cache_dir,
-                device=args.device,
-                batch_size=args.batch_size,
-                independent_test=args.independent_test,
-            ),
-            indent=2,
-            allow_nan=False,
-        )
+    report = evaluate_checkpoint(
+        args.checkpoint,
+        args.cache_dir,
+        device=args.device,
+        batch_size=args.batch_size,
+        independent_test=args.independent_test,
     )
+    serialized = json.dumps(report, indent=2, allow_nan=False)
+    if args.output:
+        with args.output.open("x") as stream:
+            stream.write(serialized + "\n")
+    else:
+        print(serialized)
 
 
 if __name__ == "__main__":

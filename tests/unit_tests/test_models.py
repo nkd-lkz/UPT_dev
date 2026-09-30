@@ -1587,6 +1587,24 @@ def test_world_action_controls_do_not_leak_suffix_or_mutate_actions():
         action_controls(actions, 6)
 
 
+def test_world_mean_prefix_preserves_budget_gripper_and_suffix():
+    from toolkits.rlt.evaluate_latent_world import mean_arm_prefix
+
+    actions = torch.randn(2, 5, 8)
+    original = actions.clone()
+    averaged = mean_arm_prefix(actions, 3)
+    torch.testing.assert_close(averaged[:, :3, :-1].sum(1), actions[:, :3, :-1].sum(1))
+    torch.testing.assert_close(averaged[..., -1], actions[..., -1], rtol=0, atol=0)
+    torch.testing.assert_close(averaged[:, 3:], actions[:, 3:], rtol=0, atol=0)
+    torch.testing.assert_close(mean_arm_prefix(actions, 1), actions, rtol=0, atol=0)
+    torch.testing.assert_close(actions, original, rtol=0, atol=0)
+    poisoned = actions.clone()
+    poisoned[:, 3:] = float("nan")
+    torch.testing.assert_close(mean_arm_prefix(poisoned, 3)[:, :3], averaged[:, :3])
+    with pytest.raises(ValueError):
+        mean_arm_prefix(actions, 0)
+
+
 def test_world_matched_pilot_preserves_baseline_training_contract(monkeypatch):
     from hydra import compose, initialize_config_dir
 
