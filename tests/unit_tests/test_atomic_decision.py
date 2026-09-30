@@ -678,6 +678,7 @@ def test_residual_diagnostic_records_matched_anchors_and_q_errors(tmp_path):
         data_mode="mixed",
     )
     assert report["reference_fraction"] == 0.25
+    assert report["target_mode"] == "axis"
     assert report["bc_weight"] == 7
     atomic, continuous = report["results"]
     assert atomic["seed"] == continuous["seed"] == 13
@@ -687,3 +688,27 @@ def test_residual_diagnostic_records_matched_anchors_and_q_errors(tmp_path):
         assert row["curve"][-1]["chosen_q_mae"] >= 0
     with pytest.raises(ValueError):
         run(tmp_path / "invalid", steps=1, bc_weight=float("nan"))
+
+
+def test_candidate_coverage_reports_unrepresentable_multijoint_target():
+    from toolkits.rlt.atomic_cpu_smoke import observations, reward
+    from toolkits.rlt.compare_residual import candidate_oracle, diagnostic_reward
+
+    obs = observations(12, torch.Generator().manual_seed(36))
+    bank = JointActionCandidates(8, 2, radius=0.1)
+    torch.testing.assert_close(
+        diagnostic_reward(obs, obs["ref_chunk"], "axis"), reward(obs, obs["ref_chunk"])
+    )
+    axis = candidate_oracle(obs, bank, "axis")
+    diagonal = candidate_oracle(obs, bank, "diagonal")
+    torch.testing.assert_close(axis, torch.zeros_like(axis), atol=1e-6, rtol=0)
+    torch.testing.assert_close(diagonal, -torch.ones_like(diagonal), atol=1e-6, rtol=0)
+    continuous = obs["ref_chunk"].clone()
+    continuous[:, :, 0] += 0.1 * obs["z_rl"][:, :1]
+    continuous[:, :, 1] -= 0.1 * obs["z_rl"][:, :1]
+    torch.testing.assert_close(
+        diagnostic_reward(obs, continuous, "diagonal"),
+        torch.zeros(12),
+        atol=1e-6,
+        rtol=0,
+    )

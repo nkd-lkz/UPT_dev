@@ -21,6 +21,41 @@ from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACLossMixin
 from toolkits.rlt.atomic_cpu_smoke import observations, plain_method, reward
 
 
+def diagnostic_reward(
+    obs: dict, action: torch.Tensor, target_mode: str
+) -> torch.Tensor:
+    """Vary target geometry without exposing an all-action oracle to training.
+
+    The diagonal target requires two simultaneous joint corrections. It exposes
+    coverage limits hidden by the original one-axis target in the candidate bank.
+    """
+    if target_mode == "axis":
+        return reward(obs, action)
+    if target_mode != "diagonal":
+        raise ValueError("target_mode must be axis or diagonal")
+    target = obs["ref_chunk"].clone()
+    sign = obs["z_rl"][:, 0:1]
+    target[:, :, 0] += 0.1 * sign
+    target[:, :, 1] -= 0.1 * sign
+    return -(action - target).square().sum((-1, -2)) / (2 * 0.1**2)
+
+
+@torch.no_grad()
+def candidate_oracle(
+    obs: dict, bank: JointActionCandidates, target_mode: str
+) -> torch.Tensor:
+    """Report a finite-bank ceiling only; never supply it to actor/critic losses."""
+    candidates, valid = bank(obs["ref_chunk"])
+    scores = torch.stack(
+        [
+            diagnostic_reward(obs, candidates[:, i], target_mode)
+            for i in range(candidates.shape[1])
+        ],
+        dim=1,
+    )
+    return scores.masked_fill(~valid, -torch.inf).max(1).values
+
+
 def run(
     output: Path,
     *,
@@ -32,12 +67,15 @@ def run(
     bc_weight: float = 0.1,
     reference_fraction: float = 0.0,
     seeds: tuple[int, ...] = (2026, 2027, 2028),
+    target_mode: str = "axis",
 ) -> dict:
     """Use sampled-action rewards only; neither model sees oracle candidate labels."""
     if not 1 <= steps <= 2000:
         raise ValueError("Use 1..2000 synthetic updates")
     if data_mode not in ("candidate", "mixed"):
         raise ValueError("data_mode must be candidate or mixed")
+    if target_mode not in ("axis", "diagonal"):
+        raise ValueError("target_mode must be axis or diagonal")
     if not 0 <= actor_start < steps or not 0 < actor_lr <= 1e-3:
         raise ValueError("Invalid actor warmup or learning rate")
     if not 0 <= bc_weight <= 1000:
@@ -67,11 +105,13 @@ def run(
                 :anchor_count
             ]
             actions[anchor_ids] = train_obs["ref_chunk"][anchor_ids]
-        rewards = reward(train_obs, actions)[:, None]
+        rewards = diagnostic_reward(train_obs, actions, target_mode)[:, None]
         train_obs, test_obs = (
             {k: v.to(device) for k, v in obs.items()} for obs in (train_obs, test_obs)
         )
         actions, rewards = actions.to(device), rewards.to(device)
+        bank = bank.to(device)
+        oracle = candidate_oracle(test_obs, bank, target_mode)
         for mode in ("atomic", "continuous"):
             torch.manual_seed(seed)
             kwargs = {
@@ -131,7 +171,7 @@ def run(
                 if step % 100 == 0 or step == steps:
                     with torch.no_grad():
                         chosen = model.predict_action_batch(test_obs, mode="eval")[0]
-                        score = reward(test_obs, chosen)
+                        score = diagnostic_reward(test_obs, chosen, target_mode)
                         q = model.sac_q_forward(test_obs, chosen)
                         q_min = q.min(-1).values
                         curve.append(
@@ -145,6 +185,8 @@ def run(
                                 "chosen_q_bias": (q_min - score).mean().item(),
                                 "chosen_q_mae": (q_min - score).abs().mean().item(),
                                 "twin_q_gap": (q[:, 0] - q[:, 1]).abs().mean().item(),
+                                "finite_bank_oracle_reward": oracle.mean().item(),
+                                "finite_bank_gap": (oracle - score).mean().item(),
                             }
                         )
                 if step == steps:
@@ -190,6 +232,7 @@ def run(
             report = {
                 "scope": "Synthetic one-step reward; not robot success. Continuous actions may extrapolate beyond sampled dataset support.",
                 "data_mode": data_mode,
+                "target_mode": target_mode,
                 "actor_start": actor_start,
                 "actor_lr": actor_lr,
                 "bc_weight": bc_weight,
@@ -217,6 +260,7 @@ def main() -> None:
     parser.add_argument("--actor-lr", type=float, default=1e-3)
     parser.add_argument("--bc-weight", type=float, default=0.1)
     parser.add_argument("--reference-fraction", type=float, default=0.0)
+    parser.add_argument("--target-mode", choices=("axis", "diagonal"), default="axis")
     args = parser.parse_args()
     torch.set_num_threads(1)
     run(
@@ -227,6 +271,7 @@ def main() -> None:
         actor_lr=args.actor_lr,
         bc_weight=args.bc_weight,
         reference_fraction=args.reference_fraction,
+        target_mode=args.target_mode,
     )
 
 
