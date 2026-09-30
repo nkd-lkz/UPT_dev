@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -14,6 +15,59 @@ from torch.utils.data import DataLoader
 from rlinf.data.datasets.rlt_latent import RLTLatentDataset
 from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
 from toolkits.rlt.train_latent_world import device_batch
+
+
+def selective_prediction_report(
+    disagreement: torch.Tensor,
+    error: torch.Tensor,
+    persistence_error: torch.Tensor,
+    episode_ids: torch.Tensor,
+    thresholds: dict[str, float],
+) -> dict:
+    """Measure retained prediction error using thresholds fixed on calibration.
+
+    Frames within episodes are correlated. Report both frame and episode means,
+    actual retained fraction (ties can increase it), and empty selections. This
+    does not calibrate a safety probability or measure robot task success.
+    """
+    if (
+        disagreement.ndim != 1
+        or any(
+            x.shape != disagreement.shape
+            for x in (error, persistence_error, episode_ids)
+        )
+        or any(
+            not torch.isfinite(x).all()
+            for x in (disagreement, error, persistence_error)
+        )
+        or (disagreement < 0).any()
+        or any(not math.isfinite(v) or v < 0 for v in thresholds.values())
+    ):
+        raise ValueError("Expected matching finite vectors and nonnegative thresholds")
+    report = {}
+    for label, threshold in thresholds.items():
+        selected = disagreement <= threshold
+        episode_errors = [
+            error[selected & (episode_ids == i)].mean().item()
+            for i in episode_ids.unique()
+            if (selected & (episode_ids == i)).any()
+        ]
+        count = int(selected.sum())
+        report[label] = {
+            "threshold": threshold,
+            "accepted_count": count,
+            "total_count": len(error),
+            "retained_fraction": count / len(error) if len(error) else None,
+            "accepted_cosine_error": error[selected].mean().item() if count else None,
+            "accepted_persistence_error": persistence_error[selected].mean().item()
+            if count
+            else None,
+            "accepted_episode_mean_error": sum(episode_errors) / len(episode_errors)
+            if episode_errors
+            else None,
+            "episodes_with_accepted_frames": len(episode_errors),
+        }
+    return report
 
 
 def action_controls(
@@ -95,6 +149,7 @@ def evaluate_checkpoint(
     device: str = "cpu",
     batch_size: int = 64,
     independent_test: bool = False,
+    calibration_cache_dir: str | None = None,
 ) -> dict:
     """Compare true actions to shuffled full chunks and a persistence predictor.
 
@@ -106,6 +161,24 @@ def evaluate_checkpoint(
         raise ValueError("batch_size >= 2 is required for action shuffling")
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     settings = payload["training_config"]
+    calibration = None
+    if calibration_cache_dir is not None:
+        if not independent_test:
+            raise ValueError(
+                "Calibration thresholds may only be applied to independent test episodes"
+            )
+        manifest = torch.load(
+            Path(calibration_cache_dir) / "manifest.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        if manifest != payload["cache_manifest"]:
+            raise ValueError(
+                "Calibration must use the original training/validation cache manifest"
+            )
+        calibration = evaluate_checkpoint(
+            checkpoint, calibration_cache_dir, device=device, batch_size=batch_size
+        )
     model = RLTLatentWorld.from_checkpoint(checkpoint).to(device).eval()
     dataset = RLTLatentDataset(
         cache_dir,
@@ -271,6 +344,24 @@ def evaluate_checkpoint(
             float(torch.quantile(uncertainty, 0.95)) if len(uncertainty) else None
         )
         summary["valid_targets"] = len(error)
+        # Quantiles depend only on calibration disagreement, not test outcomes.
+        summary["disagreement_quantiles"] = (
+            {
+                str(fraction): torch.quantile(uncertainty, fraction).item()
+                for fraction in (0.25, 0.5, 0.75, 1.0)
+            }
+            if len(uncertainty)
+            else {}
+        )
+        if calibration is not None:
+            thresholds = calibration["horizons"][str(horizon)]["disagreement_quantiles"]
+            summary["selective_prediction"] = selective_prediction_report(
+                uncertainty,
+                fields["cosine_error"],
+                fields["persistence_cosine_error"],
+                episode_indices,
+                thresholds,
+            )
         summary["episode_summary"] = episode_summary
         results[str(horizon)] = summary
     return {
@@ -279,6 +370,10 @@ def evaluate_checkpoint(
         else "validation_not_independent_test",
         "episodes": dataset.episode_ids,
         "horizons": results,
+        "calibration_episodes": calibration["episodes"] if calibration else None,
+        "calibration_scope": "Validation-selected checkpoint; development diagnostic, not sealed-test or conformal coverage guarantee"
+        if calibration
+        else None,
     }
 
 
@@ -291,6 +386,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--independent-test", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--calibration-cache-dir",
+        help="Original cache; fit disagreement quantiles on its validation episodes only",
+    )
     args = parser.parse_args()
     report = evaluate_checkpoint(
         args.checkpoint,
@@ -298,6 +397,7 @@ def main() -> None:
         device=args.device,
         batch_size=args.batch_size,
         independent_test=args.independent_test,
+        calibration_cache_dir=args.calibration_cache_dir,
     )
     serialized = json.dumps(report, indent=2, allow_nan=False)
     if args.output:

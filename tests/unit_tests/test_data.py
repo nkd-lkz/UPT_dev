@@ -2922,6 +2922,29 @@ def test_latent_world_stage1b_synthetic_checkpoint_resumes(
     )
     assert independent["split"] == "independent_test"
     assert set(independent["episodes"]) == {str(i) for i in range(24, 48)}
+    calibrated = evaluate_checkpoint(
+        str(best),
+        str(test_cache),
+        batch_size=4,
+        independent_test=True,
+        calibration_cache_dir=str(cache_dir),
+    )
+    assert set(calibrated["calibration_episodes"]).isdisjoint(calibrated["episodes"])
+    assert (
+        calibrated["horizons"]["3"]["selective_prediction"]["0.5"]["threshold"]
+        == diagnostics["horizons"]["3"]["disagreement_quantiles"]["0.5"]
+    )
+    with pytest.raises(ValueError, match="original training/validation"):
+        evaluate_checkpoint(
+            str(best),
+            str(test_cache),
+            independent_test=True,
+            calibration_cache_dir=str(test_cache),
+        )
+    with pytest.raises(ValueError, match="only be applied"):
+        evaluate_checkpoint(
+            str(best), str(cache_dir), calibration_cache_dir=str(cache_dir)
+        )
     manifest["source"]["info"] = "different dataset"
     torch.save(manifest, test_cache / "manifest.pt")
     with pytest.raises(ValueError, match="source dataset"):

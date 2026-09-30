@@ -1507,6 +1507,28 @@ def test_latent_world_episode_uncertainty_does_not_count_frames_as_trials():
     assert len(report["episodes"]) == 2
 
 
+def test_latent_selective_prediction_handles_ties_empty_and_episode_weighting():
+    from toolkits.rlt.evaluate_latent_world import selective_prediction_report
+
+    disagreement = torch.tensor([0.1, 0.1, 0.1, 0.2])
+    error = torch.tensor([0.0, 0.0, 0.0, 0.8])
+    report = selective_prediction_report(
+        disagreement,
+        error,
+        torch.ones(4),
+        torch.tensor([0, 0, 0, 1]),
+        {"empty": 0.0, "half": 0.1, "all": 0.3},
+    )
+    assert report["empty"]["accepted_cosine_error"] is None
+    assert report["half"]["retained_fraction"] == 0.75
+    assert report["all"]["accepted_cosine_error"] == pytest.approx(0.2)
+    assert report["all"]["accepted_episode_mean_error"] == pytest.approx(0.4)
+    with pytest.raises(ValueError):
+        selective_prediction_report(
+            disagreement, error * float("nan"), error, torch.arange(4), {"all": 1.0}
+        )
+
+
 def test_latent_world_residual_starts_at_persistence():
     from rlinf.models.embodiment.modules.rlt_latent_world import (
         LatentWorldConfig,
