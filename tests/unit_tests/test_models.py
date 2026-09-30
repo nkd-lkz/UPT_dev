@@ -1346,6 +1346,36 @@ def test_latent_world_all_terminal_replay_has_zero_loss_and_zero_gradients():
     )
 
 
+def test_latent_world_masked_nonfinite_targets_preserve_finite_gradients():
+    model, batch = _latent_world_fixture()
+    batch["valid"][0] = False
+    with torch.no_grad():
+        batch["future_z"][0] = torch.nan
+        batch["future_proprio"][0] = torch.inf
+    loss, _ = model.loss(batch, offline=False)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert all(
+        p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()
+    )
+
+
+def test_latent_world_offline_padded_nonfinite_actions_have_finite_gradients():
+    model, batch = _latent_world_fixture()
+    batch["valid"][:, 1] = False
+    batch["action_valid"][:, 1:] = False
+    batch["actions"][:, 1:] = torch.nan
+    with torch.no_grad():
+        batch["future_z"][:, 1] = torch.nan
+        batch["future_proprio"][:, 1] = torch.inf
+    loss, _ = model.loss(batch, offline=True)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert all(
+        p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()
+    )
+
+
 def test_latent_world_sidecar_roundtrip_and_provenance_rejection(tmp_path):
     from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
 
@@ -1498,6 +1528,28 @@ def test_latent_world_residual_starts_at_persistence():
     torch.testing.assert_close(pred, target[None].expand_as(pred))
     pred.square().mean().backward()
     assert model.predictors[0][-1].weight.grad.abs().sum() > 0
+
+
+def test_latent_world_action_free_ablation_ignores_actions_and_roundtrips(tmp_path):
+    from dataclasses import replace
+
+    from rlinf.models.embodiment.modules.rlt_latent_world import RLTLatentWorld
+
+    reference, batch = _latent_world_fixture()
+    model = RLTLatentWorld(replace(reference.config, condition_on_actions=False))
+    model.load_state_dict(reference.state_dict())
+    model.eval()
+    expected = model(batch, batch["actions"], 3)[0]
+    actual = model(batch, -batch["actions"], 3)[0]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert sum(p.numel() for p in model.parameters()) == sum(
+        p.numel() for p in reference.parameters()
+    )
+    path = tmp_path / "action_free.pt"
+    torch.save(model.checkpoint({}), path)
+    restored = RLTLatentWorld.from_checkpoint(path)
+    assert not restored.config.condition_on_actions
+    torch.testing.assert_close(restored(batch, batch["actions"], 3)[0], expected)
 
 
 def test_adapter_checkpoint_audit_detects_updates_and_rejects_invalid_weights(tmp_path):

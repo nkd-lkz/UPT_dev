@@ -1,5 +1,7 @@
 # ManiSkill RLT baseline and latent-world research
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 This directory preserves the reproduction boundary and provides the code-review/runbook entry point for the FLARE-inspired research branch. The [2026-09-26 pilot report](PILOT_RESULTS.md) adds the implemented architecture figure, independent real-data evaluation, GPU smoke and resume evidence; faster RL convergence is not established. [中文](README.zh-CN.md)
 
 ## Branches and review order

@@ -31,6 +31,7 @@ class LatentWorldConfig:
     bc_weight: float = 0.1
     bootstrap_probability: float = 0.8
     predict_residual: bool = False
+    condition_on_actions: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "horizons", tuple(self.horizons))
@@ -154,6 +155,9 @@ class RLTLatentWorld(nn.Module):
         actions = actions.reshape(state.shape[0], -1, c.action_dim).float()
         if actions.shape[1] < horizon:
             raise ValueError("An action for every predicted control step is required")
+        if not c.condition_on_actions:
+            # Matched-capacity ablation: retain positions, horizon and all weights.
+            actions = torch.zeros_like(actions)
         action_tokens = (
             self.action_embedding(actions[:, :horizon]) + self.positions[:horizon]
         )
@@ -184,22 +188,31 @@ class RLTLatentWorld(nn.Module):
         """
         c = self.config
         obs = {key: batch[key] for key in ("z_rl", "proprio")}
+        actions = batch["actions"]
+        if offline:
+            actions = torch.where(batch["action_valid"].bool()[..., None], actions, 0.0)
         losses, cosine_values, delta_values = [], [], []
         for idx, horizon in enumerate(batch["horizons"]):
-            pred_z, pred_delta = self(obs, batch["actions"], int(horizon))
-            target_z = F.layer_norm(
-                batch["future_z"][:, idx].detach().float(), (c.z_dim,)
+            target_valid = batch["valid"][:, idx].bool()
+            pred_z, pred_delta = self(obs, actions, int(horizon))
+            # Mask before normalization and nonlinear losses. Masking a NaN loss
+            # afterward can still produce NaN gradients through 0 * NaN.
+            future_z = torch.where(
+                target_valid[:, None], batch["future_z"][:, idx].detach().float(), 0.0
             )
-            target_delta = (
-                batch["future_proprio"][:, idx].detach().float()
-                - batch["proprio"].detach().float()
+            future_proprio = torch.where(
+                target_valid[:, None],
+                batch["future_proprio"][:, idx].detach().float(),
+                batch["proprio"].detach().float(),
             )
+            target_z = F.layer_norm(future_z, (c.z_dim,))
+            target_delta = future_proprio - batch["proprio"].detach().float()
             cosine = 1 - F.cosine_similarity(pred_z, target_z[None], dim=-1)
             mse = (pred_z - target_z[None]).square().mean(-1)
             delta = F.smooth_l1_loss(
                 pred_delta, target_delta[None].expand_as(pred_delta), reduction="none"
             ).mean(-1)
-            valid = batch["valid"][:, idx].bool()[None].expand(c.ensemble_size, -1)
+            valid = target_valid[None].expand(c.ensemble_size, -1)
             if self.training:
                 bootstrap = torch.rand_like(cosine) < c.bootstrap_probability
                 # The first head sees all valid transitions, even in tiny batches.
@@ -223,7 +236,10 @@ class RLTLatentWorld(nn.Module):
         bc_pred = self.behavior(state).reshape(-1, c.chunk_len, c.action_dim).tanh()
         bc = bc_pred.sum() * 0.0
         if offline:
-            error = (bc_pred - batch["actions"].detach()).square().mean(-1)
+            target_actions = torch.where(
+                batch["action_valid"].bool()[..., None], batch["actions"].detach(), 0.0
+            )
+            error = (bc_pred - target_actions).square().mean(-1)
             bc = self._masked_mean(error, batch["action_valid"].bool())
         loss = loss + c.bc_weight * bc
         return loss, {

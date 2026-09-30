@@ -1,5 +1,7 @@
 # Verification / 验收记录
 
+See the [2026-09-30 audit](AUDIT_2026-09-30.md) for current changes, diagnostic results and reproducible commands. Earlier design and verification history is retained below.
+
 This preserves implementation checks on 2026-09-25. The subsequent [pilot report](PILOT_RESULTS.md) / [中文实验记录](PILOT_RESULTS.zh-CN.md) supersedes pending real-data/GPU gates below: independent prediction tests, online smoke and resume now passed; 188 CPU tests pass. Success-rate, convergence and transfer improvements remain unproven. 下文保留初版验收历史，最新证据见链接。
 
 ## Scope / 范围
