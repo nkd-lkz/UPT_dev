@@ -92,3 +92,21 @@ comparing reduced-intervention methods. No Stage 2 run is certified by this
 snapshot, and no new training was launched while making the branches.
 
 See [中文记录](BASELINE.zh-CN.md) and the existing bilingual RLT documentation.
+
+## Resume Scheduling Counters (2026-10-04)
+
+Resume a synchronous RLT learner only after checking its scheduling state as well as its model, optimizer, target network and replay. New `RLTACFSDPPolicy` checkpoints save `actor/rlt_training_state_rank_<rank>.json` after the existing save operation succeeds. Loading validates the learner layout, checkpoint step and update schedules before loading the larger training files. It then restores the update count, ingestion counters, warmup anchors and pending update budget.
+
+This prevents a resumed learner from silently repeating warmup or changing its BC/Q weights. It does not restore simulator state or guarantee bitwise continuation of random sampling. Asynchronous workers and generic SAC workers are outside this change.
+
+Legacy checkpoints without this file fail explicitly. Do not synthesize the counters from the outer step: updates per outer step vary, and warmup anchors depend on replay collection. Preserve the old checkpoint, independently reconstruct and verify the state from matching logs and replay metadata, and only then migrate a separate copy. A weights-only initialization is a new experiment, not an exact resume.
+
+The 2026-10-03 matched audit recorded reference 96/256, step 400 99/256 and step 800 104/256 successes. The separate step 800 video batch recorded 10/20. Step 800 is the continuation candidate; these aggregate results alone do not establish statistical significance. Before continuing for 200 additional outer steps, require readable storage, verified legacy state and idle assigned GPUs. Keep evaluation and expert settings unchanged; do not merge a new expert intervention into this comparison.
+
+CPU regression command:
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv/bin/python -m pytest tests/unit_tests/test_checkpoint.py -q
+```
+
+This checks metadata rejection, scheduling round trips and CPU optimizer/scheduler restoration. GPU restore tests are skipped by this command; it is not an end-to-end resume of the historical checkpoint.

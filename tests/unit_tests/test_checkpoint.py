@@ -19,9 +19,154 @@ import torch
 from torch.distributed import checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions
 
+from rlinf.algorithms.rlt.checkpoint import (
+    COUNTER_NAMES,
+    load_training_state,
+    save_training_state,
+)
 from rlinf.hybrid_engines.fsdp.strategy.checkpoint import Checkpoint
 from rlinf.hybrid_engines.fsdp.utils import FSDPVersion
 from rlinf.scheduler import Worker
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_rlt_training_counters_round_trip(tmp_path, ready):
+    directory = tmp_path / "global_step_800" / "actor"
+    directory.mkdir(parents=True)
+    counters = dict.fromkeys(COUNTER_NAMES, 0)
+    counters.update(
+        update_step=123456,
+        total_transitions_added=200000,
+        total_episodes_added=1000,
+        pending_update_budget=137,
+        _warmup_ready_total_transitions=10000 if ready else None,
+        _warmup_ready_total_episodes=50 if ready else None,
+    )
+    schedule = {"warmup_post_collect_updates": 30000}
+    save_training_state(
+        str(directory),
+        rank=0,
+        world_size=1,
+        step=800,
+        counters=counters,
+        schedule=schedule,
+    )
+    assert (
+        load_training_state(str(directory), rank=0, world_size=1, schedule=schedule)
+        == counters
+    )
+    with pytest.raises(ValueError, match="schedule differs"):
+        load_training_state(str(directory), rank=0, world_size=1, schedule={})
+    with pytest.raises(ValueError, match="rank layout"):
+        load_training_state(str(directory), rank=0, world_size=2, schedule=schedule)
+
+
+def test_rlt_missing_or_wrong_checkpoint_fails_closed(tmp_path):
+    directory = tmp_path / "global_step_800" / "actor"
+    directory.mkdir(parents=True)
+    with pytest.raises(ValueError, match="Missing RLT training state"):
+        load_training_state(str(directory), rank=0, world_size=1, schedule={})
+    save_training_state(
+        str(directory),
+        rank=0,
+        world_size=1,
+        step=400,
+        counters=dict.fromkeys(COUNTER_NAMES, 0),
+        schedule={},
+    )
+    with pytest.raises(ValueError, match="different checkpoint"):
+        load_training_state(str(directory), rank=0, world_size=1, schedule={})
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("update_step", -1),
+        ("update_step", 1.5),
+        ("pending_update_budget", True),
+        ("transitions_since_train", 1),
+    ],
+)
+def test_rlt_rejects_invalid_counters(tmp_path, key, value):
+    counters = dict.fromkeys(COUNTER_NAMES, 0)
+    counters[key] = value
+    with pytest.raises(ValueError):
+        save_training_state(
+            str(tmp_path), rank=0, world_size=1, step=1, counters=counters, schedule={}
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_rlt_worker_resume_preserves_next_budget_and_bc_weights(tmp_path, monkeypatch):
+    from omegaconf import OmegaConf
+
+    from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACFSDPPolicy
+    from rlinf.workers.actor.fsdp_sac_policy_worker import EmbodiedSACFSDPPolicy
+
+    # Substitute only the distributed model/replay I/O boundary. Scheduling and
+    # worker save/load methods below are the production implementation.
+    monkeypatch.setattr(EmbodiedSACFSDPPolicy, "save_checkpoint", lambda *args: None)
+    monkeypatch.setattr(EmbodiedSACFSDPPolicy, "load_checkpoint", lambda *args: None)
+    monkeypatch.setattr(RLTACFSDPPolicy, "log_info", lambda *args: None)
+    monkeypatch.setattr(
+        RLTACFSDPPolicy,
+        "_global_rlt_counters",
+        lambda self: {
+            "min_replay_size": 20000,
+            "min_demo_size": 0,
+            "total_transitions_added": self.total_transitions_added,
+            "total_episodes_added": self.total_episodes_added,
+            "transitions_since_train": self.transitions_since_train,
+        },
+    )
+
+    def worker():
+        result = object.__new__(RLTACFSDPPolicy)
+        result.cfg = OmegaConf.create(
+            {
+                "algorithm": {
+                    "replay_buffer": {"min_buffer_size": 10000},
+                    "update_epoch": 5,
+                    "actor_weight_schedule": {
+                        "enable": True,
+                        "warmup_updates": 20000,
+                        "ramp_updates": 50000,
+                        "online_bc_weight": 2.5,
+                        "online_q_weight": 0.45,
+                    },
+                }
+            }
+        )
+        result.rlt_schedule_cfg = OmegaConf.create(
+            {
+                "enable": True,
+                "warmup_post_collect_updates": 30000,
+                "train_every_transitions": 5,
+                "max_updates_per_train_step": 400,
+            }
+        )
+        result.use_rlt_schedule = True
+        result.critic_actor_ratio = 1
+        result._rank, result._world_size = 0, 1
+        for name in COUNTER_NAMES:
+            setattr(result, name, 0)
+        return result
+
+    source = worker()
+    source.update_step = 100000
+    source.total_transitions_added = 80500
+    source.total_episodes_added = 800
+    source._warmup_ready_total_transitions = 10000
+    source._warmup_ready_total_episodes = 100
+    expected_budget = source._rlt_updates_to_run()
+    expected_weights = source._actor_objective_weights()
+    source.save_checkpoint(str(tmp_path), 800)
+    target = worker()
+    target.load_checkpoint(str(tmp_path))
+    assert target.get_rollout_sync_version() == 100000
+    assert target._rlt_updates_to_run() == expected_budget
+    assert target._actor_objective_weights() == expected_weights
+    assert expected_budget[0] == 400
 
 
 @pytest.fixture(autouse=True)

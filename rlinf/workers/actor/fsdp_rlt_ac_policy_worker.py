@@ -17,7 +17,13 @@ import queue
 
 import torch
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 
+from rlinf.algorithms.rlt.checkpoint import (
+    COUNTER_NAMES,
+    load_training_state,
+    save_training_state,
+)
 from rlinf.algorithms.rlt.transition import use_simulator_transition_replay
 from rlinf.data.schema.embodied_types import Trajectory
 from rlinf.models.embodiment.base_policy import ForwardType
@@ -683,6 +689,46 @@ class RLTACFSDPPolicy(RLTACLossMixin, RLTACReplayMixin, EmbodiedSACFSDPPolicy):
         self._warmup_ready_total_transitions: int | None = None
         self._warmup_ready_total_episodes: int | None = None
         self.pending_update_budget = 0
+
+    def _checkpoint_schedule(self) -> dict:
+        return OmegaConf.to_container(
+            OmegaConf.create(
+                {
+                    "rlt_schedule": self.rlt_schedule_cfg,
+                    "update_epoch": self.cfg.algorithm.get("update_epoch", 1),
+                    "actor_weight_schedule": self.cfg.algorithm.get(
+                        "actor_weight_schedule", {}
+                    ),
+                    "critic_actor_ratio": self.critic_actor_ratio,
+                }
+            ),
+            resolve=True,
+        )
+
+    def save_checkpoint(self, save_base_path, step):
+        """Save model/replay and the counters that control the next update."""
+        super().save_checkpoint(save_base_path, step)
+        save_training_state(
+            save_base_path,
+            rank=self._rank,
+            world_size=self._world_size,
+            step=int(step),
+            counters={k: getattr(self, k) for k in COUNTER_NAMES},
+            schedule=self._checkpoint_schedule(),
+        )
+
+    def load_checkpoint(self, load_base_path):
+        """Validate scheduling metadata before restoring the training state."""
+        counters = load_training_state(
+            load_base_path,
+            rank=self._rank,
+            world_size=self._world_size,
+            schedule=self._checkpoint_schedule(),
+        )
+        super().load_checkpoint(load_base_path)
+        for key, value in counters.items():
+            setattr(self, key, value)
+        self.log_info(f"Restored RLT learner update_step={self.update_step}")
 
     def setup_sac_components(self):
         """Initialize replay components and let RLT schedule own readiness."""

@@ -60,3 +60,21 @@ launcher 会在物理 GPU 2 已被占用时拒绝启动，使用独立 Ray，并
 启动前需要选择并评测 Stage 1 checkpoint，配置更强的 expert checkpoint 或明确关闭接管，再根据可用 GPU 调整并行环境数。原 Stage 2 具有基于仿真状态的阶段切换和可选 expert 接管；减少干预的比较必须统计这两类帮助。此快照不宣称 Stage 2 已验证，分支整理期间没有启动新训练。
 
 参见 [English record](BASELINE.md) 和仓库已有的中英文 RLT 文档。
+
+## 恢复训练调度计数（2026-10-04）
+
+续训同步 RLT learner 时，需要同时验收调度状态以及模型、optimizer、target network 和 replay。新的 `RLTACFSDPPolicy` checkpoint 会在原有保存操作成功后，写入 `actor/rlt_training_state_rank_<rank>.json`。加载时先核对 learner rank 布局、checkpoint 步数和更新调度，再读取较大的训练文件；随后恢复更新计数、数据接收计数、热身起点和待执行更新预算。
+
+这能避免续训时静默重跑热身或改变 BC/Q 权重，但不恢复仿真器状态，也不保证随机采样逐位接续。异步 worker 和通用 SAC worker 不在本次修改范围内。
+
+缺少该文件的旧 checkpoint 会明确报错。不能用外层 step 推算计数：每轮实际更新次数不同，热身起点还取决于 replay 收集过程。保留旧 checkpoint，从对应日志和 replay 元数据独立重建并核验状态后，再迁移单独副本。只加载权重属于新实验，不能称为精确续训。
+
+2026-10-03 匹配审计记录 reference 成功 96/256、step 400 成功 99/256、step 800 成功 104/256；另一个 step 800 视频组为 10/20。续训候选为 step 800，但仅凭汇总结果不能确认统计显著性。追加 200 个外层 step 前，必须确认存储可读、旧状态重建可信且目标 GPU 空闲；保持评估与 expert 设置不变，不在这一对照里加入新干预方法。
+
+CPU 回归命令：
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv/bin/python -m pytest tests/unit_tests/test_checkpoint.py -q
+```
+
+该命令验证元数据拒绝规则、调度往返恢复和 CPU optimizer／scheduler 恢复；GPU 恢复测试会跳过，不代表历史 checkpoint 已通过端到端续训。
