@@ -44,14 +44,27 @@
     "interpretation": "No observed public-learner advantage in these 20 paired cases; not the full benchmark."
   },
   "training_runtime": {
-    "local_commit": "f1d27bd06597a15ec1104133fe7f13848a5b2849",
-    "source_tree": "1acfcd5ff4e54d0648715ea4387b500d1ee0e85f",
-    "patch": "patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch",
+    "local_commit": "16d9756790ba38e270a1831a218381d2211b1b46",
+    "source_tree": "7abd269c822569642f94f79948e4b0869e6d25d5",
+    "patches": ["patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch", "patches/0002-fix-libero-bound-rollout-lifetime-and-publish-small.patch"],
     "evaluation_source_unchanged": true,
-    "gpu_training_acceptance": "pending overnight run; consult its manifest"
+    "gpu_training_acceptance": "Patch 1 completed 20 iterations but had a shutdown race; patch 2 acceptance pending queued 100-iteration run."
+  },
+  "training20_runtime_probe": {
+    "directory": "../overnight_20261006_1820/libero_train20",
+    "source_revision": "f1d27bd06597a15ec1104133fe7f13848a5b2849",
+    "complete_iterations": 20,
+    "consumed_environment_steps": 22281,
+    "reconstructed_critic_updates": 33,
+    "reconstructed_actor_updates": 14,
+    "clean_shutdown": false,
+    "shutdown_issue": "Unneeded rollout batch 21 remained active when sockets closed; batch 21 was not consumed in the 20 recorded training iterations.",
+    "additional_issue": "Default rollout synchronization required 500 updates, far above this run's budget.",
+    "autonomous_success": "pending paired evaluation; inspect that run's own summary.json",
+    "interpretation": "Training/weight-export evidence with known lifecycle and publication limitations, not clean end-to-end acceptance or improved performance."
   },
   "validation": {
-    "cpu_protocol_tests": 15,
+    "cpu_protocol_tests": 16,
     "queue_tests": 3,
     "released_encoder_actor_strict_load": true,
     "finite_cpu_forward": true,

@@ -1,0 +1,131 @@
+From 16d9756790ba38e270a1831a218381d2211b1b46 Mon Sep 17 00:00:00 2001
+From: Luokz <nkd-lkz@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 18:32:16 +0800
+Subject: [PATCH] fix(libero): bound rollout lifetime and publish small pilot
+ updates
+
+Signed-off-by: Luokz <nkd-lkz@users.noreply.github.com>
+---
+ .../trainers/train_rl_offpolicy.py            | 46 +++++++++++--------
+ 1 file changed, 26 insertions(+), 20 deletions(-)
+
+diff --git a/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py b/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
+index 3976013..309030f 100644
+--- a/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
++++ b/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
+@@ -367,8 +367,7 @@ def run_rl_offpolicy(args):
+ 
+     buffer_lock = threading.Lock()
+     # Bounded queue: rollout blocks on `put()` when main falls behind instead
+-    # of racing ahead indefinitely. Decouples rollout lifetime from
+-    # args.max_iter (see _rollout_thread_fn below).
++    # of racing ahead indefinitely. Each consumer iteration takes one batch.
+     rollout_stats_queue = queue.Queue(maxsize=8)   # (episodes, iteration)
+     _stop_rollout = threading.Event()
+     _weight_sync_lock = threading.Lock()  # protects weight copy (non-blocking)
+@@ -570,23 +569,15 @@ def run_rl_offpolicy(args):
+             _eval_thread_holder[0] = None
+ 
+     def _rollout_thread_fn(start_iter):
+-        """Background thread: continuously collects episodes and pushes to buffer.
+-
+-        Runs until `_stop_rollout` is set — which happens only after the main
+-        loop has consumed its `args.max_iter` training tuples. Previously this
+-        was a `for it in range(..., max_iter + 1)` loop, which made rollout
+-        exit at iter==max_iter even when the slower main loop (async mode,
+-        large td_updates_per_iter × utd_ratio) hadn't yet drained the queue.
+-        If rollout then hit any late-iteration exception — e.g. a transient
+-        cuda error while contending with TD updates on a shared GPU — the
+-        poison-pill path broke the main loop early. Decoupling rollout's
+-        lifetime from max_iter removes that coupling: rollout keeps producing
+-        (subject to the bounded queue's backpressure) as long as training
+-        still wants data.
++        """Produce one batch per consumer iteration, with bounded backpressure.
++
++        This revision's main loop consumes exactly one queue item per iteration.
++        Stop after the final requested batch, rather than stepping an extra
++        episode while shutdown closes the environment sockets.
+         """
+         it = start_iter
+         try:
+-          while not _stop_rollout.is_set():
++          while it <= args.max_iter and not _stop_rollout.is_set():
+             # Wait if paused (during eval)
+             _rollout_go.wait()  # blocks until set
+             if _stop_rollout.is_set():
+@@ -663,7 +654,10 @@ def run_rl_offpolicy(args):
+ 
+                     def _run_gpu_checked(gpu_id, task_list):
+                         try:
+-                            _run_gpu(gpu_id, task_list)
++                            # Publish only between complete collection passes,
++                            # never halfway through an actor forward.
++                            with _weight_sync_lock:
++                                _run_gpu(gpu_id, task_list)
+                         except Exception as error:
+                             gpu_errors.append(error)
+ 
+@@ -765,7 +759,9 @@ def run_rl_offpolicy(args):
+     td_global_step = 0
+     last_sync_step = 0
+     last_completed_iter = 0  # last training iter whose body fully ran; drives final-ckpt name
+-    sync_every_n_updates = 500  # sync weights to rollout every N TD3 updates
++    sync_every_n_updates = int(os.environ.get("RLT_LIBERO_SYNC_UPDATES", "500"))
++    if sync_every_n_updates < 1:
++        raise ValueError("RLT_LIBERO_SYNC_UPDATES must be positive")
+ 
+     from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_trainer import (
+         action_token_td_actor_update,
+@@ -816,6 +812,8 @@ def run_rl_offpolicy(args):
+ 
+         # ── VLA warmup phase ──
+         td_stats_list = []  # empty during warmup; filled during TD3
++        actor_updates_this_iter = 0
++        critic_updates_this_iter = 0
+         if iteration <= args.warmup_iters:
+             logger.info(f"[iter {iteration}] VLA warmup ({iteration}/{args.warmup_iters}), "
+                          f"buffer={len(replay_buffer)} — skipping TD updates")
+@@ -865,9 +863,10 @@ def run_rl_offpolicy(args):
+                 if args.max_grad_norm > 0:
+                     torch.nn.utils.clip_grad_norm_(q_critic.parameters(), args.max_grad_norm)
+                 optimizer_critic.step()
++                critic_updates_this_iter += 1
+ 
+                 a_stats = {"actor_loss": 0.0, "q_actor_mean": 0.0, "bc_penalty": 0.0}
+-                if (td_step + 1) % args.actor_update_freq == 0:
++                if (td_global_step + 1) % args.actor_update_freq == 0:
+                     optimizer_actor.zero_grad()
+                     actor_loss, a_stats = action_token_td_actor_update(
+                         actor=actor,
+@@ -882,6 +881,7 @@ def run_rl_offpolicy(args):
+                     if args.max_grad_norm > 0:
+                         torch.nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
+                     optimizer_actor.step()
++                    actor_updates_this_iter += 1
+                     soft_update_target(q_critic, target_q_critic, tau=args.tau)
+                     soft_update_target(actor, target_actor, tau=args.tau)
+ 
+@@ -1001,6 +1001,10 @@ def run_rl_offpolicy(args):
+                 "mean_reward": float(np.mean(rewards)) if len(rewards) > 0 else 0.0,
+                 "buffer_size": len(replay_buffer),
+                 "n_pushed": n_pushed,
++                "actor_updates": actor_updates_this_iter,
++                "critic_updates": critic_updates_this_iter,
++                "td_global_step": td_global_step,
++                "rollout_sync_step": last_sync_step,
+             }
+             if td_stats_list:
+                 avg_fn = lambda k: float(np.mean([s[k] for s in td_stats_list if k in s]))
+@@ -1084,7 +1088,9 @@ def run_rl_offpolicy(args):
+ 
+     # Stop rollout thread
+     _stop_rollout.set()
+-    rollout_thread.join(timeout=10)
++    rollout_thread.join(timeout=120)
++    if rollout_thread.is_alive():
++        raise RuntimeError("Rollout thread did not stop; refusing to close live worker sockets")
+     logger.info("Rollout thread stopped")
+ 
+     # Wait for any pending async eval to finish + drain final results
+-- 
+2.34.1

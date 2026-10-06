@@ -105,9 +105,10 @@ VLA 来自 ``AlphaBrainGroup/qwenoft-5traj-libero-goal``，revision 为 ``91ea08
    git -C "$ALPHABRAIN_SOURCE" worktree add --detach \
      "$RLT_ALPHABRAIN_TRAIN_SOURCE" 604924beb77b04b0da49326dfae6ea423a27d28a
    git -C "$RLT_ALPHABRAIN_TRAIN_SOURCE" am \
-     "$PWD/experiments/libero_rlt/patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch"
+     "$PWD/experiments/libero_rlt/patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch" \
+     "$PWD/experiments/libero_rlt/patches/0002-fix-libero-bound-rollout-lifetime-and-publish-small.patch"
 
-已经准备好训练 worktree 时跳过这组命令。适配器要求干净的 Git tree 为 ``1acfcd5ff4e54d0648715ea4387b500d1ee0e85f``；``git am`` 后的 commit 时间可以不同，实际 commit 会写入 manifest。启动脚本只在 ``train`` 模式选择这个目录；可用 ``RLT_ALPHABRAIN_TRAIN_SOURCE`` 修改路径。
+已经应用两个补丁的训练 worktree 跳过这组命令；只有第一个补丁时，仅应用第二个。适配器要求干净的 Git tree 为 ``7abd269c822569642f94f79948e4b0869e6d25d5``；``git am`` 后的 commit 时间可以不同，实际 commit 会写入 manifest。启动脚本只在 ``train`` 模式选择这个目录；可用 ``RLT_ALPHABRAIN_TRAIN_SOURCE`` 修改路径。
 
 训练入口使用同一个冻结公开 encoder，但重新初始化 actor 和 critic；不是从公开 step 400 恢复 optimizer，也不是完整 token RLT。先运行 20 次外层迭代的小实验。
 
@@ -121,6 +122,10 @@ VLA 来自 ``AlphaBrainGroup/qwenoft-5traj-libero-goal``，revision 为 ``91ea08
 预算为单 GPU、2 个环境、每轮 4 回合、5 轮 VLA 热身、batch 128、每轮最多 128 次 TD 更新、replay 容量 20,000。默认不启用 W&B 或并发评估，只在最后保存 checkpoint；这些小预算不是作者的完整训练配方，也不保证收敛。入口在结束时检查缺轮、零新增环境步、非有限标量、热身后没有 actor 更新，以及缺少最终权重等问题。``metrics.json`` 只表示进度；只有完整 manifest 才表示指定运行完成。
 
 训练后用同一配对评估入口，并通过 ``--learner-dir /path/to/checkpoints/rl_offpolicy_iter_00020`` 指定新的 encoder/actor。独立评估前不能把训练退出码 0 解释为性能提高。CLI、来源版本和实验元数据会随结果保存；训练级复现还需要扩大样本、匹配预算和重复训练种子。
+
+每轮 128 次只是上限，不是实际梯度更新数。更新量为 ``new_transitions × utd_ratio / batch_size`` 向下取整，至少一次且不超过上限。上游的 actor 延迟计数在每个外层迭代重新开始：一次 critic 更新、延迟参数为二的轮次不会更新 actor，但仍会记录 ``actor_loss`` 占位值。第二个补丁改用全局延迟计数并直接记录 optimizer 步数；适配器只对旧版记录重建预算，并标明来源。不能把 100 个外层迭代理解成 12,800 次 critic 更新，也不能仅凭 loss 字段存在认定 actor 更新过。
+
+第一轮 20 次迭代已用第一个补丁完成并保存权重，但暴露了两个额外限制：默认累计 500 次更新才发布权重，高于小实验的总更新量，导致热身后的 rollout 权重长期不变；退出时也关闭了仍在采集多余第 21 批的 worker。第二个补丁只生成所需批次，并在关闭 socket 前确认采集线程退出。适配器设置 ``RLT_LIBERO_SYNC_UPDATES=1``，发布与完整采集 pass 共用锁。这是明确的小规模运行修正，不是未修改的上游运行。队列中的 100 轮将使用第二个补丁，不能把它与原 20 轮的差异全部归因于训练时长；新版本的 GPU 验收仍需等待该运行的 manifest 和计数。
 
 运行有时限的夜间队列
 --------------------

@@ -21,8 +21,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 SOURCE_REVISION = "604924beb77b04b0da49326dfae6ea423a27d28a"
-TRAINING_REVISION = "f1d27bd06597a15ec1104133fe7f13848a5b2849"
-TRAINING_TREE = "1acfcd5ff4e54d0648715ea4387b500d1ee0e85f"
+TRAINING_REVISION = "16d9756790ba38e270a1831a218381d2211b1b46"
+TRAINING_TREE = "7abd269c822569642f94f79948e4b0869e6d25d5"
 ASSETS = {
     "vla": (
         "AlphaBrainGroup/qwenoft-5traj-libero-goal",
@@ -174,9 +174,16 @@ def train(args) -> dict:
     (args.output / "training_arguments.json").write_text(
         json.dumps(vars(config), indent=2) + "\n"
     )
+    # At this pilot's small UTD budget, the upstream default of 500 updates
+    # can leave rollout on stale weights for the entire run. Publish each
+    # completed update group; record this deliberate adapter setting.
+    os.environ["RLT_LIBERO_SYNC_UPDATES"] = "1"
     run_rl_offpolicy(config)
     history = json.loads((args.output / "metrics.json").read_text())
     validate_training_history(history, args.iterations)
+    update_budget = summarize_update_budget(history, vars(config))
+    if args.iterations > config.warmup_iters and update_budget["actor_updates"] == 0:
+        raise ValueError("The completed pilot never scheduled an actor update")
     checkpoint = (
         args.output / "checkpoints" / f"rl_offpolicy_iter_{args.iterations:05d}"
     )
@@ -187,11 +194,57 @@ def train(args) -> dict:
         "variant": "rlt_a",
         "iterations": args.iterations,
         "environment_steps": sum(row["iter_env_steps"] for row in history),
-        "iterations_with_updates": sum("actor_loss" in row for row in history),
+        "iterations_reporting_losses": sum("actor_loss" in row for row in history),
+        "update_budget": update_budget,
+        "rollout_sync_interval_updates": 1,
         "checkpoint": str(checkpoint),
         "initialization": "Published frozen encoder; fresh actor and critic",
         "autonomous_success": None,
         "next_action": "Evaluate the new checkpoint against the same frozen reference; training completion is not a success-rate result.",
+    }
+
+
+def summarize_update_budget(history: list[dict], config: dict) -> dict:
+    """Prefer measured counters; reconstruct only legacy runtime-patch-1 runs.
+
+    Legacy actor delay restarted within each outer iteration, so one critic
+    update with delay two produced no actor update despite an actor_loss key.
+    Runtime patch 2 records optimizer steps and uses a global delay counter.
+    """
+    if history and all(
+        "critic_updates" in row and "actor_updates" in row for row in history
+    ):
+        return {
+            "critic_updates": sum(row["critic_updates"] for row in history),
+            "actor_updates": sum(row["actor_updates"] for row in history),
+            "critic_only_iterations": [
+                row["iter"]
+                for row in history
+                if row["critic_updates"] and not row["actor_updates"]
+            ],
+            "rollout_sync_steps": [row["rollout_sync_step"] for row in history],
+            "provenance": "Instrumented optimizer-step counters from runtime patch 2; global actor delay.",
+        }
+    critic_updates = actor_updates = 0
+    critic_only_iterations = []
+    for row in history:
+        if "critic_loss" not in row:
+            continue
+        batch_size = min(config["td_batch_size"], row["buffer_size"])
+        updates = min(
+            config["td_updates_per_iter"],
+            max(1, int(row["n_pushed"] * config["utd_ratio"] / batch_size)),
+        )
+        actor_steps = updates // config["actor_update_freq"]
+        critic_updates += updates
+        actor_updates += actor_steps
+        if actor_steps == 0:
+            critic_only_iterations.append(row["iter"])
+    return {
+        "critic_updates": critic_updates,
+        "actor_updates": actor_updates,
+        "critic_only_iterations": critic_only_iterations,
+        "provenance": "Reconstructed from the pinned trainer formula and recorded n_pushed/buffer_size; not instrumented optimizer counters.",
     }
 
 
@@ -503,7 +556,9 @@ def main() -> None:
         "upstream_base_revision": SOURCE_REVISION,
         "assets": ASSETS,
         "tasks": args.tasks,
-        "states": args.states,
+        "states": args.states if args.mode == "evaluate" else None,
+        "training_state_pool": list(range(50)) if args.mode == "train" else None,
+        "rollout_sync_interval_updates": 1 if args.mode == "train" else None,
         "seed": args.seed,
         "gpu": args.gpu,
         "gpu_uuid": gpu_uuid,

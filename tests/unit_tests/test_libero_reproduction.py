@@ -8,6 +8,7 @@ from toolkits.rlt.libero_reproduction import (
     ReferenceActor,
     episode_plan,
     paired_summary,
+    summarize_update_budget,
     training_arguments,
     validate_training_history,
 )
@@ -61,6 +62,45 @@ def test_training_is_one_visible_gpu_without_concurrent_eval(tmp_path):
     assert "--use_wandb" not in command and "--finetune_vla" not in command
     with pytest.raises(ValueError):
         training_arguments(tmp_path, tmp_path / "output", 0, 0)
+
+
+def test_update_budget_does_not_count_zero_actor_loss_placeholders_as_updates():
+    config = {
+        "td_batch_size": 128,
+        "utd_ratio": 2.0,
+        "td_updates_per_iter": 128,
+        "actor_update_freq": 2,
+    }
+    history = [
+        {"iter": 1, "n_pushed": 50, "buffer_size": 50},
+        {
+            "iter": 2,
+            "n_pushed": 80,
+            "buffer_size": 130,
+            "critic_loss": 1.0,
+            "actor_loss": 0.0,
+        },
+        {
+            "iter": 3,
+            "n_pushed": 160,
+            "buffer_size": 290,
+            "critic_loss": 0.5,
+            "actor_loss": 0.8,
+        },
+    ]
+    report = summarize_update_budget(history, config)
+    assert report["critic_updates"] == 3
+    assert report["actor_updates"] == 1
+    assert report["critic_only_iterations"] == [2]
+    measured = [
+        {"iter": 1, "critic_updates": 1, "actor_updates": 0, "rollout_sync_step": 1},
+        {"iter": 2, "critic_updates": 1, "actor_updates": 1, "rollout_sync_step": 2},
+    ]
+    report = summarize_update_budget(measured, config)
+    assert report["actor_updates"] == 1
+    assert report["critic_updates"] == 2
+    assert report["rollout_sync_steps"] == [1, 2]
+    assert report["provenance"].startswith("Instrumented")
 
 
 @pytest.mark.parametrize("file_logging", [False, True])

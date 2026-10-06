@@ -111,9 +111,10 @@ Evaluation retains the original upstream checkout. Training needs a separate, au
    git -C "$ALPHABRAIN_SOURCE" worktree add --detach \
      "$RLT_ALPHABRAIN_TRAIN_SOURCE" 604924beb77b04b0da49326dfae6ea423a27d28a
    git -C "$RLT_ALPHABRAIN_TRAIN_SOURCE" am \
-     "$PWD/experiments/libero_rlt/patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch"
+     "$PWD/experiments/libero_rlt/patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch" \
+     "$PWD/experiments/libero_rlt/patches/0002-fix-libero-bound-rollout-lifetime-and-publish-small.patch"
 
-Skip these commands if the prepared training worktree already exists. The adapter requires its clean Git tree to equal ``1acfcd5ff4e54d0648715ea4387b500d1ee0e85f``; commit timestamps may differ after ``git am``. It records the actual commit. The wrapper selects this tree only for ``train``; set ``RLT_ALPHABRAIN_TRAIN_SOURCE`` to override its location.
+Skip these commands if the prepared training worktree already contains both patches. If it contains patch 1 only, apply patch 2 alone. The adapter requires its clean Git tree to equal ``7abd269c822569642f94f79948e4b0869e6d25d5``; commit timestamps may differ after ``git am``. It records the actual commit. The wrapper selects this tree only for ``train``; set ``RLT_ALPHABRAIN_TRAIN_SOURCE`` to override its location.
 
 The training entry uses the same frozen released encoder but initializes a fresh actor and critic. It neither resumes the public step-400 optimizer nor trains full-token RLT. Start with 20 outer iterations:
 
@@ -127,6 +128,10 @@ The training entry uses the same frozen released encoder but initializes a fresh
 The budget is one GPU, two environments, four episodes per iteration, five VLA warmup iterations, batch 128, at most 128 TD updates per iteration and replay capacity 20,000. W&B and concurrent evaluation are disabled; checkpointing occurs at the final iteration. These small budgets are not the author's complete recipe or a convergence guarantee. On return, the adapter rejects missing iterations, zero-step collection, nonfinite scalar metrics, missing actor updates after warmup, or absent final weights. ``metrics.json`` is progress evidence; only a complete manifest certifies the requested run finished.
 
 After training, use the same paired evaluator with ``--learner-dir /path/to/checkpoints/rl_offpolicy_iter_00020``. Exit code zero is not evidence of improved autonomous success. Arguments, source revisions and experiment metadata accompany outputs. Training-level reproduction additionally requires larger samples, matched budgets and repeated training seeds.
+
+The 128-update limit is a cap, not the number of gradient steps actually taken. Updates are ``new_transitions × utd_ratio / batch_size`` rounded down, bounded below by one and above by the cap. Upstream restarted the actor-delay counter each outer iteration: a one-update iteration with delay two made no actor update despite logging an ``actor_loss`` placeholder. Patch 2 uses a global delay counter and records actual optimizer steps. The adapter reconstructs counts only for old patch-1 histories and labels their provenance. Do not equate 100 outer iterations with 12,800 critic updates or interpret a loss key alone as an actor update.
+
+The first 20-iteration run completed with patch 1 and saved its weights, but exposed two further limitations. The default 500-update publication interval exceeds this pilot's total updates, leaving rollout weights stale after warmup. Shutdown also closed workers while an unnecessary 21st batch was still collecting. Patch 2 collects exactly one batch per requested consumer iteration and checks thread completion before closing sockets. The adapter sets ``RLT_LIBERO_SYNC_UPDATES=1`` and publication holds the same lock as a complete collection pass. This is an explicit correction to the small-pilot runtime, not an untouched upstream run. The queued 100-iteration run uses patch 2; differences from the original 20-iteration run cannot be attributed solely to training duration. Its GPU acceptance remains pending until that run's manifest and counters are available.
 
 Run a Bounded Overnight Queue
 -----------------------------
