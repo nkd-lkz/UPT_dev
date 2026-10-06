@@ -106,6 +106,7 @@ class RLTACLossMixin:
         actions: torch.Tensor,
         ref_chunk: torch.Tensor,
         intervene_flags: torch.Tensor | None,
+        planner_flags: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         chunk_len, action_dim = self._chunk_shape()
         pi_chunk = self._flatten_chunk(pi).reshape(-1, chunk_len, action_dim)
@@ -149,6 +150,20 @@ class RLTACLossMixin:
             "human_mask_ratio": human_ratio,
             "policy_mask_ratio": 1.0 - human_ratio,
         }
+        if planner_flags is not None:
+            planner_mask = (
+                planner_flags.to(pi_chunk.device).bool().reshape(-1, chunk_len)
+            )
+            actual_human = human_mask & ~planner_mask
+            metrics["planner_mask_ratio"] = planner_mask.float().mean().item()
+            metrics["human_mask_ratio"] = actual_human.float().mean().item()
+            metrics["intervention_mask_ratio"] = human_ratio
+            metrics["bc_planner_loss"] = (
+                (human_error * planner_mask).sum() / planner_mask.sum().clamp_min(1)
+            ).item()
+            metrics["bc_human_loss"] = (
+                (human_error * actual_human).sum() / actual_human.sum().clamp_min(1)
+            ).item()
         return bc_loss, metrics
 
     def _actor_objective_weights(self) -> tuple[float, float, dict[str, float]]:
@@ -353,6 +368,7 @@ class RLTACLossMixin:
             actions=batch["actions"],
             ref_chunk=ref_chunk,
             intervene_flags=batch.get("intervene_flags", None),
+            planner_flags=curr_obs.get("planner_flags"),
         )
         metrics.update(rlt_metrics)
 

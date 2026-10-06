@@ -149,6 +149,8 @@ class EnvTransition:
     intervene_actions: torch.Tensor | None = None
     # Environment-side intervention mask, bool [B, C].
     intervene_flags: torch.Tensor | None = None
+    # Planner/oracle provenance for environment overrides, bool [B, C].
+    planner_flags: torch.Tensor | None = None
     # RLT route chosen per action, usually bool/int [B, C].
     rlt_switch_flags: torch.Tensor | None = None
     # External reward-model scores aligned with ``rewards``, float [B, C].
@@ -159,6 +161,18 @@ class EnvTransition:
     episode_data: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.planner_flags is not None:
+            if self.intervene_flags is None or self.intervene_actions is None:
+                raise ValueError(
+                    "Planner provenance requires executed intervention actions and flags"
+                )
+            if (
+                self.planner_flags.shape != self.intervene_flags.shape
+                or (
+                    self.planner_flags.cpu().bool() & ~self.intervene_flags.cpu().bool()
+                ).any()
+            ):
+                raise ValueError("Planner flags must be a subset of intervention flags")
         for field_name in (
             "rewards",
             "dones",
@@ -166,6 +180,7 @@ class EnvTransition:
             "truncations",
             "intervene_actions",
             "intervene_flags",
+            "planner_flags",
             "rlt_switch_flags",
             "reward_model_output",
         ):
@@ -199,6 +214,7 @@ class EnvTransition:
                 "rewards",
                 "intervene_actions",
                 "intervene_flags",
+                "planner_flags",
                 "rlt_switch_flags",
             )
         }
@@ -710,13 +726,21 @@ class TrajectoryStep:
                 else None
             ),
         )
+        if output.intervene_flags is not None:
+            step.set_intervention_flags(output.intervene_flags)
         if env.transition.intervene_actions is not None:
             step.apply_interventions(
                 env.transition.intervene_actions,
                 env.transition.intervene_flags,
             )
-        if output.intervene_flags is not None:
-            step.set_intervention_flags(output.intervene_flags)
+        if env.transition.planner_flags is not None:
+            # Regrasp can precede the actor gate; keep those real transitions.
+            planner_rows = env.transition.planner_flags.any(dim=-1, keepdim=True)
+            step.forward_inputs["planner_flags"] = env.transition.planner_flags
+            old = step.forward_inputs.get(
+                "record_transition", torch.zeros_like(planner_rows)
+            )
+            step.forward_inputs["record_transition"] = old.cpu().bool() | planner_rows
         step.set_transition_observations(
             policy,
             env,
@@ -748,7 +772,12 @@ class TrajectoryStep:
         expert_actions = intervene_actions.reshape(batch_size, chunk_count, -1)
         actions = expert_actions * flags + model_actions * (~flags)
         self.actions = actions.reshape(batch_size, -1).cpu().contiguous()
-        self.intervene_flags = flags.expand_as(actions).reshape(batch_size, -1)
+        expanded = flags.expand_as(actions).reshape(batch_size, -1).cpu()
+        self.intervene_flags = (
+            expanded
+            if self.intervene_flags is None
+            else self.intervene_flags.cpu() | expanded
+        )
         if "action" in self.forward_inputs:
             self.forward_inputs["action"] = self.actions
         self.forward_inputs.pop("model_action", None)
@@ -786,10 +815,15 @@ class TrajectoryStep:
             if env.next_rlt_obs is None:
                 raise ValueError("RLT transitions require next-state features.")
             current_obs = extract_rlt_obs_from_forward_inputs(self.forward_inputs)
+            intervention_flags = env.transition.intervene_flags
+            if env.transition.planner_flags is not None:
+                current_obs["planner_flags"] = env.transition.planner_flags
+                # A future correction must not become the pre-action reference input.
+                intervention_flags = intervention_flags & ~env.transition.planner_flags
             apply_rlt_interventions(
                 current_obs,
                 env.transition.intervene_actions,
-                env.transition.intervene_flags,
+                intervention_flags,
             )
             next_obs = env.next_rlt_obs
         elif collect_transitions:

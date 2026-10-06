@@ -16,6 +16,8 @@ resume a stopped run.
      - Convert checkpoints between formats.
    * - :doc:`Resume Training <../resume>`
      - Checkpoint cadence and resuming a run.
+   * - :doc:`Planner-Assisted RLT <../rlt_planner_pilot>`
+     - Verify executed corrections, actor fitting, and autonomous evaluation.
 
 .. toctree::
    :hidden:
@@ -23,3 +25,4 @@ resume a stopped run.
    Data Collection <../data_collection>
    Checkpoint Conversion <../convertor>
    Resume Training <../resume>
+   Planner-Assisted RLT <../rlt_planner_pilot>

@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-06",
+  "branch": "research/rlt-planner-assisted",
+  "base_commit": "29f078c8",
+  "task": "PegInsertionSideWideClearance-v1",
+  "control_mode": "pd_joint_delta_pos",
+  "control_frequency_hz": 10,
+  "physics_backend": "CPU PhysX",
+  "planner": "ManiSkill PandaArmMotionPlanningSolver / MPLib",
+  "artifact_root": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_validation_20261006",
+  "planner_probes": [
+    {
+      "directory": "reset_v2",
+      "case": "from_reset",
+      "seeds": [2026, 2027, 2028],
+      "successes": 3,
+      "episodes": 3,
+      "executed_steps": [106, 125, 93]
+    },
+    {
+      "directory": "held_at_hole",
+      "case": "held_recovery",
+      "seeds": [2026, 2027, 2028, 2029, 2030, 2031],
+      "successes": 6,
+      "episodes": 6,
+      "executed_steps": [125, 145, 113, 138, 120, 150],
+      "fixture": "Real planner prefix; new planner takes over at insertion boundary"
+    },
+    {
+      "directory": "drop",
+      "case": "dropped_recovery",
+      "seeds": [2026, 2027, 2028, 2029, 2030, 2031],
+      "successes": 6,
+      "episodes": 6,
+      "executed_steps": [191, 212, 175, 205, 181, 215],
+      "fixture": "Real planner prefix; 15 actual open-gripper ticks; new recovery planner"
+    }
+  ],
+  "offline_actor_diagnostic": {
+    "directory": "bc_zero_diagnostic",
+    "reference_mode": "zero-diagnostic",
+    "train_episodes": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "validation_episodes": [9, 10, 11],
+    "updates": 500,
+    "initial_validation_mse": 0.19100108742713928,
+    "best_validation_mse": 0.028591781854629517,
+    "eligible_for_stage2_initialization": false,
+    "closed_loop_success_rate": null
+  },
+  "regression_tests": {
+    "command": "RLT_PLANNER_PHYSICS=1 pytest -q -p no:cacheprovider tests/unit_tests/test_planner_assistance.py tests/unit_tests/test_data.py tests/unit_tests/test_models.py -k 'planner or intervention or transition or rlt'",
+    "passed": 28,
+    "deselected": 157,
+    "environment": "Shared UPT_dev/.venv with CUDA hidden and local Lavapipe ICD",
+    "coverage": [
+      "bounded trigger budgets and joint target conversion",
+      "executed action and planner provenance through transition split/merge",
+      "no corrected action leakage into original reference input",
+      "real single-environment takeover, success and terminal freezing",
+      "evaluation seed sequence produces distinct, repeatable initial states"
+    ]
+  },
+  "not_validated": [
+    "GPU frozen-VLA reference export",
+    "actor acceptance with genuine reference inputs",
+    "distributed Stage 2 planner-off versus planner-on comparison",
+    "GPU-rendered videos",
+    "recovery coverage on actual baseline failures",
+    "autonomous success-rate improvement after removing planner"
+  ],
+  "limits": [
+    "These are small development fixtures, not independent policy evaluation.",
+    "Planner uses simulator geometry, has a bounded recipe, and is not human intervention.",
+    "No arbitrary-contact collision guarantee, no simulator rewind, no relabeling failure as success.",
+    "The original baseline and running baseline/VR processes were not modified or stopped."
+  ]
+}

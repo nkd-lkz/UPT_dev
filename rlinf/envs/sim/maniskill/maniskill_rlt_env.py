@@ -125,11 +125,45 @@ class ManiskillRLTEnv(ManiskillEnv):
 
         self.cfg = cfg
         self._has_seeded_reset = False
+        self._evaluation_seeds = tuple(cfg.get("evaluation_reset_seeds", ()))
+        self._evaluation_reset_index = 0
+        if self._evaluation_seeds and (
+            cfg.get("policy_mode") != "eval"
+            or num_envs != 1
+            or self.auto_reset
+            or len(set(self._evaluation_seeds)) != len(self._evaluation_seeds)
+            or any(type(seed) is not int or seed < 0 for seed in self._evaluation_seeds)
+        ):
+            raise ValueError(
+                "Explicit evaluation seeds require one non-autoreset eval env and distinct nonnegative integers"
+            )
         self.task_id = getattr(cfg.init_params, "id", None)
         self._is_peg_insertion_side = is_peg_insertion_side_env_id(self.task_id)
         self._rlt_switch_cfg = getattr(cfg, "rlt_policy_switch", None)
         self._rlt_switch_state: dict[str, torch.Tensor] | None = None
         self._rlt_hole_radius_values: torch.Tensor | None = None
+        self._planner_assistance = None
+        planner_cfg = cfg.get("planner_assistance", {})
+        if planner_cfg.get("enable", False):
+            if (
+                num_envs != 1
+                or self.auto_reset
+                or self.ignore_terminations
+                or cfg.get("policy_mode") == "eval"
+                or not self._is_peg_insertion_side
+                or not self._rlt_switch_enabled()
+                or cfg.init_params.control_mode != "pd_joint_delta_pos"
+            ):
+                raise ValueError(
+                    "Planner pilot requires one training peg env, current-joint delta control, enabled RLT switching, and real terminations"
+                )
+            if self._rlt_switch_cfg.get("expert_takeover", {}).get("enable", False):
+                raise ValueError("Planner and model expert cannot be enabled together")
+            from rlinf.envs.sim.maniskill.planner_assistance import RecoveryConfig
+
+            self._planner_config = RecoveryConfig(
+                **{key: value for key, value in planner_cfg.items() if key != "enable"}
+            )
 
         with open_dict(cfg):
             cfg.init_params.num_envs = num_envs
@@ -804,6 +838,12 @@ class ManiskillRLTEnv(ManiskillEnv):
         seed: Optional[Union[int, list[int]]] = None,
         options: Optional[dict] = None,
     ):
+        if seed is None and options is None and self._evaluation_seeds:
+            seed = self._evaluation_seeds[
+                self._evaluation_reset_index % len(self._evaluation_seeds)
+            ]
+            self._evaluation_reset_index += 1
+            options = {}
         if options is None:
             options = (
                 {"episode_id": self.reset_state_ids}
@@ -830,6 +870,12 @@ class ManiskillRLTEnv(ManiskillEnv):
             self._reset_metrics()
         self._reset_persistent_done_state(options.get("env_idx"))
         self._reset_rlt_switch(options.get("env_idx"))
+        if hasattr(self, "_planner_config"):
+            from rlinf.envs.sim.maniskill.planner_assistance import PlannerAssistance
+
+            if self._planner_assistance is not None:
+                self._planner_assistance.close()
+            self._planner_assistance = PlannerAssistance(self.env, self._planner_config)
         self._show_goal_site_visual()
         extracted_obs = self._wrap_obs(raw_obs, infos=infos)
         return extracted_obs, infos
@@ -1074,9 +1120,24 @@ class ManiskillRLTEnv(ManiskillEnv):
                 infos["episode"][key] = (
                     infos[key].reshape(self.num_envs, -1)[:, -1].clone()
                 )
+        episode = infos["episode"]
+        if "entered_actor_phase_once" in episode and "success_once" in episode:
+            entered = episode["entered_actor_phase_once"].bool()
+            success = episode["success_once"].bool()
+            episode["success_with_actor_phase"] = success & entered
+            episode["success_before_actor_phase"] = success & ~entered
+            episode["failure_before_actor_phase"] = ~success & ~entered
+            episode["failure_after_actor_phase"] = ~success & entered
 
     def chunk_step(self, chunk_actions):
         self._validate_chunk_actions(chunk_actions)
+        planner = getattr(self, "_planner_assistance", None)
+        planner_actions = []
+        planner_flags = []
+        if planner is not None and not self._persistent_done_mask.all():
+            planner.begin_chunk(
+                critical_phase=bool(self._rlt_switch_state["rlt_switch_flags"][0])
+            )
         chunk_size = chunk_actions.shape[1]
         obs_list = []
         infos_list = []
@@ -1103,6 +1164,15 @@ class ManiskillRLTEnv(ManiskillEnv):
         )
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
+            used_planner = False
+            if planner is not None and not frozen_dones.all():
+                action, used_planner = planner.action(actions[0].detach().cpu().numpy())
+                actions = torch.as_tensor(
+                    action, device=actions.device, dtype=actions.dtype
+                )[None]
+            if planner is not None:
+                planner_actions.append(actions.detach().clone())
+                planner_flags.append(used_planner)
             if (
                 frozen_dones.all()
                 and last_extracted_obs is not None
@@ -1173,6 +1243,23 @@ class ManiskillRLTEnv(ManiskillEnv):
         )
         self._sync_rlt_switch_episode_info(infos_list[-1])
         self._stack_chunk_rlt_flags(infos_list)
+        if planner is not None:
+            # These describe actions just executed, not requests for the next chunk.
+            last = infos_list[-1]
+            flags = torch.tensor([planner_flags], device=self.device, dtype=torch.bool)
+            last["intervene_action"] = torch.stack(planner_actions, dim=1).flatten(1)
+            last["intervene_flag"] = flags
+            last["planner_flags"] = flags
+            if "episode" in last:
+                last["episode"]["planner_steps"] = torch.tensor(
+                    [planner.executed_ticks], device=self.device
+                )
+                last["episode"]["planner_attempts"] = torch.tensor(
+                    [planner.trigger.attempts], device=self.device
+                )
+                last["episode"]["planner_failed"] = torch.tensor(
+                    [planner.failure != "none"], device=self.device
+                )
 
         if past_dones.any() and self.auto_reset:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(

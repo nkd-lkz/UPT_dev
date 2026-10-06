@@ -15,6 +15,8 @@
      - 在不同格式之间转换 checkpoint。
    * - :doc:`恢复训练 <../resume>`
      - Checkpoint 频率与断点续训。
+   * - :doc:`规划器辅助的 RLT <../rlt_planner_pilot>`
+     - 验证实际纠正动作、actor 拟合和无辅助评估。
 
 .. toctree::
    :hidden:
@@ -22,3 +24,4 @@
    数据采集 <../data_collection>
    Checkpoint 转换 <../convertor>
    恢复训练 <../resume>
+   规划器辅助的 RLT <../rlt_planner_pilot>

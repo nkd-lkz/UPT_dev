@@ -476,6 +476,7 @@ class EnvWorker(Worker):
                 truncations=chunk_truncations,
                 intervene_actions=intervene_actions,
                 intervene_flags=intervene_flags,
+                planner_flags=infos.get("planner_flags"),
                 rlt_switch_flags=rlt_switch_flags,
             ),
         )
