@@ -18,6 +18,25 @@ from rlinf.envs.sim.maniskill.planner_assistance import (
 )
 
 
+def test_report_counts_executed_work_not_just_outer_steps():
+    from toolkits.rlt.planner_report import summarize_budget
+
+    history = {
+        "env/num_trajectories": {0: 1, 1: 1},
+        "env/episode_len": {0: 137, 1: 500},
+        "env/success_once": {0: 1, 1: 0},
+        "env/planner_steps": {0: 60, 1: 100},
+        "train/rlt/critic_updates_run": {0: 128, 1: 20},
+    }
+    result = summarize_budget(history)
+    assert result["training_episodes"] == 2
+    assert result["training_control_ticks"] == 637
+    assert result["planner_ticks"] == 160
+    assert result["critic_updates"] == 148
+    with pytest.raises(ValueError, match="Incomplete"):
+        summarize_budget({**history, "env/episode_len": {0: 137}})
+
+
 def evidence(**kwargs):
     return replace(PegEvidence(0, False, False, -0.2, 0.08, True), **kwargs)
 
@@ -86,6 +105,55 @@ def test_delta_converter_is_current_state_based_and_bounded():
         joint_target_to_delta(np.full(7, np.nan), q)
 
 
+def test_pilot_arms_differ_only_in_assistance_and_use_distinct_eval_seeds():
+    from toolkits.rlt.planner_experiment import experiment_overrides
+
+    plain = experiment_overrides("none", 20, 20)
+    assisted = experiment_overrides("planner", 20, 20)
+    assert [(a, b) for a, b in zip(plain, assisted) if a != b] == [
+        (
+            "env.train.planner_assistance.enable=False",
+            "env.train.planner_assistance.enable=True",
+        )
+    ]
+    import ast
+
+    seeds = ast.literal_eval(plain[-1].split("=", 1)[1])
+    assert len(set(seeds)) == 20 and min(seeds) >= 12026
+    for component in ("actor", "rollout", "env"):
+        assert f"cluster.component_placement.{component}=2-2" in plain
+    with pytest.raises(ValueError):
+        experiment_overrides("none", 0, 20)
+    with pytest.raises(ValueError):
+        experiment_overrides("planner", 20, 21)
+
+
+def test_pilot_storage_refuses_output_overwrite(tmp_path):
+    from toolkits.rlt.planner_experiment import validate_storage
+
+    with pytest.raises(ValueError, match="Output must be new"):
+        validate_storage(tmp_path, Path("/dev/shm"))
+
+
+def test_pilot_report_does_not_call_reference_only_rollout_actor_success():
+    from copy import deepcopy
+
+    from toolkits.rlt.planner_report import compare
+
+    plain = {
+        "launch": {"arm": "none", "eval_seeds": [12026]},
+        "config": {"budget": 20},
+        "scalars": {"train/rlt/ready_for_online": 0, "eval/success_once": 0.4},
+    }
+    assisted = deepcopy(plain)
+    assisted["launch"]["arm"] = "planner"
+    assisted["scalars"]["train/rlt/ready_for_online"] = 1
+    assert not compare(plain, assisted)["both_learners_finished_warmup"]
+    assisted["config"]["budget"] = 30
+    with pytest.raises(ValueError, match="configurations differ"):
+        compare(plain, assisted)
+
+
 def test_planner_replay_keeps_executed_action_source_and_original_reference():
     from rlinf.data.schema.embodied_types import (
         EnvPart,
@@ -131,8 +199,24 @@ def test_planner_replay_keeps_executed_action_source_and_original_reference():
     assert torch.equal(step.actions, torch.tensor([[0.0, 0.0, 0.3, 0.4]]))
     assert step.intervene_flags.tolist() == [[False, False, True, True]]
     assert torch.equal(step.curr_obs["ref_chunk"], obs["ref_chunk"])
-    assert step.curr_obs["planner_flags"].tolist() == [[False, True]]
+    assert step.forward_inputs["planner_flags"].tolist() == [[False, True]]
+    assert set(step.curr_obs) == set(step.next_obs) == set(obs)
     assert step.forward_inputs["record_transition"].item()
+
+    # Terminal replay substitutes current features for next features. Inserting
+    # both types must preserve a stable schema while retaining provenance.
+    from rlinf.data.storage.replay.buffer import TrajectoryCache
+
+    cache = TrajectoryCache(max_size=2)
+    for row, next_obs in enumerate((step.next_obs, step.curr_obs)):
+        cache.put(
+            row,
+            {
+                "curr_obs": step.curr_obs,
+                "next_obs": next_obs,
+                "forward_inputs": step.forward_inputs,
+            },
+        )
 
 
 def test_planner_provenance_rejects_unexecuted_or_unmarked_actions():
@@ -186,11 +270,86 @@ def test_bc_rejects_missing_reference_in_normal_mode(tmp_path):
     assert episodes[0]["target"].shape == (3, 10, 8)
 
 
+def test_bc_distillation_uses_reference_not_demonstration(tmp_path):
+    import hashlib
+
+    from toolkits.rlt.actor_bc import fit
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    records = []
+    for episode in range(4):
+        path = cache / f"episode_{episode}.pt"
+        torch.save(
+            {
+                "z_rl": torch.zeros(12, 2048),
+                "proprio": torch.zeros(12, 9),
+                "actions": torch.full((12, 8), -0.25),
+                "ref_chunk": torch.full((12, 10, 8), 0.25),
+                "frame_index": torch.arange(12),
+            },
+            path,
+        )
+        records.append(
+            {
+                "id": episode,
+                "file": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    torch.save(
+        {
+            "complete": True,
+            "episodes": records,
+            "feature_contract": {
+                "control_mode": "pd_joint_delta_pos",
+                "control_freq": 10,
+                "action_space": "environment_pd_joint_delta_pos",
+                "reference_source": "frozen_vla_pre_action",
+            },
+        },
+        cache / "manifest.pt",
+    )
+    report = fit(
+        cache,
+        tmp_path / "distill",
+        steps=1,
+        seed=4,
+        reference_mode="cached",
+        target_source="reference",
+    )
+    assert report["reference_validation"]["mse"] == 0
+    assert set(report["train_episodes"]).isdisjoint(report["validation_episodes"])
+    checkpoint = torch.load(tmp_path / "distill/best_actor.pt", weights_only=True)
+    assert checkpoint["target_source"] == "reference"
+    assert not report["eligible_for_stage2_initialization"]
+    assert report["closed_loop_success_rate"] is None
+    demo = fit(
+        cache,
+        tmp_path / "demo",
+        steps=1,
+        seed=4,
+        reference_mode="cached",
+        target_source="demonstration",
+    )
+    assert demo["reference_validation"]["mse"] == 0.25
+    with pytest.raises(ValueError, match="actual cached"):
+        fit(
+            cache,
+            tmp_path / "invalid",
+            steps=1,
+            seed=4,
+            reference_mode="zero-diagnostic",
+            target_source="reference",
+        )
+
+
 @pytest.mark.skipif(
     os.environ.get("RLT_PLANNER_PHYSICS") != "1",
     reason="Opt-in CPU SAPIEN/MPLib physics integration",
 )
-def test_single_env_planner_chunk_execution_and_terminal_freeze():
+@pytest.mark.parametrize("as_numpy", [False, True])
+def test_single_env_planner_chunk_execution_and_terminal_freeze(as_numpy):
     from omegaconf import OmegaConf
 
     from rlinf.envs.sim.maniskill.maniskill_rlt_env import ManiskillRLTEnv
@@ -219,7 +378,9 @@ def test_single_env_planner_chunk_execution_and_terminal_freeze():
         count = 0
         done = False
         for _ in range(50):
-            _, rewards, terminated, truncated, infos = env.chunk_step(proposed)
+            _, rewards, terminated, truncated, infos = env.chunk_step(
+                proposed.numpy() if as_numpy else proposed
+            )
             last = infos[-1]
             mask = last["planner_flags"]
             actual = last["intervene_action"].reshape(1, 10, 8)

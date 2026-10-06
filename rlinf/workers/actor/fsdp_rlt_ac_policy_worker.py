@@ -368,7 +368,7 @@ class RLTACLossMixin:
             actions=batch["actions"],
             ref_chunk=ref_chunk,
             intervene_flags=batch.get("intervene_flags", None),
-            planner_flags=curr_obs.get("planner_flags"),
+            planner_flags=batch.get("forward_inputs", {}).get("planner_flags"),
         )
         metrics.update(rlt_metrics)
 

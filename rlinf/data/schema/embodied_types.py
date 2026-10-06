@@ -817,7 +817,8 @@ class TrajectoryStep:
             current_obs = extract_rlt_obs_from_forward_inputs(self.forward_inputs)
             intervention_flags = env.transition.intervene_flags
             if env.transition.planner_flags is not None:
-                current_obs["planner_flags"] = env.transition.planner_flags
+                # Provenance belongs to transition metadata, not policy observations.
+                # Terminal replay uses current_obs as a next-state placeholder.
                 # A future correction must not become the pre-action reference input.
                 intervention_flags = intervention_flags & ~env.transition.planner_flags
             apply_rlt_interventions(

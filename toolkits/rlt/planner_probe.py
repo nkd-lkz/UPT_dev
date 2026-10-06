@@ -21,16 +21,24 @@ from rlinf.utils.logging import get_logger
 logger = get_logger()
 
 
-def run(output: Path, seeds: list[int], case: str, video: bool) -> dict:
+def run(
+    output: Path,
+    seeds: list[int],
+    case: str,
+    video: bool,
+    render_backend: str = "cuda:0",
+) -> dict:
     """Record every real action and endpoint; never reset within recovery."""
     import gymnasium as gym
 
     from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
         register_rlinf_peg_insertion_side_variants,
     )
+    from rlinf.envs.sim.maniskill.utils import allow_pci_render_backend
 
     output.mkdir(parents=True, exist_ok=False)
     register_rlinf_peg_insertion_side_variants()
+    allow_pci_render_backend()
     results = []
     for seed in seeds:
         env = gym.make(
@@ -38,7 +46,7 @@ def run(output: Path, seeds: list[int], case: str, video: bool) -> dict:
             num_envs=1,
             obs_mode="state",
             sim_backend="cpu",
-            render_backend="cuda:0" if video else "none",
+            render_backend=render_backend if video else "none",
             control_mode="pd_joint_delta_pos",
             max_episode_steps=500,
             sim_config={"sim_freq": 100, "control_freq": 10},
@@ -183,6 +191,7 @@ def main() -> None:
     )
     parser.add_argument("--gpu", type=int, default=2, help="Used only for --video")
     args = parser.parse_args()
+    render_backend = "none"
     if args.video:
         used = int(
             subprocess.check_output(
@@ -200,7 +209,23 @@ def main() -> None:
             parser.error(f"Video GPU {args.gpu} is busy ({used} MiB)")
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    run(args.output, args.seeds, args.case, args.video)
+        bus = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "-i",
+                    str(args.gpu),
+                    "--query-gpu=pci.bus_id",
+                    "--format=csv,noheader",
+                ],
+                text=True,
+            )
+            .strip()
+            .lower()
+        )
+        domain, bus_id, slot = bus.split(":")
+        render_backend = f"pci:{int(domain, 16):04x}:{bus_id}:{slot}"
+    run(args.output, args.seeds, args.case, args.video, render_backend)
 
 
 if __name__ == "__main__":

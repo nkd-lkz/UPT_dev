@@ -34,6 +34,16 @@
       "episodes": 6,
       "executed_steps": [191, 212, 175, 205, 181, 215],
       "fixture": "Real planner prefix; 15 actual open-gripper ticks; new recovery planner"
+    },
+    {
+      "directory": "gpu_video_held_v2",
+      "case": "held_recovery",
+      "seeds": [2032, 2033, 2034],
+      "successes": 3,
+      "episodes": 3,
+      "executed_steps": [128, 123, 129],
+      "video": true,
+      "render_backend": "pci:0000:e1:00.0"
     }
   ],
   "offline_actor_diagnostic": {
@@ -49,7 +59,7 @@
   },
   "regression_tests": {
     "command": "RLT_PLANNER_PHYSICS=1 pytest -q -p no:cacheprovider tests/unit_tests/test_planner_assistance.py tests/unit_tests/test_data.py tests/unit_tests/test_models.py -k 'planner or intervention or transition or rlt'",
-    "passed": 28,
+    "passed": 34,
     "deselected": 157,
     "environment": "Shared UPT_dev/.venv with CUDA hidden and local Lavapipe ICD",
     "coverage": [
@@ -60,11 +70,81 @@
       "evaluation seed sequence produces distinct, repeatable initial states"
     ]
   },
+  "genuine_reference_bc": {
+    "cache": "reference_cache_v1",
+    "stage1_step": 2000,
+    "train_episodes": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "validation_episodes": [9, 10, 11],
+    "initial_validation_mse": 0.1910560578107834,
+    "reference_validation_mse": 0.01586296036839485,
+    "best_actor_validation_mse_500": 0.02544419839978218,
+    "best_actor_validation_mse_3000": 0.02500041201710701,
+    "actor_outperforms_reference": false,
+    "eligible_for_stage2_initialization": false
+  },
+  "reference_distillation": {
+    "directory": "bc_reference_distill_3000",
+    "target_source": "reference",
+    "reference_mode": "cached",
+    "steps": 3000,
+    "best_validation_mse": 0.010878103785216808,
+    "target_differs_from_demonstration_bc": true,
+    "closed_loop_success_rate": null,
+    "eligible_for_stage2_initialization": false
+  },
+  "distributed_integration": {
+    "directory": "distributed_smoke_v3",
+    "outer_steps": 2,
+    "exit_code": 0,
+    "learner_updates": 0,
+    "replay_samples": 20,
+    "evaluation_seeds": [12026, 12027],
+    "autonomous_evaluation_success": 0.5,
+    "interpretation": "Warmup remained gated; this score is not trained-actor improvement.",
+    "fixed_failures": ["NumPy action input", "planner metadata in terminal next_obs schema", "physical GPU placement"]
+  },
+  "planner_online_pilot": {
+    "directory": "planner20_v1",
+    "outer_steps": 20,
+    "exit_code": 0,
+    "critic_updates": 647,
+    "actor_updates": 162,
+    "replay_samples": 268,
+    "warmup_complete": true,
+    "assisted_training_successes": 18,
+    "training_episodes": 20,
+    "planner_attempts": 18,
+    "planner_failures": 3,
+    "failure_reasons": ["insertion_not_successful", "planning_failed:preinsert", "planning_failed:insert"],
+    "human_mask_ratio": 0.0,
+    "autonomous_evaluation_successes": 3,
+    "evaluation_episodes": 20,
+    "evaluation_seed_first": 12026,
+    "evaluation_seed_last": 12045,
+    "evaluation_failures_before_phase_gate": 11,
+    "evaluation_failures_after_phase_gate": 6,
+    "interpretation": "Training integration passed; assisted collection success is not learner competence. See completed matched pilot below."
+  },
+  "matched_20_step_pilot": {
+    "report": "comparison_v1.json",
+    "none_directory": "none20_v1",
+    "planner_directory": "planner20_v1",
+    "none_successes": 5,
+    "planner_successes": 3,
+    "evaluation_episodes_per_arm": 20,
+    "none_actor_updates": 128,
+    "planner_actor_updates": 162,
+    "none_critic_updates": 512,
+    "planner_critic_updates": 647,
+    "none_control_ticks": 8306,
+    "planner_control_ticks": 5085,
+    "planner_ticks": 1943,
+    "both_warmups_complete": true,
+    "interpretation": "No observed autonomous gain. Same outer budget, but unequal transition, actor-update and expert-data budgets."
+  },
   "not_validated": [
-    "GPU frozen-VLA reference export",
-    "actor acceptance with genuine reference inputs",
-    "distributed Stage 2 planner-off versus planner-on comparison",
-    "GPU-rendered videos",
+    "actor closed-loop acceptance with genuine reference inputs",
+    "matched actual-update-budget and multi-training-seed comparison",
     "recovery coverage on actual baseline failures",
     "autonomous success-rate improvement after removing planner"
   ],

@@ -42,7 +42,7 @@
      --output /path/to/new/planner-drop --case dropped_recovery \
      --seeds 2026 2027 2028 2029 2030 2031
 
-后两组先真实执行一段规划器前缀。held 在即将插入时换成从当前状态新建的规划器；drop 先真实张开夹爪 15 tick，再重新规划。这些是受控恢复案例，不是从 baseline 失败分布抽取的测试。NPZ 保存实际命令、关节前后状态、奖励、终止标志和动作来源；扰动动作不作为 expert 标签。``--video --gpu 2`` 需要空闲的渲染 GPU。本机 SAPIEN 不支持本次尝试的 CPU 视频渲染，录像验收尚未完成。
+后两组先真实执行一段规划器前缀。held 在即将插入时换成从当前状态新建的规划器；drop 先真实张开夹爪 15 tick，再重新规划。这些是受控恢复案例，不是从 baseline 失败分布抽取的测试。NPZ 保存实际命令、关节前后状态、奖励、终止标志和动作来源；扰动动作不作为 expert 标签。``--video --gpu 2`` 需要空闲的渲染 GPU，入口自动选择该卡的 PCI 地址。GPU 录像测试在额外训练侧 seed 2032、2033、2034 上完成 3/3 已抓取接手，分别执行 128、123、129 tick，并保存了包含真实前缀的 MP4。
 
 再用已有演示检查 actor
 ----------------------
@@ -60,7 +60,18 @@ actor 的输入除了 RL token 和本体状态，还包括独立预测的 VLA re
 
 拟合程序按完整 episode 做 3:1 划分，使用 actor 有界的确定性输出，不跨回合拼接动作 chunk，同时报告总体、手臂和夹爪误差。``best_actor.pt`` 只保存 actor 参数，不是可直接恢复的 Stage 2 checkpoint。离线误差不能认证闭环能力，也不会自动初始化在线 pilot。
 
-旧 FLARE 缓存没有 reference 预测。显式设置 ``--reference-mode zero-diagnostic`` 只能做零 reference 消融，不能替代正常 actor 验收。本次开发缓存用 9 个训练 episode、3 个验证 episode，500 次更新将验证 MSE 从初始化的 0.191001 降至最佳 0.028592。这说明诊断映射可学习，不代表自主操作成功率提高。
+旧 FLARE 缓存没有 reference 预测。显式设置 ``--reference-mode zero-diagnostic`` 只能做零 reference 消融，不能替代正常 actor 验收。新的 ``reference_cache_v1`` 已用 Stage 1 step 2000 导出真实动作前预测：9 个训练 episode、3 个验证 episode，500 次更新将验证 MSE 从 0.191056 降至最佳 0.025444。不过，同一验证集上直接执行 reference 的动作误差为 0.015863，仍优于小 actor。延长到 3,000 次更新仅将最佳值改善到 0.025000，最后一次验证误差反而回升至 0.029288。当前不能把离线拟合成功当作通过 actor 能力验收，更不能据此直接放大训练。
+
+单独检查 reference 蒸馏
+-----------------------
+
+要区分“模仿演示”和“模仿 reference”，可在同一缓存上设置 ``--target-source reference``，仅替换监督目标，不改变输入来源。同样的 episode 划分下，3,000 次 CPU 蒸馏更新得到针对 reference 的最佳验证 MSE 0.010878。这里的目标与上面的演示 MSE 不同，不能直接比较两个数字，也不能据此将 actor 用作 Stage 2 初始化或声称自主成功率提高。
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.actor_bc \
+     --cache /path/to/new/actor-cache --output /path/to/new/reference-distill \
+     --steps 3000 --target-source reference
 
 最后开展匹配的在线小实验
 ------------------------
@@ -73,13 +84,24 @@ actor 的输入除了 RL token 和本体状态，还包括独立预测的 VLA re
      --stage1 "$RLT_STAGE1_ACTOR" --dataset "$RLT_DATASET_DIR" \
      --output /path/to/new/stage2-planner
 
-GPU 和存储条件满足后，去掉 ``--check`` 才会启动。无辅助对照使用 ``--arm none`` 和另一个新输出目录。入口会拒绝繁忙 GPU，检查磁盘剩余空间，并创建独立 Ray head；退出只清理自己启动的子进程，不停止别人的 Ray 集群。评估同时关闭 planner 和可选模型 expert。
+GPU 和存储条件满足后，去掉 ``--check`` 才会启动。无辅助对照使用 ``--arm none`` 和另一个新输出目录。``--steps`` 默认 20，``--eval-episodes`` 默认 20；两组必须使用相同参数。入口不仅设置 CUDA mask，还显式设置 RLinf 的物理硬件 placement，拒绝繁忙 GPU，并创建独立 Ray head。临时文件默认放在 ``--scratch-root /dev/shm``，至少需要 4 GiB；结果盘至少需要 5 GiB。退出只清理自己启动的进程，不停止别人的 Ray 集群。评估同时关闭 planner 和可选模型 expert。
+
+两组完成后用报告入口核对实际配置、独立 seed 数和热身状态。尚未完成热身的 reference 主导运行不会被报告为两种已训练 actor 的对照。
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.planner_report \
+     --none /path/to/completed/stage2-none \
+     --planner /path/to/completed/stage2-planner \
+     --output /path/to/new/comparison.json
 
 planner 的实际动作与来源标签会经过 transition 传输进入 replay，作为 BC 监督和 critic 的实际动作；原先的动作前 reference 保持不变。``planner_mask_ratio`` 与 ``bc_planner_loss`` 单独统计，不计入真人指标。恢复失败的真实 transition 仍保留，不改写成成功。
 
 如何解读结果与限制
 ------------------
 
-2026-10-06 的 CPU PhysX/MPLib 开发测试完成了 3/3 初态求解、6/6 已抓取接手、6/6 受控掉落恢复。组件与真实单环境测试覆盖触发条件、实际动作 replay、来源标签、reference 泄漏、终止冻结和 reset。这些少量开发样本不能证明任意状态恢复能力或 learner 提升。GPU reference 导出、分布式在线训练，以及撤掉 expert 后的成功率提升仍未验收。
+第一轮 20 步分布式对照已完成：相同的 20 个评估初态上，无辅助为 5/20，planner 辅助训练后为 3/20。辅助训练期间完成任务 18/20，但没有转化为观测到的自主收益。外层 step 数一致，不代表 transition 数和 actor 更新数一致。接下来的 60 步对照保持相同配置，分别报告真实控制 tick、expert 动作和 learner 更新预算，不将训练时的成功当作学到的成功。
+
+2026-10-06 的 CPU PhysX/MPLib 开发测试完成了 3/3 初态求解、6/6 已抓取接手、6/6 受控掉落恢复；上述 GPU reference 导出和额外 3 段录像也已完成。测试覆盖 Torch/NumPy 动作、实际动作 replay、来源标签、reference 泄漏、终止冻结和 reset。分布式测试发现并修正了 NumPy 动作兼容及终止 transition 的 replay 字段不一致问题：planner 来源现在只保留在元数据，不进入 policy 观测。这些少量开发样本不能证明任意状态恢复能力或 learner 提升。分布式对照结果与撤掉 expert 后的自主收益仍须分别验收。
 
 用 ``failure_before_actor_phase``、``failure_after_actor_phase``、``success_before_actor_phase`` 和 ``success_with_actor_phase`` 定位 baseline 的瓶颈。planner 辅助的接近阶段数据可以增加训练状态覆盖，但不会改变评估门控；从未负责接近阶段的 actor，不能直接纠正冻结 reference 在该阶段的失败。自主成功率、planner 步数与尝试次数、失败类别和额外 expert 数据预算需要分别报告。不要用正式评估失败继续训练后，再把同一批初态当作未见测试。

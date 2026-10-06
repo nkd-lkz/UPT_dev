@@ -31,6 +31,9 @@ def load_episodes(
     ):
         raise ValueError("Incomplete cache or incompatible action contract")
     episodes = []
+    ids = [row["id"] for row in manifest["episodes"]]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Duplicate episode IDs would contaminate the validation split")
     for row in manifest["episodes"]:
         path = cache / row["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
@@ -50,6 +53,10 @@ def load_episodes(
             if "ref_chunk" not in data:
                 raise ValueError(
                     "Cache lacks VLA ref_chunk; export real references first. Do not substitute target actions."
+                )
+            if contract.get("reference_source") != "frozen_vla_pre_action":
+                raise ValueError(
+                    "Cached reference provenance must be frozen_vla_pre_action"
                 )
             reference = data["ref_chunk"][:n, :horizon]
         else:
@@ -75,12 +82,27 @@ def load_episodes(
 
 
 def fit(
-    cache: Path, output: Path, *, steps: int, seed: int, reference_mode: str
+    cache: Path,
+    output: Path,
+    *,
+    steps: int,
+    seed: int,
+    reference_mode: str,
+    target_source: str = "demonstration",
 ) -> dict:
     """Fit only actor parameters; this is an offline diagnostic, not an RL run."""
     if steps < 1:
         raise ValueError("steps must be positive")
+    if target_source not in {"reference", "demonstration"}:
+        raise ValueError("Unknown BC target source")
+    if target_source == "reference" and reference_mode != "cached":
+        raise ValueError(
+            "Reference distillation requires actual cached VLA predictions"
+        )
     episodes, contract = load_episodes(cache, horizon=10, reference_mode=reference_mode)
+    if target_source == "reference":
+        for episode in episodes:
+            episode["target"] = episode["ref_chunk"].clone()
     if len(episodes) < 4:
         raise ValueError("Need at least four complete episodes for a disjoint split")
     torch.manual_seed(seed)
@@ -106,9 +128,14 @@ def fit(
                 "mse": error.mean().item(),
                 "arm_mse": error[..., :7].mean().item(),
                 "gripper_mse": error[..., 7].mean().item(),
+                "actor_reference_mse": (pred - data["ref_chunk"])
+                .square()
+                .mean()
+                .item(),
             }
 
     initial = evaluate(val)
+    reference_error = (val["ref_chunk"] - val["target"]).square()
     history = []
     best = float("inf")
     for step in range(1, steps + 1):
@@ -136,6 +163,7 @@ def fit(
                             if k.startswith(("backbone.", "actor_mean."))
                         },
                         "reference_mode": reference_mode,
+                        "target_source": target_source,
                         "feature_contract": contract,
                         "step": step,
                     },
@@ -143,11 +171,17 @@ def fit(
                 )
     report = {
         "reference_mode": reference_mode,
+        "target_source": target_source,
         "seed": seed,
         "steps": steps,
         "train_episodes": [r["id"] for r in episodes[:split]],
         "validation_episodes": [r["id"] for r in episodes[split:]],
         "initial_validation": initial,
+        "reference_validation": {
+            "mse": reference_error.mean().item(),
+            "arm_mse": reference_error[..., :7].mean().item(),
+            "gripper_mse": reference_error[..., 7].mean().item(),
+        },
         "best_validation_mse": best,
         "history": history,
         "feature_contract": contract,
@@ -169,6 +203,12 @@ def main() -> None:
     parser.add_argument(
         "--reference-mode", choices=["cached", "zero-diagnostic"], default="cached"
     )
+    parser.add_argument(
+        "--target-source",
+        choices=["demonstration", "reference"],
+        default="demonstration",
+        help="Fit demonstrations, or distill the frozen VLA proposal directly.",
+    )
     args = parser.parse_args()
     torch.set_num_threads(2)
     result = fit(
@@ -177,6 +217,7 @@ def main() -> None:
         steps=args.steps,
         seed=args.seed,
         reference_mode=args.reference_mode,
+        target_source=args.target_source,
     )
     print(
         json.dumps(

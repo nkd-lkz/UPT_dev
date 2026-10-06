@@ -3,6 +3,8 @@
 """Launch an isolated single-GPU planner pilot without touching other jobs."""
 
 import argparse
+import fcntl
+import json
 import os
 import shutil
 import signal
@@ -12,6 +14,71 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+
+def experiment_overrides(
+    arm: str, steps: int, eval_episodes: int, gpu: int = 2
+) -> list[str]:
+    """Keep both arms matched and reserve distinct evaluation initial states."""
+    if arm not in {"none", "planner"} or steps < 1 or not 1 <= eval_episodes <= 20:
+        raise ValueError("Require a known arm, positive steps and 1..20 eval episodes")
+    if gpu < 0:
+        raise ValueError("Require a nonnegative physical GPU index")
+    seeds = list(range(12026, 12026 + eval_episodes))
+    return [
+        "+experiment=rlt_planner_pilot",
+        f"env.train.planner_assistance.enable={arm == 'planner'}",
+        f"runner.max_epochs={steps}",
+        f"runner.max_steps={steps}",
+        f"runner.val_check_interval={steps}",
+        f"runner.save_interval={steps}",
+        # RLinf enumerates physical devices independently of the CUDA mask.
+        f"cluster.component_placement.actor={gpu}-{gpu}",
+        f"cluster.component_placement.rollout={gpu}-{gpu}",
+        f"cluster.component_placement.env={gpu}-{gpu}",
+        f"env.eval.rollout_epoch={eval_episodes}",
+        f"env.eval.evaluation_reset_seeds={seeds}",
+    ]
+
+
+def validate_storage(output: Path, scratch: Path) -> None:
+    """Check the filesystems that actually receive outputs, not the code mount."""
+    if output.exists():
+        raise ValueError(f"Output must be new: {output}")
+    parent = output.parent
+    while not parent.exists():
+        parent = parent.parent
+    if not scratch.is_dir() or shutil.disk_usage(scratch).free < 4 * 1024**3:
+        raise ValueError(
+            "Scratch directory needs 4 GiB free for private Ray/temp files"
+        )
+    if shutil.disk_usage(parent).free < 5 * 1024**3:
+        raise ValueError("Output filesystem needs 5 GiB free for checkpoint and logs")
+
+
+def stop_owned_process(process: subprocess.Popen | None) -> None:
+    """Stop only this launcher's process tree, including private Ray workers."""
+    import psutil
+
+    if process is None or process.poll() is not None:
+        return
+    try:
+        parent = psutil.Process(process.pid)
+        owned = parent.children(recursive=True) + [parent]
+        for child in owned:
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(owned, timeout=10)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        process.wait(timeout=10)
+    except (psutil.NoSuchProcess, subprocess.TimeoutExpired):
+        pass
 
 
 def main() -> None:
@@ -24,6 +91,9 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=6535)
+    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--scratch-root", type=Path, default=Path("/dev/shm"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     for path in [
@@ -42,13 +112,13 @@ def main() -> None:
     os.environ.setdefault("RLT_PLANNER_RENDER_DEVICE", "cuda:0")
     from hydra import compose, initialize_config_dir
 
-    override = f"env.train.planner_assistance.enable={args.arm == 'planner'}"
+    overrides = experiment_overrides(args.arm, args.steps, args.eval_episodes, args.gpu)
     with initialize_config_dir(
         config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
     ):
         cfg = compose(
             config_name="maniskill_rlt_stage2_ac_mlp",
-            overrides=["+experiment=rlt_planner_pilot", override],
+            overrides=overrides,
         )
     from omegaconf import OmegaConf
 
@@ -66,6 +136,13 @@ def main() -> None:
     )
     if args.check:
         return
+    validate_storage(args.output, args.scratch_root)
+    # Hold a cooperative per-GPU lease until our private workers exit.
+    lease = (args.scratch_root / f"rlt-planner-gpu{args.gpu}.lock").open("a")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        parser.error(f"GPU {args.gpu} already has a planner launch")
     used = int(
         subprocess.check_output(
             [
@@ -80,13 +157,6 @@ def main() -> None:
     )
     if used > 512:
         parser.error(f"GPU {args.gpu} is busy ({used} MiB); refusing to start")
-    if (
-        shutil.disk_usage(root).free < 1024**3
-        or shutil.disk_usage("/tmp").free < 1024**3
-    ):
-        parser.error(
-            "Need 1 GiB free on code and /tmp filesystems before distributed training"
-        )
     for port in (args.port, args.port + 1, args.port + 2):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", port))
@@ -119,6 +189,7 @@ def main() -> None:
         PYTHONPATH=str(root),
         HYDRA_FULL_ERROR="1",
         TOKENIZERS_PARALLELISM="false",
+        PYTHONDONTWRITEBYTECODE="1",
     )
     for name in ("RAY_ADDRESS", "RLINF_NODE_RANK", "DISPLAY"):
         os.environ.pop(name, None)
@@ -131,10 +202,28 @@ def main() -> None:
         )
         os.environ["VK_ICD_FILENAMES"] = os.environ["VK_DRIVER_FILES"]
     args.output.mkdir(parents=True, exist_ok=False)
-    temp = Path(tempfile.mkdtemp(prefix="rlt-planner.", dir="/dev/shm"))
+    temp = Path(tempfile.mkdtemp(prefix="rlt-planner.", dir=args.scratch_root))
     os.environ["RAY_TMPDIR"] = str(temp)
+    os.environ["TMPDIR"] = str(temp)
+    os.environ["TRITON_CACHE_DIR"] = str(temp / "triton")
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(temp / "inductor")
     ray = str(Path(sys.executable).parent / "ray")
     child = None
+    status = None
+    metadata = {
+        "arm": args.arm,
+        "steps": args.steps,
+        "eval_seeds": list(range(12026, 12026 + args.eval_episodes)),
+        "gpu": args.gpu,
+        "stage1": str(args.stage1.resolve()),
+        "dataset": str(args.dataset.resolve()),
+        "git_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True
+        ).strip(),
+        "git_diff": subprocess.check_output(["git", "diff"], cwd=root, text=True),
+        "complete": False,
+    }
+    (args.output / "launch.json").write_text(json.dumps(metadata, indent=2) + "\n")
     with (
         (args.output / "ray.log").open("w") as ray_log,
         (args.output / "train.log").open("w") as train_log,
@@ -183,17 +272,17 @@ def main() -> None:
                 str(root / "examples/embodiment/train_embodied_agent.py"),
                 "--config-name",
                 "maniskill_rlt_stage2_ac_mlp",
-                "+experiment=rlt_planner_pilot",
-                override,
+                *overrides,
             ]
             with (args.output / "resolved.yaml").open("w") as config_file:
                 subprocess.run(
                     command + ["--cfg", "job", "--resolve"],
                     stdout=config_file,
+                    cwd=temp,
                     check=True,
                 )
             child = subprocess.Popen(
-                command, cwd=root, stdout=train_log, stderr=subprocess.STDOUT
+                command, cwd=temp, stdout=train_log, stderr=subprocess.STDOUT
             )
             print(f"Training log: {args.output / 'train.log'}", flush=True)
             status = child.wait()
@@ -201,12 +290,11 @@ def main() -> None:
                 raise RuntimeError(f"Pilot exited with status {status}")
         finally:
             for process in (child, head):
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                stop_owned_process(process)
+            metadata.update(complete=status == 0, exit_code=status)
+            (args.output / "launch.json").write_text(
+                json.dumps(metadata, indent=2) + "\n"
+            )
             print(f"Retained Ray diagnostics: {temp}", flush=True)
 
 

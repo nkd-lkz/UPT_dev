@@ -1132,6 +1132,9 @@ class ManiskillRLTEnv(ManiskillEnv):
     def chunk_step(self, chunk_actions):
         self._validate_chunk_actions(chunk_actions)
         planner = getattr(self, "_planner_assistance", None)
+        if planner is not None:
+            # Env workers pass NumPy actions; replay provenance uses tensors.
+            chunk_actions = torch.as_tensor(chunk_actions, device=self.device)
         planner_actions = []
         planner_flags = []
         if planner is not None and not self._persistent_done_mask.all():
