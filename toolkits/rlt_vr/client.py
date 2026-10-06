@@ -20,6 +20,9 @@ import argparse
 import json
 import logging
 import os
+import shutil
+import textwrap
+import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -27,7 +30,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .control import MappedTarget, OperatorControl, map_relative_target
+from .async_service import atomic_json
+from .control import MappedTarget, OperatorControl, TargetFilter, map_relative_target
+from .online_service import ONLINE_PROTOCOL
 from .online_transport import TransitionUploader
 from .protocol import CAMERAS, CONTRACT, encode_image, request
 from .simulation import DEFAULT_RENDER_BACKEND, LocalSimulation
@@ -43,12 +48,99 @@ class TransitionRecorder:
     not direct inputs for the baseline chunk-level online replay buffer.
     """
 
-    def __init__(self, directory: Path, metadata: dict) -> None:
+    def __init__(
+        self, directory: Path, metadata: dict, max_bytes: int = 8 * 1024**3
+    ) -> None:
         directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
         self.index = 0
-        with (directory / "metadata.json").open("x", encoding="utf-8") as stream:
-            json.dump({"contract": CONTRACT, **metadata}, stream, indent=2)
+        self.max_bytes, self.bytes_written = max_bytes, 0
+        self._quality: dict[int, str | None] = {}
+        self._lock = threading.Lock()
+        self._reviews = 0
+        atomic_json(directory / "metadata.json", {"contract": CONTRACT, **metadata})
+
+    def event(self, name: str, **fields) -> None:
+        """Append sparse control events separately from executed transitions."""
+        with (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    {"event": name, "time": time.time(), **fields}, allow_nan=False
+                )
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def receipt(self, sequence: int, session: str, response: dict) -> None:
+        """Retain the last durable server acknowledgement, not a training claim."""
+        atomic_json(
+            self.directory / "receipt.json",
+            {
+                "sequence": sequence,
+                "session": session,
+                "receipt_id": response.get("receipt_id"),
+                "receipt_run": response.get("receipt_run"),
+                "processed_sequence": response.get("sequence"),
+            },
+        )
+
+    @property
+    def ready(self) -> bool:
+        """Reserve room for a raw transition before executing its action."""
+        return (
+            self.bytes_written + 2 * 1024**2 <= self.max_bytes
+            and shutil.disk_usage(self.directory).free >= 128 * 1024**2
+        )
+
+    @property
+    def pending_review(self) -> int:
+        with self._lock:
+            return sum(value is None for value in self._quality.values())
+
+    def review_pending(self, approved: bool | None) -> None:
+        """Persist the operator's review before releasing samples to upload.
+
+        None retains an unreviewed fragment for critic learning and analysis;
+        only an explicit True makes executed human actions BC targets.
+        """
+        quality = (
+            "unreviewed" if approved is None else "approved" if approved else "rejected"
+        )
+        with self._lock:
+            indices = [i for i, value in self._quality.items() if value is None]
+            if not indices:
+                return
+            atomic_json(
+                self.directory / f"review_{self._reviews:06d}.json",
+                {"sequences": indices, "quality": quality, "time": time.time()},
+            )
+            self._reviews += 1
+            for index in indices:
+                self._quality[index] = quality
+
+    def upload_item(self, path: Path) -> dict | None:
+        """Read durable pixels after the human fragment has been reviewed."""
+        index = int(path.stem.removeprefix("step_"))
+        with self._lock:
+            quality = self._quality[index]
+        if quality is None:
+            return None
+        with np.load(path, allow_pickle=False) as item:
+            return {
+                "sequence": index,
+                "observation": {k: item[k] for k in ("state", *CAMERAS)},
+                "next_observation": {k: item[f"next_{k}"] for k in ("state", *CAMERAS)},
+                "action": item["action"].tolist(),
+                "reward": float(item["reward"]),
+                "terminated": bool(item["terminated"]),
+                "truncated": bool(item["truncated"]),
+                "human": bool(item["human_intervention"]),
+                "episode": int(item["episode"]),
+                "policy_version": int(item["policy_version"]),
+                "policy_source": str(item["policy_source"]),
+                "quality": quality,
+            }
 
     def append(
         self,
@@ -61,7 +153,11 @@ class TransitionRecorder:
         source: str,
         episode: int,
         model_id: str,
-    ) -> None:
+        *,
+        policy_version: int = -1,
+        policy_source: str = "unknown",
+        diagnostics: dict | None = None,
+    ) -> Path:
         """Persist a transition only after the corresponding env.step succeeds."""
         if source not in {"human", "policy"}:
             raise ValueError("Only executed human or policy actions may be recorded")
@@ -69,7 +165,9 @@ class TransitionRecorder:
             **observation,
             **{f"next_{k}": v for k, v in next_observation.items()},
         }
-        with (self.directory / f"step_{self.index:08d}.npz").open("xb") as stream:
+        path = self.directory / f"step_{self.index:08d}.npz"
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("xb") as stream:
             np.savez(
                 stream,
                 **values,
@@ -81,8 +179,25 @@ class TransitionRecorder:
                 source=source,
                 episode=episode,
                 model_id=model_id,
+                policy_version=policy_version,
+                policy_source="human" if source == "human" else policy_source,
+                quality="unreviewed" if source == "human" else "policy",
+                teleop_json=json.dumps(diagnostics or {}, allow_nan=False),
             )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        self.bytes_written += path.stat().st_size
+        with self._lock:
+            self._quality[self.index] = None if source == "human" else "policy"
         self.index += 1
+        return path
 
 
 def run(args: argparse.Namespace) -> None:
@@ -94,8 +209,9 @@ def run(args: argparse.Namespace) -> None:
     online = getattr(args, "online", False)
     uploader = None
     session = uuid.uuid4().hex
-    sequence = 0
     behavior_version = -1
+    policy_source = "reference"
+    begun = False
     if not args.manual_only:
         health = request(
             "127.0.0.1", args.port, token, {"op": "health", "request_id": 0}, 5
@@ -106,13 +222,8 @@ def run(args: argparse.Namespace) -> None:
         if online:
             if not health.get("online") or health.get("horizon") != 1:
                 raise ValueError("--online requires the single-step online server")
-            request(
-                "127.0.0.1",
-                args.port,
-                token,
-                {"op": "begin", "request_id": 0, "session": session},
-                10,
-            )
+            if health.get("online_protocol") != ONLINE_PROTOCOL:
+                raise ValueError("Update both endpoints: online protocol 2 required")
     recorder = None
     if args.record is not None:
         recorder = TransitionRecorder(
@@ -125,6 +236,7 @@ def run(args: argparse.Namespace) -> None:
                 "online": online,
                 "session": session,
             },
+            max_bytes=int(getattr(args, "record_limit_gib", 8) * 1024**3),
         )
     env = None
     vr = None
@@ -135,18 +247,20 @@ def run(args: argparse.Namespace) -> None:
     generation, submitted = -1, 0.0
     request_id, episode, episode_steps = 0, 0, 0
     anchor_vr = anchor_tcp = None
+    target_filter = None
     gripper_command = 1.0
     trigger_was_down = False
     last_step = last_loop = last_log = time.monotonic()
     last_mapping: MappedTarget | None = None
     last_action: np.ndarray | None = None
     last_step_ms = 0.0
+    last_ik_ms = last_record_ms = 0.0
+    no_progress_ticks = 0
     was_limited = False
     was_valid = True
     status = "PAUSED: P=policy, grip=human, Space=pause, R=reset, Q=quit"
+    last_control_event = None
     try:
-        if online:
-            uploader = TransitionUploader(args.port, token, session)
         env = LocalSimulation(
             args.render_backend,
             args.seed,
@@ -159,6 +273,31 @@ def run(args: argparse.Namespace) -> None:
                 args.trigger_threshold,
             )
         observation = env.observation()
+        if online:
+            response = request(
+                "127.0.0.1",
+                args.port,
+                token,
+                {
+                    "op": "begin",
+                    "request_id": 0,
+                    "session": session,
+                    "online_protocol": ONLINE_PROTOCOL,
+                },
+                10,
+            )
+            if response.get("busy"):
+                raise RuntimeError(
+                    "Server is replaying pending receipts; wait for pending_learning=0 before starting a client"
+                )
+            begun = True
+            uploader = TransitionUploader(
+                args.port,
+                token,
+                session,
+                capacity=getattr(args, "max_pending_uploads", 512),
+                recorder=recorder,
+            )
         # Environment and SteamVR initialization may take seconds on Windows.
         # Start the watchdog only after both are ready, not before construction.
         last_step = last_loop = last_log = time.monotonic()
@@ -181,15 +320,41 @@ def run(args: argparse.Namespace) -> None:
             valid = reading is None or reading.valid
             panel = np.concatenate([observation[k] for k in CAMERAS], axis=1)
             panel = cv2.cvtColor(panel, cv2.COLOR_RGB2BGR)
-            cv2.putText(
-                panel, f"{gate.mode} | {status}", (5, 20), 0, 0.4, (0, 255, 255), 1
+            heading = (
+                operator.instruction
+                if gate.mode == "paused"
+                else f"{gate.mode} | {status}"
             )
+            for line_index, line in enumerate(textwrap.wrap(heading, width=110)):
+                cv2.putText(
+                    panel, line, (5, 20 + 16 * line_index), 0, 0.4, (0, 255, 255), 1
+                )
             if reading is not None:
                 diagnostic = (
                     f"buttons={reading.buttons:#x} grip={int(reading.clutch)} "
                     f"trigger={reading.trigger_value:.2f} step={last_step_ms:.0f}ms"
                 )
-                cv2.putText(panel, diagnostic, (5, 38), 0, 0.4, (0, 255, 255), 1)
+                cv2.putText(panel, diagnostic, (5, 72), 0, 0.4, (0, 255, 255), 1)
+            if recorder is not None:
+                cv2.putText(
+                    panel,
+                    f"Review pending={recorder.pending_review}: release grip, Y=approve BC / N=exclude BC",
+                    (5, 90),
+                    0,
+                    0.4,
+                    (0, 255, 255),
+                    1,
+                )
+            if uploader is not None:
+                cv2.putText(
+                    panel,
+                    f"received={uploader.accepted_sequence} learned={uploader.processed_sequence} outbox={uploader.outstanding} learner_queue={uploader.server_pending} policy={policy_source}",
+                    (5, 108),
+                    0,
+                    0.4,
+                    (0, 255, 255),
+                    1,
+                )
             cv2.imshow("RLT local simulation: main / wrist", panel)
             key = cv2.waitKey(1) & 0xFF
             if (
@@ -201,6 +366,11 @@ def run(args: argparse.Namespace) -> None:
             ):
                 break
             if key == ord("r"):
+                if recorder is not None:
+                    recorder.review_pending(None)
+                    recorder.event(
+                        "reset", episode=episode, episode_steps=episode_steps
+                    )
                 operator.reset()
                 episode += 1
                 episode_steps = 0
@@ -208,6 +378,7 @@ def run(args: argparse.Namespace) -> None:
                 anchor_vr = anchor_tcp = None
                 last_mapping = None
                 last_action = None
+                target_filter = None
                 was_limited = False
                 status = "Reset; paused"
                 last_loop = time.monotonic()
@@ -223,8 +394,42 @@ def run(args: argparse.Namespace) -> None:
                 command=command,
                 stalled=stalled,
             )
+            if (
+                recorder is not None
+                and recorder.pending_review
+                and not bool(reading and reading.clutch)
+            ):
+                if key in (ord("y"), ord("n")):
+                    recorder.review_pending(key == ord("y"))
+                    operator.pause(
+                        "review_complete", "fragment labelled; re-grip or P continues"
+                    )
+                    logger.info(
+                        "Correction review: %s",
+                        "approved" if key == ord("y") else "excluded from BC",
+                    )
+                else:
+                    operator.pause(
+                        "review_required", "Y=approve last human fragment; N=exclude BC"
+                    )
+            if recorder is not None and not recorder.ready:
+                operator.pause(
+                    "local_storage_full",
+                    "record quota/free-space reserve reached; stop and archive recordings",
+                )
             if uploader is not None and not uploader.ready:
-                operator.pause()
+                reason = (
+                    "upload_error"
+                    if uploader.error
+                    else "server_storage_full"
+                    if uploader.storage_full
+                    else "local_outbox_full"
+                )
+                operator.pause(
+                    reason,
+                    uploader.error
+                    or "wait for durable receipts; review human fragment with Y/N",
+                )
                 status = (
                     uploader.error
                     or "Upload queue full; paused until drained; release grip"
@@ -249,6 +454,13 @@ def run(args: argparse.Namespace) -> None:
                 logger.info("Control authority: %s -> %s", previous_mode, gate.mode)
                 if gate.mode == "human":
                     anchor_vr, anchor_tcp = reading.pose.copy(), env.tcp_matrix()
+                    target_filter = TargetFilter(
+                        anchor_tcp,
+                        speed=getattr(args, "tcp_speed", 0.12),
+                        angular_speed=getattr(args, "angular_speed", 0.8),
+                    )
+                    env.reset_teleop()
+                    no_progress_ticks = 0
                     # Preserve the grasp on takeover. Each fresh trigger press
                     # toggles the latched target; releasing grip never opens it.
                     finger = float(np.mean(observation["state"][7:9]))
@@ -289,15 +501,20 @@ def run(args: argparse.Namespace) -> None:
                             behavior_version = int(
                                 response.get("metrics", {}).get("policy_version", -1)
                             )
+                            policy_source = response.get("policy_source", "unknown")
                             status = (
                                 f"RPC {(time.monotonic() - submitted) * 1000:.0f} ms"
                             )
                     elif generation == gate.generation:
-                        operator.pause()
+                        operator.pause(
+                            "reply_expired", "P retries from the current observation"
+                        )
                         status = "Reply expired; P retries with a fresh observation"
                 except Exception as error:
                     if generation == gate.generation:
-                        operator.pause()
+                        operator.pause(
+                            "inference_error", "check server/tunnel; P retries"
+                        )
                         status = "Network/inference failure; P retries"
                     logger.warning("Inference failed: %s", type(error).__name__)
                 pending = None
@@ -305,16 +522,14 @@ def run(args: argparse.Namespace) -> None:
             if gate.needs_prediction and pending is None:
                 request_id += 1
                 generation, submitted = gate.generation, time.monotonic()
-                payload = {
-                    "op": "predict",
-                    "request_id": request_id,
-                    "contract": CONTRACT,
-                    **({"session": session} if online else {}),
-                    "state": observation["state"].tolist(),
-                    **{k: encode_image(observation[k]) for k in CAMERAS},
-                }
                 pending = pool.submit(
-                    request, "127.0.0.1", args.port, token, payload, args.reply_ttl
+                    predict_observation,
+                    args.port,
+                    token,
+                    observation,
+                    request_id,
+                    session if online else None,
+                    args.reply_ttl,
                 )
 
             if now - last_step >= 0.1:
@@ -343,21 +558,34 @@ def run(args: argparse.Namespace) -> None:
                     elif was_limited:
                         status = "human: inside configured motion limits"
                     was_limited = last_mapping.limited
-                    action = env.human_action(last_mapping.pose, gripper_command)
+                    ik_started = time.monotonic()
+                    action = env.human_action(
+                        target_filter.update(last_mapping.pose), gripper_command
+                    )
+                    last_ik_ms = (time.monotonic() - ik_started) * 1000
+                    if env.teleop_diagnostics.get("joint_limit"):
+                        status = "Joint limit: outward command clipped; reduce target / re-anchor"
                     if action is None:
-                        operator.pause()
+                        operator.pause(
+                            "ik_failed", "use a smaller target after re-anchoring"
+                        )
                         status = "IK failed; release grip and try a smaller motion"
                         logger.warning("IK failed; motion paused")
                 elif gate.mode == "policy":
                     action = gate.next_action()
                 if action is not None:
+                    execution_source = gate.mode
+                    before_tcp = (
+                        env.tcp_matrix() if execution_source == "human" else None
+                    )
                     step_started = time.monotonic()
                     next_obs, reward, terminated, truncated = env.step(action)
                     episode_steps += 1
                     last_step_ms = (time.monotonic() - step_started) * 1000
                     last_action = action.copy()
                     if recorder is not None:
-                        recorder.append(
+                        record_started = time.monotonic()
+                        path = recorder.append(
                             observation,
                             action,
                             next_obs,
@@ -367,26 +595,39 @@ def run(args: argparse.Namespace) -> None:
                             gate.mode,
                             episode,
                             model_id,
-                        )
-                    if uploader is not None:
-                        uploader.submit(
-                            sequence,
-                            observation,
-                            next_obs,
-                            action=action.tolist(),
-                            reward=reward,
-                            terminated=terminated,
-                            truncated=truncated,
-                            human=gate.mode == "human",
-                            episode=episode,
                             policy_version=-1
                             if gate.mode == "human"
                             else behavior_version,
+                            policy_source="human"
+                            if gate.mode == "human"
+                            else policy_source,
+                            diagnostics=env.teleop_diagnostics
+                            if gate.mode == "human"
+                            else None,
                         )
-                        sequence += 1
+                        last_record_ms = (time.monotonic() - record_started) * 1000
+                    if uploader is not None:
+                        uploader.submit_path(path)
                     observation = next_obs
+                    if before_tcp is not None:
+                        actual_motion = float(
+                            np.linalg.norm(env.tcp_matrix()[:3, 3] - before_tcp[:3, 3])
+                        )
+                        env.teleop_diagnostics["actual_motion_m"] = actual_motion
+                        stalled_motion = (
+                            actual_motion < 0.0002
+                            and env.teleop_diagnostics.get("position_error_m", 0)
+                            > 0.025
+                        )
+                        no_progress_ticks = (
+                            no_progress_ticks + 1 if stalled_motion else 0
+                        )
+                        if no_progress_ticks >= 20:
+                            operator.pause(
+                                "no_progress",
+                                "large target error with little motion; inspect contact/limits, release and re-anchor",
+                            )
                     if terminated or truncated:
-                        operator.finish()
                         reasons = []
                         if terminated:
                             reasons.append("task terminal")
@@ -395,6 +636,7 @@ def run(args: argparse.Namespace) -> None:
                                 f"time limit at {episode_steps}/{args.max_episode_steps}"
                             )
                         reason = " + ".join(reasons)
+                        operator.finish(reason)
                         status = f"Episode ended: {reason}; R resets"
                         logger.info(
                             "Episode %d ended: terminated=%s truncated=%s "
@@ -407,12 +649,32 @@ def run(args: argparse.Namespace) -> None:
                             reward,
                         )
                 last_step = now
+            control_event = (
+                gate.mode,
+                operator.pause_reason,
+                operator.require_release,
+                operator.finished,
+            )
+            if recorder is not None and control_event != last_control_event:
+                recorder.event(
+                    "control",
+                    mode=gate.mode,
+                    reason=operator.pause_reason if gate.mode == "paused" else "",
+                    detail=operator.pause_detail if gate.mode == "paused" else "",
+                    require_release=operator.require_release,
+                    episode=episode,
+                    episode_steps=episode_steps,
+                    next_sequence=recorder.index,
+                )
+                last_control_event = control_event
             if now - last_log >= args.log_interval:
                 if uploader is not None:
                     logger.info(
-                        "Online learner: ack=%d pending=%d metrics=%s",
+                        "Online learner: received=%d local_pending=%d processed=%d server_pending=%d metrics=%s",
                         uploader.accepted_sequence,
-                        uploader.queue.qsize(),
+                        uploader.outstanding,
+                        uploader.processed_sequence,
+                        uploader.server_pending,
                         uploader.metrics,
                     )
                 if reading is not None:
@@ -433,7 +695,7 @@ def run(args: argparse.Namespace) -> None:
                     logger.info(
                         "Telemetry mode=%s valid=%s buttons=%#x grip=%s "
                         "trigger=%s(%.3f) %s arm_max=%.3f gripper=%+.1f "
-                        "step=%.1fms loop=%.1fms",
+                        "step=%.1fms loop=%.1fms ik=%.1fms journal=%.1fms reason=%s require_release=%s diagnostics=%s",
                         gate.mode,
                         valid,
                         reading.buttons,
@@ -445,6 +707,11 @@ def run(args: argparse.Namespace) -> None:
                         gripper_command,
                         last_step_ms,
                         loop_elapsed * 1000,
+                        last_ik_ms,
+                        last_record_ms,
+                        operator.pause_reason,
+                        operator.require_release,
+                        env.teleop_diagnostics,
                     )
                 last_log = now
             time.sleep(0.005)
@@ -456,8 +723,53 @@ def run(args: argparse.Namespace) -> None:
             env.close()
         cv2.destroyAllWindows()
         pool.shutdown(wait=True, cancel_futures=True)
+        if recorder is not None:
+            try:
+                recorder.review_pending(None)
+            except OSError:
+                logger.exception(
+                    "Unable to finalize review; retain raw files as unreviewed"
+                )
         if uploader is not None:
             uploader.close()
+        if (
+            begun
+            and uploader is not None
+            and not uploader.outstanding
+            and not uploader.error
+        ):
+            try:
+                request(
+                    "127.0.0.1",
+                    args.port,
+                    token,
+                    {"op": "end", "request_id": 0, "session": session},
+                    5,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Session end failed (%s); keep local records", type(error).__name__
+                )
+
+
+def predict_observation(
+    port: int,
+    token: str,
+    observation: dict,
+    request_id: int,
+    session: str | None,
+    timeout: float,
+) -> dict:
+    """Encode pixels off the display thread before sending a prediction request."""
+    payload = {
+        "op": "predict",
+        "request_id": request_id,
+        "contract": CONTRACT,
+        "state": observation["state"].tolist(),
+        **({"session": session} if session else {}),
+        **{k: encode_image(observation[k]) for k in CAMERAS},
+    }
+    return request("127.0.0.1", port, token, payload, timeout)
 
 
 def main() -> None:
@@ -478,6 +790,11 @@ def main() -> None:
     parser.add_argument("--max-episode-steps", type=int, default=100)
     parser.add_argument("--stall-timeout", type=float, default=2.0)
     parser.add_argument("--log-interval", type=float, default=1.0)
+    parser.add_argument("--record-limit-gib", type=float, default=8)
+    parser.add_argument("--max-pending-uploads", type=int, default=512)
+    parser.add_argument("--tcp-speed", type=float, default=0.12)
+    parser.add_argument("--angular-speed", type=float, default=0.8)
+    parser.add_argument("--cpu-threads", type=int, default=2)
     parser.add_argument("--manual-only", action="store_true")
     parser.add_argument(
         "--online",
@@ -488,6 +805,15 @@ def main() -> None:
         "--no-vr", action="store_true", help="Explicit keyboard-only policy test"
     )
     args = parser.parse_args()
+    if not 1 <= args.cpu_threads <= 8:
+        parser.error("--cpu-threads must be in [1, 8]")
+    if (
+        not 0.1 <= args.record_limit_gib <= 64
+        or not 1 <= args.max_pending_uploads <= 2048
+    ):
+        parser.error("Invalid local storage/outbox quota")
+    if not 0 < args.tcp_speed <= 0.25 or not 0 < args.angular_speed <= 1.5:
+        parser.error("Invalid target speed limit")
     if args.online and (args.manual_only or args.record is None):
         parser.error(
             "--online requires --record and cannot be combined with --manual-only"
@@ -509,6 +835,9 @@ def main() -> None:
     if not 0.2 <= args.log_interval <= 10:
         parser.error("--log-interval must be in [0.2, 10] seconds")
     logging.basicConfig(level=logging.INFO)
+    import torch
+
+    torch.set_num_threads(args.cpu_threads)
     run(args)
 
 

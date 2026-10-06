@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import random
 from collections import deque
 from pathlib import Path
@@ -25,7 +26,7 @@ class OnlineLearner:
 
     This smoke uses h=1 with the frozen Stage1 ten-step reference. No unexecuted
     chunk tails enter TD targets. It is not weight-compatible with an h=10 head.
-    All methods must be called by the server's single request thread.
+    All methods must be called by the server's single model-owner thread.
     """
 
     def __init__(self, config: dict, device: str = "cpu") -> None:
@@ -53,6 +54,7 @@ class OnlineLearner:
         self.demos: deque[dict] = deque(maxlen=c["capacity"])
         self.update_step = self.actor_updates = self.version = 0
         self.accepted = self.human_accepted = 0
+        self.approved_accepted = 0
         self.last_metrics: dict[str, float] = {}
         self.published_bc_loss: float | None = None
 
@@ -89,14 +91,21 @@ class OnlineLearner:
             "terminated": bool(item["terminated"]),
             "truncated": bool(item["truncated"]),
             "human": bool(item["human"]),
+            "quality": item.get("quality", "unreviewed"),
         }
+        if record["quality"] not in {"policy", "approved", "rejected", "unreviewed"}:
+            raise ValueError("Unknown correction quality")
+        if record["quality"] == "approved" and not record["human"]:
+            raise ValueError("Only human corrections can be approved")
         if not math.isfinite(record["reward"]):
             raise ValueError("Invalid reward")
         self.replay.append(record)
         self.accepted += 1
         if record["human"]:
-            self.demos.append(record)
             self.human_accepted += 1
+            if record["quality"] == "approved":
+                self.demos.append(record)
+                self.approved_accepted += 1
         if (
             len(self.replay) >= self.cfg["min_replay"]
             and self.update_step < self.cfg["max_updates"]
@@ -127,6 +136,11 @@ class OnlineLearner:
             device=self.device,
         )
         human = torch.tensor([[r["human"]] for r in records], device=self.device)
+        approved = torch.tensor(
+            [[r["human"] and r["quality"] == "approved"] for r in records],
+            device=self.device,
+        )
+        bc_mask = approved | ~human
         with torch.no_grad():
             next_actions, _, _ = self.model.sac_forward(next_obs)
             next_q = (
@@ -155,8 +169,10 @@ class OnlineLearner:
                     apply_reference_dropout=True,
                     reference_dropout_prob=c["reference_dropout"],
                 )
-                bc_target = torch.where(human, actions, obs["ref_chunk"][:, 0])
-                bc_loss = F.mse_loss(pi, bc_target)
+                bc_target = torch.where(approved, actions, obs["ref_chunk"][:, 0])
+                bc_loss = (
+                    F.mse_loss(pi, bc_target, reduction="none") * bc_mask
+                ).sum() / (bc_mask.sum().clamp_min(1) * c["action_dim"])
                 actor_loss = (
                     c["bc_weight"] * bc_loss
                     - c["q_weight"] * self.model.sac_q_forward(obs, pi)[:, 0].mean()
@@ -172,6 +188,8 @@ class OnlineLearner:
                     actor_loss=float(actor_loss.detach()),
                     bc_loss=float(bc_loss.detach()),
                     human_batch_ratio=float(human.float().mean()),
+                    approved_batch_ratio=float(approved.float().mean()),
+                    bc_eligible_ratio=float(bc_mask.float().mean()),
                 )
             finally:
                 self.model.q_head.requires_grad_(True)
@@ -186,8 +204,15 @@ class OnlineLearner:
             self.version = self.update_step
             with torch.no_grad():
                 prediction, _, _ = self.published.sac_forward(obs, deterministic=True)
-                target = torch.where(human, actions, obs["ref_chunk"][:, 0])
-                self.published_bc_loss = float(F.mse_loss(prediction, target))
+                target = torch.where(approved, actions, obs["ref_chunk"][:, 0])
+                self.published_bc_loss = (
+                    float(
+                        ((prediction - target).square() * bc_mask).sum()
+                        / (bc_mask.sum() * c["action_dim"])
+                    )
+                    if bc_mask.any()
+                    else None
+                )
         return metrics
 
     def actor_ready(self) -> bool:
@@ -216,6 +241,7 @@ class OnlineLearner:
             **self.last_metrics,
             "accepted": self.accepted,
             "human_accepted": self.human_accepted,
+            "approved_accepted": self.approved_accepted,
             "replay_size": len(self.replay),
             "demo_size": len(self.demos),
             "update_step": self.update_step,
@@ -229,7 +255,7 @@ class OnlineLearner:
     def save(self, path: Path, metadata: dict) -> None:
         """Atomically save networks, optimizers, replay, RNG and RPC progress."""
         state = {
-            "schema": 1,
+            "schema": 2,
             "config": self.cfg,
             "metadata": metadata,
             "model": self.model.state_dict(),
@@ -252,20 +278,32 @@ class OnlineLearner:
                     "version",
                     "accepted",
                     "human_accepted",
+                    "approved_accepted",
                 )
             },
             "published_bc_loss": self.published_bc_loss,
             "last_metrics": self.last_metrics,
         }
         temporary = path.with_suffix(".tmp")
-        torch.save(state, temporary)
+        with temporary.open("wb") as stream:
+            torch.save(state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(path)
+        if os.name == "posix":
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def load(self, path: Path) -> dict:
         """Resume a trusted compatible checkpoint, including optimizer moments."""
         state = torch.load(path, map_location="cpu", weights_only=True)
-        if state["schema"] != 1 or state["config"] != self.cfg:
-            raise ValueError("Online learner checkpoint configuration mismatch")
+        if state["schema"] != 2 or state["config"] != self.cfg:
+            raise ValueError(
+                "Requires schema-2 quality-labelled checkpoint with matching config; start a fresh run for legacy data"
+            )
         self.replay.clear()
         self.demos.clear()
         for name in ("model", "target", "published", "actor_optim", "critic_optim"):

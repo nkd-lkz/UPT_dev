@@ -1,95 +1,104 @@
 # Single-Environment VR Online Acceptance
 
-Connect the working Windows simulator and PICO controls to an online learner on physical GPU 2. Start the server, establish an SSH tunnel, then collect real intervention samples. This is a single-environment, single-step engineering smoke, not the 64-environment training configuration or a converged policy.
+Verify the loop between Windows simulation, PICO corrections and the GPU 2 learner. Update both endpoints, check local control and ingestion, then confirm that a published actor actually executes and remains interruptible. This is an independent `horizon=1` engineering pilot, **not the production 64-environment, ten-step Stage 2 baseline**.
 
-## Define the Training Scope
+## Update Both Endpoints and Start Fresh
 
-The controller operates one Windows simulation. After each executed step, the client journals the raw transition and uploads it asynchronously. The server extracts both endpoint features with frozen Stage 1 weights, updates a small actor/twin critic, and publishes complete actor snapshots for subsequent predictions.
+This revision uses `online_protocol=2`, with different receipt and quality-label semantics. Do not mix old and new endpoints. Updating source does not update a running process: quit the Windows client, press Ctrl-C in the original VR server terminal, then start the new server. Leave GPU 0/1 baseline and unrelated GPU 2 jobs running.
 
-```text
-Windows: observation → server prediction → P selects policy action
-                  ↘ grip takeover → local IK → executed action
-                                                   ↓
-                            step, display, journal true next state
-                                                   ↓ bounded background upload
-GPU 2: frozen Stage 1 → feature replay + human replay
-                               ↓ TD + Q/BC updates
-                        actor / twin critic → publish → next prediction
-```
-
-The first version uses `horizon=1`; the frozen VLA still produces a ten-step reference, whose first action becomes the reference BC target. Unexecuted chunk tails therefore cannot enter training targets. This head is incompatible with the formal ten-step baseline head. Automatic phase routing and the automatic OpenPI expert are not part of this entrypoint: the user presses `P` for policy control and holds grip for human control.
-
-`online_smoke.yaml` starts updates after eight records, uses batch eight, caps optimization at 128 updates, publishes every four updates, and checkpoints every sixteen accepted records. When human records exist, half the batch comes from human replay and half from all-action replay, so the realized human fraction can exceed one half. Human BC targets are executed intervention actions; other BC targets are frozen VLA references. Critics use raw sparse task reward; pressing grip never creates a success reward. Both termination and truncation block bootstrap in this explicit configuration.
-
-Uploads and local control are asynchronous; server inference and learning are serialized. This is not a promise of ten remote predictions or updates per second. Full queues, tracking faults, expired replies and network errors pause control. Increasing the queue cannot fix sustained throughput deficits. Collection and inference can continue after the optimization cap.
-
-## Start the Isolated Server
-
-For longer operator acceptance, use this entrypoint. It defaults to Stage 1 step 2000 and `online_pilot.yaml`: 64 transitions before learning, batch 32, at most 5000 updates, publication every eight updates and checkpointing every 50 accepted transitions. Deployment requires at least 128 published updates and publication-minibatch imitation MSE at most 0.01; otherwise reference actions continue. This is a training diagnostic, not held-out evaluation or a safety certificate.
+Checkpoints use schema 2. Schema 1 treated every takeover as BC data and cannot be resumed directly. Start first acceptance without `--resume`, retaining old logs and weights. Check settings, then launch a fresh tmux session:
 
 ```bash
 cd /home/luokz/rlinf_rlt/UPT_vr_dev
 bash run_rlt_vr_hil_pilot.sh check
-tmux new-session -s rlt_vr_hil 'bash run_rlt_vr_hil_pilot.sh run; exec bash'
+tmux new-session -s rlt_vr_hil_v2 'bash run_rlt_vr_hil_pilot.sh run; exec bash'
 ```
 
-Enter a secret of at least 32 characters in tmux and use the same secret on Windows. The server holds the shared project GPU-2 lease and refuses an occupied GPU. `check` validates paths/settings without allocating CUDA. GPU 0/1 baseline jobs remain unchanged. This remains one Windows environment with `horizon=1`, incompatible with the production ten-step Stage 2 head and not integrated into 64-environment training. The shorter 128-update smoke command follows.
+`check` allocates no GPU. Enter a secret of at least 32 characters and use the same value on Windows; never commit or share it in chat. The launcher selects physical GPU 2 by UUID, holds the project lease and refuses occupancy above 1 GiB. It neither runs `ray stop` nor modifies baseline jobs. Wait for `Online learner ready`.
 
-CUDA is selected by physical GPU 2 UUID and verified before model allocation. The launcher rejects GPU 2 when over 1 GiB is occupied. Real simulator smoke also pins Vulkan by PCI address. It neither joins Stage 1's Ray cluster nor runs `ray stop`. In a fresh tmux session, run:
+The pilot defaults to Stage 1 step 2000, 64 records before learning, batch 32, at most 5000 updates, publication every eight updates and checkpoints every 50 records. Actor execution requires at least 128 updates and eligible BC MSE at most 0.01 on the latest publication minibatch; otherwise reference continues. This is neither held-out evaluation nor a safety certificate. The shorter `run_rlt_vr_online_gpu2.sh run` uses eight records before learning, batch eight, at most 128 updates, publication every four updates and checkpoints every sixteen records. Resume with the original configuration.
 
-```bash
-cd /home/luokz/rlinf_rlt/UPT_vr_dev
-export RLT_STAGE1_ACTOR=/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor
-read -rsp 'Enter a random connection secret of at least 32 characters: ' RLT_VR_TOKEN
-export RLT_VR_TOKEN
-bash run_rlt_vr_online_gpu2.sh run
-```
+## Verify Local Windows Control
 
-Use the same newly chosen secret on Windows; never commit it or send it in chat. Wait for `Online learner ready`. NAS `runs/vr_online/TIMESTAMP_PID/` contains `config.json`, `metrics.jsonl` and `learner.pt`. This smoke logs JSONL metrics rather than creating a W&B run.
-
-## Connect Windows and Intervene
-
-Keep PICO Business Streaming and SteamVR tracking active. In one Windows PowerShell, open the tunnel, replacing `SERVER_ADDRESS` with the address used for SSH:
+Once the server is ready, keep Business Streaming and SteamVR tracking active. Open a tunnel in one PowerShell, replacing `SERVER_ADDRESS` with your SSH address:
 
 ```powershell
-ssh -N -o ExitOnForwardFailure=yes -L 8775:127.0.0.1:8775 luokz@SERVER_ADDRESS
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8775:127.0.0.1:8775 luokz@SERVER_ADDRESS
 ```
 
-Leave that window open. In a second PowerShell, update the VR branch, enter the same secret and launch the client:
+Keep the tunnel open. In another PowerShell, synchronize the VR branch and create a fresh recording. Both endpoints must run the same revision:
 
 ```powershell
 Set-Location "C:\Users\lkz\Desktop\code\UPT_vr_dev"
 git pull --ff-only origin feature/rlt-pico-vr-intervention
-$env:RLT_VR_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Connection secret' -AsSecureString)).Password
-$vrRecord = "C:\Users\lkz\Desktop\rlt-records\online-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+$env:RLT_VR_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Same connection secret as the server' -AsSecureString)).Password
+$vrRecord = "C:\Users\lkz\Desktop\rlt-records\acceptance-v2-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
 conda run --no-capture-output --name rlt-vr python -X faulthandler -u -m toolkits.rlt_vr.client --online --port 8775 --render-backend cpu --record "$vrRecord" --max-episode-steps 1000 --log-interval 1
 ```
 
-Check images and tracking while paused. Press `P` to request policy actions, then hold grip and move slowly to take control. A fresh trigger press toggles the gripper. Releasing grip pauses; `P` explicitly returns to policy control. `R` resets, Space pauses and `Q` exits. The 1000-step manual acceptance horizon must not be compared directly with the production baseline evaluation configuration.
+The client starts paused. Hold grip and move slowly; each fresh takeover anchors the controller to the current TCP. A fresh trigger press toggles the gripper target; releasing grip does not open it. Input and display remain local, without directly waiting for remote inference.
 
-The terminal's `Online learner` line shows `ack`, pending uploads and server metrics. Acceptance requires increases in `human_accepted`, `update_step` and `policy_version`, not just visible robot following. Retain local `.npz` records: server replay stores features, while local records contain the original images.
+Control remains 10 Hz. Defaults are a 0.12 s target-smoothing constant, 0.12 m/s translation and 0.8 rad/s rotation limits. Joint increments are bounded to 0.025 rad/step, with adjacent-command limits and a 0.02 rad joint-limit margin. Relative targets remain bounded to 15 cm / 30°. These constrain commands, not measured velocity, collision avoidance or real-robot safety. `--tcp-speed` and `--angular-speed` change target rates; increasing them is not a remedy for contact stalls.
 
-## Interrupt and Resume
+## Separate Takeover from Approved Corrections
 
-For the longer pilot, restore with the same pilot configuration and inspect accepted execution metrics:
+After checking following, press `P` to request model actions and take over mid-execution. Releasing grip requests review of the last human fragment: `Y` approves it for BC; `N` excludes it. Re-grip or press `P` after review. `R` resets, Space pauses and `Q` quits. Pending fragments at reset or exit become `unreviewed`, never implicitly approved.
+
+| Label | Replay and training use |
+|---|---|
+| `human + approved` | Ordinary and correction replay; executed action is the BC target |
+| `human + rejected/unreviewed` | Retained for critic learning and analysis; not a direct BC target |
+| `reference/actor + policy` | Ordinary replay; BC uses the frozen VLA's first reference action |
+
+Raw `.npz` files are immutable; reviews are separate `review_*.json` files. Approval is an operator judgment, not automatic success detection. Reviews cover whole fragments and cannot revoke uploaded approval; use short, promptly reviewed segments. Half the batch comes from correction replay and half from all-action replay, so the realized human fraction can exceed one half. Rewards remain raw sparse rewards, without a bonus for grip or approval; both termination and truncation block bootstrap in this configuration.
+
+## Read Pause Causes and Processing Progress
+
+Upload starts only after review and preserves execution order. Later transitions cannot bypass unreviewed fragments. The display retains pause reasons and recovery hints; restored tracking or queue capacity never automatically resumes motion.
+
+| Cause | Recovery |
+|---|---|
+| `tracking_invalid` / `ui_stall` | Check tracking or local stalls; release and re-grip |
+| `ik_failed` / `no_progress` | Inspect target, contact and posture; re-anchor with a smaller target |
+| Relative motion limit | Release, reposition and re-grip; this limit does not end the episode |
+| `review_required` | Release grip, then press `Y` or `N` |
+| `local_outbox_full` | Review pending fragments and wait for receipts; release before resuming |
+| `upload_error` / `server_storage_full` / `local_storage_full` | Stop, retain records and inspect connection, server faults or quotas |
+| `episode_ended` | Only `R` starts another episode; grip cannot clear it |
+
+`no_progress` requires 20 consecutive control steps with position error above 2.5 cm and actual movement below 0.2 mm/step. It does not identify collision, joint limits or dynamics lag. Logs separate IK, simulator-step and journal-write time, and report target error, joint limiting and actual TCP motion. Raw samples include `teleop_json`; sparse control events go to `events.jsonl`.
+
+The server validates and synchronously commits requests to `inbox/` before acknowledging receipt. One background model owner alternates prediction and feature/learning work. Network admission does not wait for learning, but a model operation cannot be preempted. This does not promise 10 Hz remote inference or optimization.
+
+| Counter | Meaning |
+|---|---|
+| `received` / `received_sequence` | Durably received sequence, zero-based; not update count |
+| `processed` / `sequence` | Client sequence processed into feature replay |
+| `local_pending` / `outbox` | Queued and in-flight records, including pending review |
+| `server_pending` / `pending_learning` | Durable receipts not yet fully processed |
+| `approved_accepted`, `update_step`, `policy_version` | Processed approved corrections, optimizer steps, published version |
+
+Defaults are 512 local outbox filenames, an 8 GiB raw-record quota and 128 MiB free reserve. Server defaults are 128 pending records, a 4 GiB journal quota and 1 GiB free reserve. Exhaustion applies backpressure and eventually pauses simulation; records are not dropped and queues are not unbounded. Continuous grip can fill 512 unreviewed slots in about 51 seconds, so operate in reviewed segments.
+
+Local writes still perform synchronous `fsync`; slow storage can affect control. This decouples network and learning, not all local work, and is not hard-real-time control. Checkpoints and feature replay require space beyond the raw journal quota. Records are never automatically deleted.
+
+## Retain Evidence When Resuming
+
+For normal shutdown, press `Q`, wait for upload shutdown, then Ctrl-C on the server. Windows `receipt.json` identifies the last acknowledged sequence and server run. The server retains `inbox/`, processed `metrics.jsonl`, `learner.pt` and `config.json`, without creating a W&B run. Keep both sides after faults. Do not relabel old records as a new session and resend everything: that can duplicate training data.
+
+Resume a schema-2 checkpoint with matching protocol, configuration and frozen-feature identity:
 
 ```bash
 bash run_rlt_vr_hil_pilot.sh run --resume /absolute/path/previous-run/learner.pt
 /home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python -m toolkits.rlt_vr.summarize_online /absolute/path/run
 ```
 
-The report counts takeover steps, contiguous takeover segments, completed episodes and actual learner updates. Human flags describe the client-declared action route; scripted clients can set them too. `service_ms` measures server feature/update processing, not end-to-end control latency. `update_budget_exhausted=true` means optimization stopped; collection and inference continue.
+The server replays durable receipts after its last good checkpoint before admitting a new Windows session. Checkpoints reference all ancestor `inbox/` directories: do not delete/move them or copy `learner.pt` alone. Active simulation and Windows records without acknowledgement are not automatically recovered. Retain those files and `receipt.json` for reconciliation; do not assume they were learned. Per-run logs remain separate while cumulative model counters can span runs.
 
-Stop the client before pressing Ctrl-C on the server. Interrupting an in-flight update can fault the learner; a fault never overwrites the previous good checkpoint. Normal shutdown saves networks, target, both optimizers, replay, published version and RNG. Use the following only for a short run originally started with `online_smoke.yaml`; pilot checkpoints require `run_rlt_vr_hil_pilot.sh` above, with the same configuration:
+The report separates human and approved-correction counts and actual reference/actor steps. Increasing `policy_version` is not evidence of actor execution: a real transition must have `policy_source=actor`. `service_ms` measures feature/learning work, not end-to-end latency. `update_budget_exhausted=true` stops optimization, not ingestion or prediction.
 
-```bash
-bash run_rlt_vr_online_gpu2.sh run --resume /absolute/path/previous-run/learner.pt
-```
+## Accept the Complete Loop
 
-Restart Windows with a fresh recording directory and episode. Active simulation state and unacknowledged queues are not restored; do not resend old-session packets. Configuration and frozen Stage 1/normalization identity must match. Samples after the last checkpoint may require recovery from local records; automatic journal re-ingestion is not implemented.
+Use short engineering recordings before formal collection: reference execution → human correction → release and approve with `Y` → increasing `approved_accepted`, `update_step` and `policy_version` → actor passes its gate and actually executes after `P` → human takes over again. Keep reference active if the actor is not ready; do not weaken the gate to claim acceptance.
 
-## Evidence and Remaining Acceptance
-
-Server-side real simulation verified the same RPC, frozen Stage 1 extraction, scripted intervention samples, TD/BC updates, actor publication, deduplication and optimizer/replay restoration. See [VR_VERIFICATION.md](VR_VERIFICATION.md). Actual Windows/PICO-to-learner acceptance requires an operator and remains pending. Scripted interventions are not human success-rate evidence.
-
-After this smoke, extend partial ten-step chunks with masks and correct discounts, integrate formal RLinf workers/replay and phase routing, then consider dual-GPU 64-environment training. New entrypoints remain isolated from baseline and are not merged.
+CPU tests cover control state, the real client loop, actual loopback sockets, ordered upload, delayed learning, quotas, labels, faults/recovery and synthetic-feature reference/actor/human switching. They do not establish Windows/PICO smoothness or task-success improvement. Historical GPU smoke is not acceptance of this asynchronous revision. See [verification evidence](VR_VERIFICATION.md) for current limitations and failed checks. Automatic phase routing, OpenPI expert, formal ten-step partial chunks and 64-environment worker/replay integration are not part of this entrypoint.

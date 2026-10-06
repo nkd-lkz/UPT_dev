@@ -44,6 +44,495 @@ from toolkits.rlt_vr.server import InferenceServer
 from toolkits.rlt_vr.vr import SteamVRController
 
 
+def wait_for_processed(transport, count, timeout=10):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = transport({"op": "status"})
+        assert not status["faulted"], status
+        if status["metrics"]["accepted"] >= count and not status["pending_learning"]:
+            return status
+        time.sleep(0.01)
+    pytest.fail("Learner did not process durable receipts")
+
+
+def test_pause_reason_survives_tracking_recovery_and_finished_episode():
+    control = OperatorControl()
+    control.update(valid=True, clutch=True)
+    control.pause("local_outbox_full", "wait for receipts")
+    assert control.update(valid=True, clutch=True) == "paused"
+    assert "local_outbox_full" in control.instruction
+    assert "release grip" in control.instruction
+    control.update(valid=True, clutch=False)
+    assert "local_outbox_full" in control.instruction
+    assert control.update(valid=True, clutch=True) == "human"
+    control.finish("1000-step time limit")
+    control.pause("review_required", "Y/N")
+    assert "1000-step time limit" in control.instruction
+    assert "R resets" in control.instruction
+
+
+def test_target_filter_and_joint_limits_bound_commands():
+    from scipy.spatial.transform import Rotation
+
+    from toolkits.rlt_vr.control import TargetFilter, bounded_joint_delta
+
+    smoother = TargetFilter(np.eye(4))
+    target = np.eye(4)
+    target[0, 3] = 0.15
+    target[:3, :3] = Rotation.from_euler("z", 30, degrees=True).as_matrix()
+    previous = np.eye(4)
+    for _ in range(20):
+        pose = smoother.update(target)
+        assert 0 <= pose[0, 3] <= target[0, 3]
+        assert np.linalg.norm(pose[:3, 3] - previous[:3, 3]) <= 0.012 + 1e-8
+        assert (
+            Rotation.from_matrix(pose[:3, :3] @ previous[:3, :3].T).magnitude()
+            <= 0.08 + 1e-8
+        )
+        previous = pose
+    q = np.zeros(7)
+    limits = np.tile([-1.0, 1.0], (7, 1))
+    first, _ = bounded_joint_delta(np.ones(7), q, limits, np.zeros(7))
+    assert np.max(first) <= 0.0100001
+    second, _ = bounded_joint_delta(np.ones(7), q, limits, first)
+    assert np.max(second - first) <= 0.0100001
+    q[0] = 0.99
+    clipped, limited = bounded_joint_delta(np.ones(7), q, limits, second)
+    assert limited and clipped[0] == 0
+    inward, _ = bounded_joint_delta(-np.ones(7), q, limits, np.zeros(7))
+    assert inward[0] < 0
+    with pytest.raises(ValueError):
+        TargetFilter(np.eye(4), speed=float("nan"))
+
+
+def test_raw_journal_needs_explicit_review_before_demo_upload(tmp_path):
+    import json
+
+    recorder = TransitionRecorder(tmp_path / "records", {})
+    image = np.zeros((384, 384, 3), np.uint8)
+    obs = {"state": np.zeros(9, np.float32), "main_image": image, "wrist_image": image}
+    path = recorder.append(obs, np.zeros(8), obs, 0, False, False, "human", 0, "v0")
+    assert recorder.pending_review == 1 and recorder.upload_item(path) is None
+    recorder.review_pending(True)
+    assert recorder.upload_item(path)["quality"] == "approved"
+    assert (
+        json.loads((recorder.directory / "review_000000.json").read_text())["quality"]
+        == "approved"
+    )
+    path2 = recorder.append(obs, np.zeros(8), obs, 0, False, False, "human", 0, "v0")
+    recorder.review_pending(None)
+    assert recorder.upload_item(path2)["quality"] == "unreviewed"
+    with np.load(path2, allow_pickle=False) as raw:
+        assert raw["quality"].item() == "unreviewed"
+    small = TransitionRecorder(tmp_path / "small", {}, max_bytes=10)
+    assert not small.ready
+
+
+@pytest.mark.parametrize("fault", ["tracking", "outbox"])
+def test_client_loop_latches_reason_reviews_and_reanchors(monkeypatch, tmp_path, fault):
+    """Exercise the real UI loop with only external device/network edges faked."""
+    import sys
+
+    from toolkits.rlt_vr import client
+
+    frame = {"index": -1, "clock": 0.0}
+    rendered, executed, anchors = [], [], []
+    keys = {4: ord("y"), 8: ord("n"), 9: ord("q")}
+    image = np.zeros((384, 384, 3), np.uint8)
+    obs = {"state": np.zeros(9, np.float32), "main_image": image, "wrist_image": image}
+
+    class Device:
+        def __init__(self, *args):
+            pass
+
+        def read(self):
+            frame["index"] += 1
+            i = frame["index"]
+            assert i < 11, "Client did not terminate"
+            return SimpleNamespace(
+                valid=not (fault == "tracking" and i == 1),
+                clutch=i in (0, 1, 2, 6, 7),
+                pose=np.eye(4),
+                close_gripper=False,
+                buttons=4,
+                trigger_value=0.0,
+            )
+
+        def close(self):
+            pass
+
+    class Simulator:
+        def __init__(self, *args):
+            self.teleop_diagnostics = {}
+
+        def observation(self):
+            return obs
+
+        def tcp_matrix(self):
+            return np.eye(4)
+
+        def reset_teleop(self):
+            anchors.append(frame["index"])
+
+        def human_action(self, target, gripper):
+            return np.zeros(8, np.float32)
+
+        def step(self, action):
+            executed.append(frame["index"])
+            return obs, 0.0, False, False
+
+        def close(self):
+            pass
+
+    class Uploader:
+        error = None
+        outstanding = server_pending = 0
+        accepted_sequence = processed_sequence = -1
+        storage_full = False
+        metrics = {}
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def ready(self):
+            return not (fault == "outbox" and frame["index"] == 1)
+
+        def submit_path(self, path):
+            assert path.is_file()
+
+        def close(self):
+            pass
+
+    def clock():
+        frame["clock"] += 0.11
+        return frame["clock"]
+
+    sdk = SimpleNamespace(
+        COLOR_RGB2BGR=0,
+        WND_PROP_VISIBLE=0,
+        cvtColor=lambda panel, mode: panel,
+        putText=lambda panel, text, *a: rendered.append((frame["index"], text)),
+        imshow=lambda *a: None,
+        waitKey=lambda delay: keys.get(frame["index"], -1),
+        getWindowProperty=lambda *a: 1,
+        destroyAllWindows=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", sdk)
+    monkeypatch.setattr(
+        client,
+        "time",
+        SimpleNamespace(monotonic=clock, time=lambda: 0.0, sleep=lambda delay: None),
+    )
+    monkeypatch.setattr(client, "LocalSimulation", Simulator)
+    monkeypatch.setattr(client, "SteamVRController", Device)
+    monkeypatch.setattr(client, "TransitionUploader", Uploader)
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda *a: {
+            "contract": CONTRACT,
+            "model_id": "test",
+            "online": True,
+            "horizon": 1,
+            "online_protocol": 2,
+        },
+    )
+    args = SimpleNamespace(
+        manual_only=False,
+        online=True,
+        no_vr=False,
+        port=12345,
+        record=tmp_path / "record",
+        seed=0,
+        yaw_degrees=0,
+        max_episode_steps=1000,
+        render_backend="cpu",
+        clutch_button=2,
+        trigger_button=33,
+        trigger_threshold=0.6,
+        translation_scale=0.5,
+        max_displacement=0.15,
+        max_rotation_degrees=30,
+        stall_timeout=10,
+        log_interval=10,
+        reply_ttl=10,
+    )
+    client.run(args)
+    assert executed == [0, 6, 7]
+    assert anchors == [0, 6]
+    reason = "tracking_invalid" if fault == "tracking" else "local_outbox_full"
+    assert any(i == 2 and reason in text for i, text in rendered)
+    assert any(i == 3 and "release grip" in text for i, text in rendered)
+    import json
+
+    reviews = [
+        json.loads(p.read_text()) for p in sorted(args.record.glob("review_*.json"))
+    ]
+    assert [r["quality"] for r in reviews] == ["approved", "rejected"]
+
+
+def test_reviewed_disk_outbox_reaches_async_learner_in_order(online_rpc, tmp_path):
+    import time
+
+    from toolkits.rlt_vr.async_service import AsyncOnlineService
+    from toolkits.rlt_vr.online_transport import TransitionUploader
+    from toolkits.rlt_vr.server import ConcurrentInferenceServer
+
+    core, _, obs = online_rpc
+    transport = AsyncOnlineService(core, reserve_bytes=0)
+    session, token = "disk-test-session", "test-secret" * 4
+    recorder = TransitionRecorder(tmp_path / "windows", {})
+    transport({"op": "begin", "session": session, "online_protocol": 2})
+    with ConcurrentInferenceServer(
+        ("127.0.0.1", 0), token, None, "test", dispatch=transport
+    ) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        uploader = TransitionUploader(
+            server.server_address[1], token, session, capacity=2, recorder=recorder
+        )
+        try:
+            first = recorder.append(
+                obs, np.zeros(8), obs, 0, False, False, "human", 0, "test"
+            )
+            uploader.submit_path(first)
+            second = recorder.append(
+                obs,
+                np.zeros(8),
+                obs,
+                0,
+                False,
+                False,
+                "policy",
+                0,
+                "test",
+                policy_source="reference",
+            )
+            uploader.submit_path(second)
+            assert not uploader.ready
+            assert (
+                core.learner.accepted == 0
+            )  # Review is a gate, not an implicit approval.
+            recorder.review_pending(False)
+            wait_for_processed(transport, 2)
+            deadline = time.monotonic() + 2
+            while uploader.outstanding and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (
+                uploader.ready
+                and uploader.accepted_sequence == 1
+                and not uploader.error
+            )
+            assert core.learner.human_accepted == 1 and not core.learner.demos
+            assert first.is_file() and second.is_file()
+        finally:
+            uploader.close()
+            server.shutdown()
+            thread.join(5)
+            transport.close()
+
+
+@pytest.mark.parametrize("quality", ["unreviewed", "rejected"])
+def test_unapproved_human_is_critic_data_not_bc(online_config, quality):
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+
+    online_config.update(min_replay=1, q_weight=0.0, actor_max_bc_loss=0.01)
+    learner = OnlineLearner(online_config)
+    sample = {**online_transition(online_config), "quality": quality}
+    status = learner.observe(sample)
+    assert status["human_accepted"] == 1 and status["approved_accepted"] == 0
+    assert status["replay_size"] == 1 and status["demo_size"] == 0
+    assert status["bc_loss"] == 0 and status["bc_eligible_ratio"] == 0
+    assert status["published_bc_loss"] is None and not status["actor_ready"]
+
+
+def test_durable_ack_and_health_do_not_wait_for_feature_extraction(online_rpc):
+    from toolkits.rlt_vr.async_service import AsyncOnlineService
+    from toolkits.rlt_vr.online_service import ONLINE_PROTOCOL
+    from toolkits.rlt_vr.server import ConcurrentInferenceServer
+
+    core, payload, _ = online_rpc
+    entered, release = threading.Event(), threading.Event()
+    original = core.extract
+
+    def delayed(obs):
+        entered.set()
+        assert release.wait(10)
+        return original(obs)
+
+    core.extract = delayed
+    transport = AsyncOnlineService(core, max_pending=1, reserve_bytes=0)
+    token = "test-secret" * 4
+    with ConcurrentInferenceServer(
+        ("127.0.0.1", 0), token, None, "test", dispatch=transport
+    ) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def rpc(message):
+            return request(
+                "127.0.0.1",
+                server.server_address[1],
+                token,
+                {"request_id": 0, **message},
+                2,
+            )
+
+        try:
+            rpc(
+                {
+                    "op": "begin",
+                    "session": "test-session",
+                    "online_protocol": ONLINE_PROTOCOL,
+                }
+            )
+            ack = rpc(payload)
+            assert ack["received_sequence"] == 0 and ack["metrics"]["accepted"] == 0
+            assert entered.wait(2)
+            assert rpc({"op": "health"})["pending_learning"] == 1
+            assert rpc(payload)["duplicate"]
+            assert rpc({**payload, "sequence": 1})["busy"]
+            with pytest.raises(RuntimeError):
+                rpc({**payload, "quality": "rejected"})
+            assert len(list((core.directory / "inbox").glob("*.json"))) == 1
+            release.set()
+            wait_for_processed(transport, 1)
+        finally:
+            release.set()
+            server.shutdown()
+            thread.join(5)
+            transport.close()
+
+
+def test_pending_durable_receipts_survive_worker_fault_and_resume(
+    online_rpc, online_config, tmp_path
+):
+    import time
+
+    from toolkits.rlt_vr.async_service import AsyncOnlineService
+    from toolkits.rlt_vr.online_learner import OnlineLearner
+    from toolkits.rlt_vr.online_service import ONLINE_PROTOCOL, OnlineService
+
+    core, payload, _ = online_rpc
+
+    def failed_extract(obs):
+        raise RuntimeError("simulated feature service failure")
+
+    core.extract = failed_extract
+    transport = AsyncOnlineService(core, reserve_bytes=0)
+    transport(
+        {"op": "begin", "session": "test-session", "online_protocol": ONLINE_PROTOCOL}
+    )
+    assert transport(payload)["received_sequence"] == 0
+    deadline = time.monotonic() + 5
+    while not transport({"op": "status"})["faulted"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match="worker_"):
+        transport.close()
+    learner = OnlineLearner(online_config)
+    metadata = learner.load(core.directory / "learner.pt")
+    assert learner.accepted == 0  # The receipt was durable, but not learned.
+    directory = tmp_path / "resumed"
+    directory.mkdir()
+    resumed_core = OnlineService(
+        learner, lambda obs: online_features(online_config), directory, "fixed-feature"
+    )
+    resumed_core.restore(metadata)
+    resumed = AsyncOnlineService(resumed_core, restored=metadata, reserve_bytes=0)
+    try:
+        status = wait_for_processed(resumed, 1)
+        assert status["metrics"]["approved_accepted"] == 1
+        assert not resumed(
+            {
+                "op": "begin",
+                "session": "next-session",
+                "online_protocol": ONLINE_PROTOCOL,
+            }
+        )["busy"]
+        resumed({**payload, "session": "next-session"})
+        wait_for_processed(resumed, 2)
+    finally:
+        resumed.close()
+    assert len(list((core.directory / "inbox").glob("*.json"))) == 1
+
+
+def test_async_quota_and_protocol_reject_without_claiming_records(online_rpc):
+    from toolkits.rlt_vr.async_service import AsyncOnlineService
+
+    core, payload, _ = online_rpc
+    transport = AsyncOnlineService(core, max_journal_bytes=1, reserve_bytes=0)
+    try:
+        with pytest.raises(ValueError, match="protocol"):
+            transport({"op": "begin", "session": "test-session"})
+        transport({"op": "begin", "session": "test-session", "online_protocol": 2})
+        response = transport(payload)
+        assert (
+            response["busy"]
+            and response["storage_full"]
+            and response["received_sequence"] == -1
+        )
+        assert not list((core.directory / "inbox").glob("*.json"))
+    finally:
+        transport.close()
+
+
+def test_async_reference_correction_actor_and_return_to_human(online_rpc):
+    from toolkits.rlt_vr.async_service import AsyncOnlineService
+    from toolkits.rlt_vr.online_transport import encode_observation
+    from toolkits.rlt_vr.summarize_online import summarize
+
+    core, payload, obs = online_rpc
+    transport = AsyncOnlineService(core, reserve_bytes=0)
+    try:
+        transport({"op": "begin", "session": "test-session", "online_protocol": 2})
+        predict = {
+            "op": "predict",
+            "session": "test-session",
+            **encode_observation(obs),
+        }
+        assert transport(predict)["policy_source"] == "reference"
+        transport(
+            {
+                **payload,
+                "human": False,
+                "quality": "policy",
+                "policy_source": "reference",
+            }
+        )
+        transport({**payload, "sequence": 1})
+        wait_for_processed(transport, 2)
+        response = transport(predict)
+        assert response["policy_source"] == "actor"
+        transport(
+            {
+                **payload,
+                "sequence": 2,
+                "human": False,
+                "quality": "policy",
+                "policy_source": "actor",
+                "action": response["actions"][0],
+                "policy_version": response["metrics"]["policy_version"],
+            }
+        )
+        transport({**payload, "sequence": 3})
+        status = wait_for_processed(transport, 4)
+        assert status["metrics"]["human_accepted"] == 2
+        assert status["metrics"]["approved_accepted"] == 2
+        report = summarize(core.directory / "metrics.jsonl")
+        assert report["declared_reference_correction_actor_retakeover"]
+        assert report["actor_executed_steps"] == 1
+        assert not transport({"op": "end", "session": "test-session"})["busy"]
+        new_session = transport(
+            {"op": "begin", "session": "another-session", "online_protocol": 2}
+        )
+        assert not new_session["busy"] and new_session["sequence"] == -1
+    finally:
+        transport.close()
+
+
 def test_online_gpu_guard_rejects_busy_device_and_pins_uuid(monkeypatch):
     from toolkits.rlt_vr.gpu_guard import isolate_gpu2
 
@@ -100,6 +589,7 @@ def online_transition(config, *, human=True, terminated=False, truncated=False):
         "action": [-0.25] * 8,
         "reward": 1.0,
         "human": human,
+        "quality": "approved" if human else "policy",
         "terminated": terminated,
         "truncated": truncated,
     }
@@ -196,6 +686,7 @@ def online_rpc(online_config, tmp_path):
         "action": [0.0] * 8,
         "reward": 0,
         "human": True,
+        "quality": "approved",
         "terminated": False,
         "truncated": False,
         "policy_version": -1,
@@ -212,7 +703,7 @@ def test_online_protocol_order_duplicate_and_episode_boundaries(online_rpc):
     assert first["metrics"]["accepted"] == 1
     assert service({**payload, "request_id": 33})["duplicate"]
     with pytest.raises(ValueError, match="Conflicting"):
-        service({**payload, "human": False})
+        service({**payload, "human": False, "quality": "policy"})
     with pytest.raises(ValueError, match="Out-of-order"):
         service({**payload, "sequence": 2})
     with pytest.raises(ValueError, match="session"):
@@ -273,7 +764,7 @@ def test_online_report_counts_segments_without_calling_them_success(
     service, payload, _ = online_rpc
     service(payload)
     service(payload)  # Retry must not become another human step.
-    service({**payload, "sequence": 1, "human": False})
+    service({**payload, "sequence": 1, "human": False, "quality": "policy"})
     service({**payload, "sequence": 2, "truncated": True})
     report = summarize(tmp_path / "metrics.jsonl")
     assert report["declared_human_steps"] == 2
@@ -453,6 +944,49 @@ def test_torch_ik_damped_step_is_finite():
     assert delta is not None and np.isfinite(delta).all()
     np.testing.assert_allclose(delta[:3], target[:3, 3], atol=5e-6)
     np.testing.assert_allclose(delta[3:], 0, atol=1e-7)
+
+
+def test_panda_urdf_following_with_smoothed_bounded_commands():
+    """Check actual Panda kinematics without claiming physics/render acceptance."""
+    import importlib.util
+    from pathlib import Path
+
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("pytorch_kinematics")
+    spec = importlib.util.find_spec("mani_skill")
+    if spec is None:
+        pytest.skip("Optional ManiSkill Panda URDF is unavailable")
+    from toolkits.rlt_vr.control import TargetFilter, bounded_joint_delta
+    from toolkits.rlt_vr.simulation import _TorchPandaIK
+
+    path = Path(spec.origin).parent / "assets/robots/panda/panda_v2.urdf"
+    if not path.is_file():
+        pytest.skip("Optional Panda URDF is unavailable")
+    solver = _TorchPandaIK(str(path), "panda_hand_tcp")
+    q = np.array([0, np.pi / 8, 0, -5 * np.pi / 8, 0, 3 * np.pi / 4, np.pi / 4])
+    limits = np.array(solver.chain.get_joint_limits()).T
+
+    def fk():
+        return (
+            solver.chain.forward_kinematics(torch.tensor(q, dtype=torch.float32)[None])
+            .get_matrix()[0]
+            .numpy()
+        )
+
+    initial = fk()
+    target = initial.copy()
+    target[:3, 3] += [0.01, -0.01, 0.02]
+    smoother = TargetFilter(initial)
+    previous = np.zeros(7)
+    for _ in range(60):
+        dq = solver.joint_delta(q, smoother.update(target))
+        assert dq is not None
+        delta, _ = bounded_joint_delta(dq, q, limits, previous)
+        assert np.max(np.abs(delta)) <= 0.0250001
+        assert np.max(np.abs(delta - previous)) <= 0.0100001
+        q += delta
+        previous = delta
+    assert np.linalg.norm(fk()[:3, 3] - target[:3, 3]) < 0.0005
 
 
 def test_image_codec_preserves_baseline_pixels():

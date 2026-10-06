@@ -16,13 +16,35 @@ def summarize(path: Path) -> dict:
     """
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     episodes = {}
-    previous_sequence = -1
+    previous_sequences = {}
+    chains = {}
     for row in rows:
+        session = row.get("session", "legacy")
+        chain = chains.setdefault(
+            (session, row["episode"]),
+            {"stage": 0, "previous_version": 0, "before_correction": 0},
+        )
+        source = row.get("policy_source")
+        if chain["stage"] == 0 and source == "reference":
+            chain["stage"] = 1
+        elif chain["stage"] == 1 and row["human"] and row.get("quality") == "approved":
+            chain["stage"] = 2
+            chain["before_correction"] = chain["previous_version"]
+        elif (
+            chain["stage"] == 2
+            and source == "actor"
+            and row.get("behavior_version", -1) > chain["before_correction"]
+        ):
+            chain["stage"] = 3
+        elif chain["stage"] == 3 and row["human"]:
+            chain["stage"] = 4
+        chain["previous_version"] = row.get("policy_version", 0)
+        previous_sequence = previous_sequences.get(session, row["sequence"] - 1)
         if row["sequence"] != previous_sequence + 1:
             raise ValueError("Metrics contain a duplicate or missing sequence")
-        previous_sequence = row["sequence"]
+        previous_sequences[session] = row["sequence"]
         episode = episodes.setdefault(
-            row["episode"],
+            f"{session}:{row['episode']}",
             {
                 "steps": 0,
                 "human_steps": 0,
@@ -48,8 +70,18 @@ def summarize(path: Path) -> dict:
     last = rows[-1] if rows else {}
     return {
         "scope": "Single-environment h=1 HIL; human flags are client-declared, not a robot benchmark",
+        "declared_reference_correction_actor_retakeover": any(
+            c["stage"] == 4 for c in chains.values()
+        ),
         "accepted_this_run": len(rows),
         "declared_human_steps": human_steps,
+        "approved_human_steps": sum(row.get("quality") == "approved" for row in rows),
+        "actor_executed_steps": sum(
+            row.get("policy_source") == "actor" for row in rows
+        ),
+        "reference_executed_steps": sum(
+            row.get("policy_source") == "reference" for row in rows
+        ),
         "declared_human_fraction": human_steps / len(rows) if rows else None,
         "declared_human_segments": sum(
             row["human_segments"] for row in episodes.values()

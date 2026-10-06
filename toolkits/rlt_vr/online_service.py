@@ -15,6 +15,40 @@ from typing import Callable
 
 from .protocol import CONTRACT, decode_observation, validate_actions
 
+ONLINE_PROTOCOL = 2
+
+
+def validate_transition(message: dict) -> tuple[dict, dict]:
+    """Validate executed data before a durable receipt or learner mutation."""
+    for key in ("sequence", "episode"):
+        if type(message.get(key)) is not int or message[key] < 0:
+            raise ValueError(f"Invalid {key}")
+    for key in ("human", "terminated", "truncated"):
+        if type(message.get(key)) is not bool:
+            raise ValueError(f"Expected bool {key}")
+    if type(message.get("reward")) not in (int, float) or message["reward"] not in (
+        0,
+        1,
+    ):
+        raise ValueError("Expected raw sparse task reward 0 or 1")
+    quality = message.get("quality", "unreviewed")
+    if quality not in {"approved", "rejected", "unreviewed", "policy"}:
+        raise ValueError("Invalid quality label")
+    if (quality == "policy" and message["human"]) or (
+        quality in {"approved", "rejected"} and not message["human"]
+    ):
+        raise ValueError("Quality and control source disagree")
+    source = message.get("policy_source", "human" if message["human"] else "unknown")
+    if (
+        source not in {"human", "reference", "actor", "unknown"}
+        or (source == "human") != message["human"]
+    ):
+        raise ValueError("Invalid execution source")
+    validate_actions([message["action"]])
+    return decode_observation(message["observation"]), decode_observation(
+        message["next_observation"]
+    )
+
 
 def frozen_feature_identity(stage1: Path, dataset: Path) -> str:
     """Identify immutable Stage1 exports and exact normalization contents."""
@@ -60,6 +94,7 @@ class OnlineService:
         self.done = False
         self.faulted = False
         self.cache: OrderedDict[str, dict] = OrderedDict()
+        self.checkpoint_callback: Callable | None = None
 
     def metadata(self) -> dict:
         """Return progress and the frozen-feature identity for resume."""
@@ -84,6 +119,9 @@ class OnlineService:
         """Save the complete learner and accepted-sequence state."""
         if self.faulted:
             raise RuntimeError("Learner faulted; retain the last good checkpoint")
+        if self.checkpoint_callback is not None:
+            self.checkpoint_callback()
+            return
         self.learner.save(self.directory / "learner.pt", self.metadata())
 
     def _features(self, obs: dict) -> dict:
@@ -103,9 +141,11 @@ class OnlineService:
             return {
                 "contract": CONTRACT,
                 "online": True,
+                "online_protocol": ONLINE_PROTOCOL,
                 "horizon": 1,
                 "model_id": f"online-v{self.learner.version}",
                 "metrics": self.learner.status(),
+                "session": self.session,
                 "sequence": self.sequence,
                 "faulted": self.faulted,
             }
@@ -138,6 +178,7 @@ class OnlineService:
             }
         if op != "observe":
             raise ValueError("Unknown online operation")
+        validate_transition(message)
         seq, episode = message.get("sequence"), message.get("episode")
         if type(seq) is not int or seq < 0 or type(episode) is not int or episode < 0:
             raise ValueError("Invalid transition index")
@@ -183,6 +224,7 @@ class OnlineService:
             "terminated": message["terminated"],
             "truncated": message["truncated"],
             "human": message["human"],
+            "quality": message.get("quality", "unreviewed"),
         }
         try:
             metrics = self.learner.observe(record)
@@ -199,8 +241,13 @@ class OnlineService:
                 json.dumps(
                     {
                         "sequence": seq,
+                        "session": self.session,
                         "episode": episode,
                         "human": message["human"],
+                        "quality": message.get("quality", "unreviewed"),
+                        "policy_source": message.get(
+                            "policy_source", "human" if message["human"] else "unknown"
+                        ),
                         "behavior_version": policy_version,
                         "reward": reward,
                         "terminated": message["terminated"],

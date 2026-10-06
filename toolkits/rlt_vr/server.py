@@ -21,6 +21,7 @@ import hmac
 import logging
 import os
 import socketserver
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -119,6 +120,33 @@ class _Handler(socketserver.BaseRequestHandler):
                 )
             except (OSError, ValueError):
                 pass
+
+
+class ConcurrentInferenceServer(socketserver.ThreadingMixIn, InferenceServer):
+    """Bound frontend connections while one dispatch worker owns GPU state."""
+
+    daemon_threads = True
+    request_queue_size = 8
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(8)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 class RLTInference:

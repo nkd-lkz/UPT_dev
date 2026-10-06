@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 from pathlib import Path
 
 from .gpu_guard import isolate_gpu2, verify_cuda
@@ -30,11 +31,12 @@ def main() -> None:
     import torch
     from omegaconf import OmegaConf
 
+    from .async_service import AsyncOnlineService
     from .online_learner import OnlineLearner
-    from .online_service import OnlineService, frozen_feature_identity
+    from .online_service import ONLINE_PROTOCOL, OnlineService, frozen_feature_identity
     from .online_transport import encode_observation
     from .protocol import request
-    from .server import InferenceServer, RLTInference
+    from .server import ConcurrentInferenceServer, RLTInference
     from .simulation import LocalSimulation
 
     args.output.mkdir(parents=True, exist_ok=False)
@@ -61,9 +63,11 @@ def main() -> None:
     modes = set()
     episode = 0
     duplicate_verified = False
+    transport = None
     try:
-        with InferenceServer(
-            ("127.0.0.1", 0), token, model, "smoke", dispatch=service
+        transport = AsyncOnlineService(service)
+        with ConcurrentInferenceServer(
+            ("127.0.0.1", 0), token, model, "smoke", dispatch=transport
         ) as server:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -79,7 +83,7 @@ def main() -> None:
                 )
 
             try:
-                rpc({"op": "begin"})
+                rpc({"op": "begin", "online_protocol": ONLINE_PROTOCOL})
                 obs = env.observation()
                 for step in range(args.steps):
                     response = rpc({"op": "predict", **encode_observation(obs)})
@@ -105,6 +109,11 @@ def main() -> None:
                         "terminated": terminated,
                         "truncated": truncated,
                         "human": human,
+                        # Explicit scripted labels for this engineering test only.
+                        "quality": "approved" if human else "policy",
+                        "policy_source": "human"
+                        if human
+                        else response["policy_source"],
                         "policy_version": -1
                         if human
                         else response["metrics"]["policy_version"],
@@ -114,9 +123,19 @@ def main() -> None:
                         duplicate = rpc(payload)
                         assert (
                             duplicate["duplicate"]
-                            and duplicate["metrics"]["accepted"] == step + 1
+                            and duplicate["received_sequence"] == step
                         )
                         duplicate_verified = True
+                    deadline = time.monotonic() + 60
+                    while (
+                        ack["metrics"]["accepted"] < step + 1 or ack["pending_learning"]
+                    ):
+                        if ack["faulted"] or time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "Durable receipt was not processed within smoke budget"
+                            )
+                        time.sleep(0.05)
+                        ack = rpc({"op": "status"})
                     logging.info(
                         "step=%d human=%s status=%s", step, human, ack["metrics"]
                     )
@@ -127,7 +146,7 @@ def main() -> None:
             finally:
                 server.shutdown()
                 thread.join(timeout=10)
-        service.checkpoint()
+        transport.close()
         restored = OnlineLearner(config, "cuda:0")
         metadata = restored.load(args.output / "learner.pt")
         for key, value in learner.model.state_dict().items():
@@ -167,6 +186,7 @@ def main() -> None:
             "episodes_ended": episode,
             "scripted_intervention_only": True,
             "physical_pico_tested": False,
+            "online_protocol": ONLINE_PROTOCOL,
             "duplicate_verified": duplicate_verified,
             "resume_verified": True,
             "resumed_optimizer_update": resumed_update,
@@ -179,6 +199,8 @@ def main() -> None:
         logging.info("PASS: %s", result)
     finally:
         env.close()
+        if transport is not None:
+            transport.close()
 
 
 if __name__ == "__main__":

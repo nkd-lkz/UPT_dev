@@ -80,15 +80,31 @@ class OperatorControl:
         self.gate = ActionGate()
         self.finished = False
         self.require_release = False
+        self.pause_reason = "startup"
+        self.pause_detail = "P=policy; hold grip=human"
 
-    def pause(self) -> None:
+    def pause(self, reason: str = "operator", detail: str = "") -> None:
         """Latch a fault until the operator releases the clutch."""
+        if self.finished:
+            return
         self.gate.change("paused")
         self.require_release = True
+        self.pause_reason, self.pause_detail = reason, detail
 
-    def finish(self) -> None:
+    @property
+    def instruction(self) -> str:
+        """Describe the latched cause and the action needed to recover."""
+        if self.finished:
+            return f"episode_ended: {self.pause_detail}; R resets"
+        if self.require_release:
+            return f"{self.pause_reason}: {self.pause_detail}; release grip, then re-grip/P"
+        if self.gate.mode == "paused":
+            return f"paused ({self.pause_reason}); P=policy; hold grip=human"
+        return f"{self.gate.mode}: release grip=paused; Space=pause"
+
+    def finish(self, detail: str = "task terminal or time limit") -> None:
         """Prevent all stepping until an explicit episode reset."""
-        self.pause()
+        self.pause("episode_ended", detail)
         self.finished = True
 
     def reset(self) -> None:
@@ -96,13 +112,18 @@ class OperatorControl:
         self.gate.reset()
         self.finished = False
         self.require_release = True
+        self.pause_reason, self.pause_detail = "reset", "fresh episode"
 
     def update(
         self, *, valid: bool, clutch: bool, command: str = "", stalled: bool = False
     ) -> str:
         """Apply local intent before considering any network result."""
-        if not valid or stalled or command == "pause":
-            self.pause()
+        if not valid:
+            self.pause("tracking_invalid", "check SteamVR tracking/input focus")
+        elif stalled:
+            self.pause("ui_stall", "input/render watchdog")
+        elif command == "pause":
+            self.pause("operator", "Space pressed")
         elif self.finished:
             self.gate.change("paused")
         elif self.require_release:
@@ -112,9 +133,93 @@ class OperatorControl:
             self.gate.change("human")
         elif self.gate.mode == "human":
             self.gate.change("paused")
+            self.pause_reason = "grip_released"
         elif command == "policy":
             self.gate.change("policy")
         return self.gate.mode
+
+
+class TargetFilter:
+    """Smooth and rate-limit Cartesian targets at the unchanged control rate."""
+
+    def __init__(
+        self,
+        pose: np.ndarray,
+        speed: float = 0.12,
+        angular_speed: float = 0.8,
+        time_constant: float = 0.12,
+    ) -> None:
+        if not all(
+            np.isfinite(x) and x > 0 for x in (speed, angular_speed, time_constant)
+        ):
+            raise ValueError("Target filter limits must be positive and finite")
+        if pose.shape != (4, 4) or not np.isfinite(pose).all():
+            raise ValueError("Expected a finite 4x4 anchor pose")
+        self.pose = pose.copy()
+        self.speed, self.angular_speed, self.time_constant = (
+            speed,
+            angular_speed,
+            time_constant,
+        )
+
+    def update(self, target: np.ndarray, dt: float = 0.1) -> np.ndarray:
+        """Advance one simulation control interval, never a network-wait interval."""
+        from scipy.spatial.transform import Rotation
+
+        if (
+            target.shape != (4, 4)
+            or not np.isfinite(target).all()
+            or not np.isfinite(dt)
+            or dt <= 0
+        ):
+            raise ValueError("Invalid target or control interval")
+        alpha = 1 - np.exp(-dt / self.time_constant)
+        delta = alpha * (target[:3, 3] - self.pose[:3, 3])
+        delta *= min(1.0, self.speed * dt / max(np.linalg.norm(delta), 1e-9))
+        rotation = (
+            alpha
+            * Rotation.from_matrix(target[:3, :3] @ self.pose[:3, :3].T).as_rotvec()
+        )
+        rotation *= min(
+            1.0, self.angular_speed * dt / max(np.linalg.norm(rotation), 1e-9)
+        )
+        self.pose[:3, 3] += delta
+        self.pose[:3, :3] = (
+            Rotation.from_rotvec(rotation).as_matrix() @ self.pose[:3, :3]
+        )
+        return self.pose.copy()
+
+
+def bounded_joint_delta(
+    delta: np.ndarray,
+    qpos: np.ndarray,
+    limits: np.ndarray,
+    previous: np.ndarray,
+    dt: float = 0.1,
+) -> tuple[np.ndarray, bool]:
+    """Bound commanded joint speed, acceleration and joint-limit approach.
+
+    Hard joint limits take priority over acceleration smoothing. The result is a
+    position increment in radians, not a guarantee on measured joint velocity.
+    """
+    if (
+        delta.shape != (7,)
+        or qpos.shape != (7,)
+        or previous.shape != (7,)
+        or limits.shape != (7, 2)
+        or not np.isfinite(dt)
+        or dt <= 0
+        or not all(np.isfinite(x).all() for x in (delta, qpos, limits, previous))
+        or np.any(limits[:, 0] >= limits[:, 1])
+    ):
+        raise ValueError("Nonfinite joint input")
+    candidate = delta * min(1.0, 0.25 * dt / max(np.max(np.abs(delta)), 1e-9))
+    candidate = np.clip(candidate, previous - dt * dt, previous + dt * dt)
+    # Outside the soft band, allow motion back inward but never force a jump.
+    lower = np.minimum(limits[:, 0] + 0.02 - qpos, 0.0)
+    upper = np.maximum(limits[:, 1] - 0.02 - qpos, 0.0)
+    result = np.clip(candidate, lower, upper)
+    return result, bool(np.any(np.abs(result - candidate) > 1e-8))
 
 
 @dataclass(frozen=True)

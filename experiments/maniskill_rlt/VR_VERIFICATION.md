@@ -2,6 +2,31 @@
 
 This record separates server-side evidence from Windows/PICO hardware acceptance. 本记录区分服务器侧软件验证与 Windows/PICO 实机验收，不能把前者当作后者。
 
+## Engineering Repair — 2026-10-06 / 控制与采集链路修复
+
+Protocol 2 decouples durable admission from the single model-owner thread, bounds the local outbox/server inbox and retains raw journals. Pause reasons survive recovery, Cartesian targets are smoothed/rate-limited, joint commands respect soft limits, and human BC requires explicit fragment approval. Both guides describe the upgrade, controls and recovery: [English](VR_ONLINE.md) / [中文](VR_ONLINE.zh-CN.md).
+
+协议 2 将持久化接收确认与模型处理分开，本地 outbox 和服务端 inbox 均有显式上限，保留原始记录。控制增加持续暂停原因、目标平滑和速度限制、关节软限位，人工 BC 必须明确批准片段。新旧协议及 schema-1/schema-2 checkpoint 不混用，首次验收从新 run 开始。原服务器进程与 GPU 0/1 训练未被停止或替换。
+
+| Check / 检查 | Result / 结果 |
+|---|---|
+| Focused CPU regression / 定向 CPU 回归 | **47 passed, 2 optional hardware tests skipped**, 7.77 s; no GPU allocation / 不分配 GPU |
+| Actual client loop / 真实客户端主循环 | Fake external VR/display/simulation devices; tracking/outbox fault → visible latch → release → Y/N review → re-anchor; no stepping during latch / 仅外部设备使用 fake，覆盖锁存恢复和审核 |
+| Actual TCP and learner / 真实 TCP 与 learner | Receipt and health return while extraction is blocked; ordered disk outbox, quotas, duplicate/conflicting retries, worker fault and durable replay recovery / 提特征阻塞时仍可确认与查询，验证有界队列、去重和恢复 |
+| Quality and control chain / 质量与切换链 | Unapproved/rejected human data excluded from BC; synthetic features exercise reference → approved correction → update/publication → actor-labelled execution → human again / 合成特征验证流程，非实机效果 |
+| Actual Panda URDF / 真实 Panda 运动学 | 60 smoothed/bounded IK iterations reach a nearby 3-D target within 0.5 mm in forward kinematics / FK 误差低于 0.5 mm，不含物理接触 |
+| Pilot path/config preflight / pilot 预检 | Passed with Stage 1 step 2000, no CUDA/RPC execution / 只验证路径和配置 |
+| Shared NAS persistence / 共享 NAS 落盘 | 2 tests passed in 24.32 s: disk-outbox ingestion and acknowledged-receipt recovery after a worker fault; artifacts in NAS `runs/vr_online/protocol2_cpu_check.qjRIaUsE` / 使用真实 CIFS 挂载验证 fsync、替换与恢复，不是吞吐基准 |
+| Static/docs / 静态与文档 | Ruff lint/format and whitespace checks; both Sphinx trees: 0 build warnings; scoped guide markup/symbol checks pass / 两种语言构建无警告，指南按代码人工交叉核对 |
+| CPU-render integration attempt / CPU 渲染集成尝试 | **Failed** before IK: SAPIEN could not create a supported physical device named `cpu`, including an explicit lavapipe/loader retry / 本机 CPU 渲染未通过，未改用占用中的 GPU |
+| New GPU/Windows acceptance / 新版 GPU 与 Windows 验收 | **Not run**; GPU 2 still serves the old VR process, and physical PICO/Windows GUI is not accessible here / 仍待两端升级后现场验收 |
+
+The 47-pass command disables optional hardware tests. The separately attempted renderer check failed; it is not hidden by that pass count. This does not establish Windows smoothness or task-success improvement. Synchronous local fsync/IK/render can still stall the UI, and arrivals above processing throughput eventually trigger bounded backpressure. Unacknowledged Windows records are retained, but automatic local-outbox restart/reconciliation is not implemented. Server recovery requires all ancestor inbox directories named by its checkpoint.
+
+47 项通过来自禁用硬件测试的 CPU 回归；另行尝试的渲染检查确实失败，不计作通过。本次不能宣称 Windows 已流畅、正式 Stage 2 已打通或成功率提高。本地同步落盘、IK、渲染仍可能拖慢 UI；持续采集快于服务端处理时仍会按配额反压。未确认上传的 Windows 记录会保留，但没有自动重启本地 outbox 的功能；服务端恢复依赖 checkpoint 引用的所有历史 inbox 目录。
+
+The following sections preserve historical evidence for earlier revisions. 以下保留旧版本记录，不能替代本次协议 2 的硬件验收。
+
 ## Continuation — 2026-09-30 / 较长人工验收入口
 
 `run_rlt_vr_hil_pilot.sh check` passed with Stage 1 step 2000, without CUDA allocation. CPU RPC/learner/control regression: **34 passed, 2 optional hardware skips**. Added update-budget reporting, publication imitation gate, resumed gate/metrics state, shared GPU-2 lease, per-run takeover summary and pre-allocation configuration validation. This does not add production ten-step/multi-environment integration. No new full VLA GPU smoke or physical PICO acceptance was run in this continuation.

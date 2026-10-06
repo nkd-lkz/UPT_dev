@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from .control import bounded_joint_delta
 from .protocol import ENV_ID
 
 DEFAULT_RENDER_BACKEND = "cpu" if sys.platform == "win32" else "gpu"
@@ -121,6 +122,8 @@ class LocalSimulation:
                 self.env.unwrapped.agent.urdf_path,
                 self.env.unwrapped.agent.ee_link_name,
             )
+            self.previous_delta = np.zeros(7)
+            self.teleop_diagnostics: dict[str, float | bool] = {}
             arm = self.env.unwrapped.agent.controller.controllers["arm"]
             if arm.config.lower != -0.1 or arm.config.upper != 0.1:
                 raise ValueError("Expected baseline Panda joint delta bounds +/-0.1")
@@ -154,9 +157,28 @@ class LocalSimulation:
         delta_qpos = self.ik.joint_delta(qpos, base_target.to_transformation_matrix())
         if delta_qpos is None:
             return None
-        # Bound teleop to 0.025 rad/control step, below the controller's limit.
-        delta = np.clip(delta_qpos / 0.1, -0.25, 0.25)
-        return np.r_[delta, np.clip(gripper, -1, 1)].astype(np.float32)
+        limits = self._array(self.robot.get_qlimits())[0, :7]
+        delta, limited = bounded_joint_delta(
+            delta_qpos, qpos[:7], limits, self.previous_delta
+        )
+        self.previous_delta = delta.copy()
+        from scipy.spatial.transform import Rotation
+
+        current = self.tcp_matrix()
+        self.teleop_diagnostics = {
+            "position_error_m": float(np.linalg.norm(target[:3, 3] - current[:3, 3])),
+            "rotation_error_rad": float(
+                Rotation.from_matrix(target[:3, :3] @ current[:3, :3].T).magnitude()
+            ),
+            "joint_limit": limited,
+            "command_max_rad": float(np.max(np.abs(delta))),
+        }
+        return np.r_[delta / 0.1, np.clip(gripper, -1, 1)].astype(np.float32)
+
+    def reset_teleop(self) -> None:
+        """Clear command smoothing when control is re-anchored."""
+        self.previous_delta[:] = 0
+        self.teleop_diagnostics = {}
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool]:
         """Execute exactly one 100 ms control step; never auto-reset."""

@@ -21,6 +21,8 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--port", default=8775, type=int)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--max-pending", type=int, default=128)
+    parser.add_argument("--journal-limit-gib", type=float, default=4)
     parser.add_argument(
         "--check",
         action="store_true",
@@ -30,6 +32,8 @@ def main() -> None:
         "--config", type=Path, default=Path(__file__).with_name("online_smoke.yaml")
     )
     args = parser.parse_args()
+    if not 1 <= args.max_pending <= 512 or not 0.1 <= args.journal_limit_gib <= 32:
+        parser.error("Invalid durable inbox quota")
     logging.basicConfig(level=logging.INFO)
     weights = args.stage1 / "model_state_dict/full_weights.pt"
     stats = args.dataset / "norm_stats.json"
@@ -68,16 +72,27 @@ def serve(args: argparse.Namespace, config: dict, token: str) -> None:
     gpu = isolate_gpu2()
     verify_cuda(gpu["uuid"])
 
+    from .async_service import AsyncOnlineService
     from .online_learner import OnlineLearner
-    from .online_service import OnlineService, frozen_feature_identity
-    from .server import InferenceServer, RLTInference
+    from .online_service import ONLINE_PROTOCOL, OnlineService, frozen_feature_identity
+    from .server import ConcurrentInferenceServer, RLTInference
 
     # File identity and content hash of stats prevent accidentally mixing feature
     # spaces. Checkpoint files are immutable exports; never overwrite them.
     feature_id = frozen_feature_identity(args.stage1, args.dataset)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "config.json").write_text(
-        json.dumps({"learner": config, "gpu": gpu, "feature_id": feature_id}, indent=2)
+        json.dumps(
+            {
+                "learner": config,
+                "gpu": gpu,
+                "feature_id": feature_id,
+                "online_protocol": ONLINE_PROTOCOL,
+                "max_pending_learning": args.max_pending,
+                "journal_limit_gib": args.journal_limit_gib,
+            },
+            indent=2,
+        )
     )
     model = RLTInference(
         Path(__file__).with_name("model.yaml"), args.stage1, args.dataset, None
@@ -85,26 +100,31 @@ def serve(args: argparse.Namespace, config: dict, token: str) -> None:
     model.feature.requires_grad_(False)
     learner = OnlineLearner(config, device="cuda:0")
     service = OnlineService(learner, model.extract, args.output, feature_id)
+    metadata = None
     if args.resume:
-        service.restore(learner.load(args.resume))
-        # A resumed server starts a fresh client session/episode. Replay and
-        # optimizer state persist; old unacknowledged packets must not be reused.
-        service.session, service.sequence, service.episode = None, -1, -1
-    with InferenceServer(
-        ("127.0.0.1", args.port), token, model, "online", dispatch=service
-    ) as server:
-        logging.info(
-            "Online learner ready: GPU2=%s port=%d horizon=1", gpu["uuid"], args.port
-        )
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            if not service.faulted:
-                service.checkpoint()
-            else:
-                logging.error("Learner faulted; last good checkpoint retained")
+        metadata = learner.load(args.resume)
+        service.restore(metadata)
+    transport = AsyncOnlineService(
+        service,
+        restored=metadata,
+        max_pending=args.max_pending,
+        max_journal_bytes=int(args.journal_limit_gib * 1024**3),
+    )
+    try:
+        with ConcurrentInferenceServer(
+            ("127.0.0.1", args.port), token, model, "online", dispatch=transport
+        ) as server:
+            logging.info(
+                "Online learner ready: GPU2=%s port=%d horizon=1",
+                gpu["uuid"],
+                args.port,
+            )
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        transport.close()
 
 
 if __name__ == "__main__":
