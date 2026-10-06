@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-06",
+  "branch": "research/rlt-libero-reproduction",
+  "base_commit": "29f078c8",
+  "variant": "AlphaBrain QwenOFT RLT_a; not RLinf pi0.5 RLT",
+  "source_revision": "604924beb77b04b0da49326dfae6ea423a27d28a",
+  "artifact_root": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_reproduction_20261006",
+  "release_evaluation": {
+    "directory": "release_smoke_v2",
+    "complete": true,
+    "exit_code": 0,
+    "task_suite": "libero_goal",
+    "task_ids": [0],
+    "initial_state_ids": [0, 1],
+    "seed": 42,
+    "reference_successes": 2,
+    "rlt_a_successes": 2,
+    "episodes_per_arm": 2,
+    "video_files": 4,
+    "human_or_planner_assistance": false,
+    "physical_gpu": 2,
+    "egl_device_index": 0,
+    "gpu_uuid": "GPU-4662787b-485a-0e8f-e4b2-dd47352ed69c"
+  },
+  "runtime": {
+    "torch": "2.11.0+cu128",
+    "transformers": "4.57.6",
+    "rlinf-libero": "0.1.3",
+    "robosuite": "1.4.1",
+    "mujoco": "3.8.1",
+    "numpy": "1.26.4",
+    "extra_qwen_vl_utils": "0.0.14"
+  },
+  "release_evaluation_20": {
+    "directory": "eval20_20261006_173918",
+    "complete": true,
+    "episodes_per_arm": 20,
+    "reference_successes": 13,
+    "rlt_a_successes": 11,
+    "both_successes": 11,
+    "reference_only_successes": 2,
+    "rlt_a_only_successes": 0,
+    "both_failures": 7,
+    "interpretation": "No observed public-learner advantage in these 20 paired cases; not the full benchmark."
+  },
+  "training_runtime": {
+    "local_commit": "f1d27bd06597a15ec1104133fe7f13848a5b2849",
+    "source_tree": "1acfcd5ff4e54d0648715ea4387b500d1ee0e85f",
+    "patch": "patches/0001-fix-libero-propagate-rollout-faults-and-respect-expl.patch",
+    "evaluation_source_unchanged": true,
+    "gpu_training_acceptance": "pending overnight run; consult its manifest"
+  },
+  "validation": {
+    "cpu_protocol_tests": 15,
+    "queue_tests": 3,
+    "released_encoder_actor_strict_load": true,
+    "finite_cpu_forward": true,
+    "english_documentation_build_warnings": 0,
+    "chinese_documentation_build_warnings": 0
+  },
+  "integration_fixes": [
+    "Keep Python and native diagnostics out of the binary worker protocol.",
+    "Widen reference bfloat16 actions without changing values before NumPy conversion.",
+    "Resolve CUDA and EGL through the same UUID, not their different enumeration indices."
+  ],
+  "failed_attempt": {
+    "directory": "release_smoke_v1",
+    "complete": false,
+    "reason": "Stopped owned test after detecting that EGL index 2 rendered on physical GPU 0. No baseline processes were stopped."
+  },
+  "not_validated": [
+    "Full 10-task by 50-state released benchmark success rate.",
+    "A gain over the frozen VLA; the public learner trailed in the 20 paired cases.",
+    "Fresh online training, its convergence, or a multi-training-seed result.",
+    "Paper-faithful full-token RLT or RoboTwin reproduction."
+  ]
+}

@@ -15,6 +15,8 @@
      - 在不同格式之间转换 checkpoint。
    * - :doc:`恢复训练 <../resume>`
      - Checkpoint 频率与断点续训。
+   * - :doc:`LIBERO RLT 公开模型验证 <../libero_rlt_reproduction>`
+     - 区分配对模型复评、训练验证与原论文复现。
 
 .. toctree::
    :hidden:
@@ -22,3 +24,4 @@
    数据采集 <../data_collection>
    Checkpoint 转换 <../convertor>
    恢复训练 <../resume>
+   LIBERO RLT 公开模型验证 <../libero_rlt_reproduction>

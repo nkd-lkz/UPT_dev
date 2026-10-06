@@ -16,6 +16,8 @@ resume a stopped run.
      - Convert checkpoints between formats.
    * - :doc:`Resume Training <../resume>`
      - Checkpoint cadence and resuming a run.
+   * - :doc:`Published LIBERO RLT Evaluation <../libero_rlt_reproduction>`
+     - Separate paired release evaluation, training checks and paper reproduction.
 
 .. toctree::
    :hidden:
@@ -23,3 +25,4 @@ resume a stopped run.
    Data Collection <../data_collection>
    Checkpoint Conversion <../convertor>
    Resume Training <../resume>
+   Published LIBERO RLT Evaluation <../libero_rlt_reproduction>

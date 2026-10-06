@@ -1,0 +1,142 @@
+From f1d27bd06597a15ec1104133fe7f13848a5b2849 Mon Sep 17 00:00:00 2001
+From: Luokz <nkd-lkz@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 18:07:08 +0800
+Subject: [PATCH] fix(libero): propagate rollout faults and respect explicit
+ EGL mapping
+
+Signed-off-by: Luokz <nkd-lkz@users.noreply.github.com>
+---
+ .../algos/RLT_a/action_token_rollout_fast.py  | 21 ++++------------
+ .../trainers/train_rl_offpolicy.py            | 25 +++++++++++++++++--
+ 2 files changed, 28 insertions(+), 18 deletions(-)
+
+diff --git a/AlphaBrain/training/reinforcement_learning/algos/RLT_a/action_token_rollout_fast.py b/AlphaBrain/training/reinforcement_learning/algos/RLT_a/action_token_rollout_fast.py
+index 6cfc592..6b149da 100644
+--- a/AlphaBrain/training/reinforcement_learning/algos/RLT_a/action_token_rollout_fast.py
++++ b/AlphaBrain/training/reinforcement_learning/algos/RLT_a/action_token_rollout_fast.py
+@@ -70,32 +70,21 @@ def _env_step_chunk(env_pool, env_idx, action_chunk_unnorm, chunk_len, record_fr
+     try:
+         obs, reward, done, steps_taken = env_pool.envs[env_idx].step_chunk(actions)
+     except RuntimeError as e:
+-        print(f"  [WARNING] env {env_idx} step_chunk failed: {e}, marking as done", flush=True)
+-        # Return a fake "failed" result — episode will be marked as failure
+-        obs = {"primary_image": np.zeros((256,256,3), dtype=np.uint8),
+-               "wrist_image": np.zeros((256,256,3), dtype=np.uint8),
+-               "state": np.zeros(8, dtype=np.float32)}
+-        return obs, 0.0, True, 0, []
++        raise RuntimeError(f"env {env_idx} step_chunk failed; trajectory rejected") from e
+     return obs, reward, done, steps_taken, []
+ 
+ 
+ def _env_dummy_steps(env_pool, env_idx, n_steps):
+     """Execute dummy actions (warmup). Returns final obs.
+ 
+-    On worker hang/crash, returns a zero-obs placeholder instead of raising —
+-    matches `_env_step_chunk`'s recovery so a single env's failure doesn't
+-    kill the entire rollout thread (the affected episode just becomes a
+-    silent failure for this iter; auto-reset will recover the env next iter).
++    Worker failures abort collection so reset discontinuities cannot enter replay.
+     """
+     obs = None
+     for _ in range(n_steps):
+         try:
+             obs, _, _ = env_pool.step_env(env_idx, DUMMY_ACTION)
+         except RuntimeError as e:
+-            print(f"  [WARNING] env {env_idx} dummy step failed: {e}", flush=True)
+-            return {"primary_image": np.zeros((256, 256, 3), dtype=np.uint8),
+-                    "wrist_image": np.zeros((256, 256, 3), dtype=np.uint8),
+-                    "state": np.zeros(8, dtype=np.float32)}
++            raise RuntimeError(f"env {env_idx} dummy step failed; trajectory rejected") from e
+     return obs
+ 
+ 
+@@ -238,7 +227,7 @@ def action_token_collect_group_steplock(
+         _t_encoder_actor += _t1 - _t0
+ 
+         # Convert to numpy
+-        actions_np = actions_t.cpu().numpy()  # (N_active, exec_chunk_len, action_dim)
++        actions_np = actions_t.float().cpu().numpy()  # bfloat16 cannot convert directly
+         vla_actions_cpu = vla_actions_for_actor.cpu()
+ 
+         # ── Store step records ──
+@@ -457,7 +446,7 @@ def action_token_collect_multitask_steplock(
+             values = critic(rl_tokens)
+         _t_vla += time.time() - _t0
+ 
+-        actions_np = actions_t.cpu().numpy()
++        actions_np = actions_t.float().cpu().numpy()
+         vla_actions_cpu = vla_actions_for_actor.cpu()
+ 
+         # Store records
+diff --git a/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py b/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
+index cab0a2c..3976013 100644
+--- a/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
++++ b/AlphaBrain/training/reinforcement_learning/trainers/train_rl_offpolicy.py
+@@ -265,7 +265,13 @@ def run_rl_offpolicy(args):
+         envs_per_gpu = args.num_envs_per_task * max_tasks_per_gpu
+         # Map logical GPU ID → physical GPU ID for MuJoCo EGL rendering
+         cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+-        physical_gpus = [int(x) for x in cuda_devices.split(",") if x.strip()] if cuda_devices else list(range(8))
++        explicit_egl = os.environ.get("RLT_LIBERO_EGL_DEVICE_ID")
++        if explicit_egl is not None:
++            if len(rollout_gpu_ids) != 1:
++                raise ValueError("Explicit EGL mapping requires one rollout GPU")
++            physical_gpus = [int(explicit_egl)]
++        else:
++            physical_gpus = [int(x) for x in cuda_devices.split(",") if x.strip()] if cuda_devices else list(range(8))
+         for gpu_id in rollout_gpu_ids:
+             physical_gpu = physical_gpus[gpu_id] if gpu_id < len(physical_gpus) else gpu_id
+             pool = PersistentEnvPool(
+@@ -612,6 +618,7 @@ def run_rl_offpolicy(args):
+                 for pass_idx in range(n_passes):
+                     gpu_results = {}
+                     gpu_threads = []
++                    gpu_errors = []
+ 
+                     def _run_gpu(gpu_id, task_list, pass_idx=pass_idx):
+                         r_enc, r_actor, r_critic = rollout_modules[gpu_id]
+@@ -654,12 +661,20 @@ def run_rl_offpolicy(args):
+                             )
+                         gpu_results[gpu_id] = (task_list, eps)
+ 
++                    def _run_gpu_checked(gpu_id, task_list):
++                        try:
++                            _run_gpu(gpu_id, task_list)
++                        except Exception as error:
++                            gpu_errors.append(error)
++
+                     for gpu_id, task_list in gpu_task_assignments.items():
+-                        t = threading.Thread(target=_run_gpu, args=(gpu_id, task_list))
++                        t = threading.Thread(target=_run_gpu_checked, args=(gpu_id, task_list))
+                         t.start()
+                         gpu_threads.append(t)
+                     for t in gpu_threads:
+                         t.join()
++                    if gpu_errors:
++                        raise RuntimeError("LIBERO rollout worker failed") from gpu_errors[0]
+ 
+                     for gpu_id, (tid_list, eps) in gpu_results.items():
+                         all_eps.extend(eps)
+@@ -711,6 +726,8 @@ def run_rl_offpolicy(args):
+                     f"t{tid}={np.mean(v):.0%}" for tid, v in sorted(per_task_sr.items()))
+                 logger.info(f"  [rollout iter {it}] Per-task SR: {task_sr_str}")
+ 
++            if not all_eps or any(ep.env_steps <= 0 for ep in all_eps):
++                raise RuntimeError("Rollout contained empty or zero-interaction episodes")
+             with buffer_lock:
+                 n_pushed = push_episodes_to_buffer(
+                     all_eps, replay_buffer, gamma_per_step=args.gamma)
+@@ -1005,6 +1022,10 @@ def run_rl_offpolicy(args):
+             if per_task_eval_sr:
+                 log_entry["per_task_eval_sr"] = per_task_eval_sr
+             metrics_history.append(log_entry)
++            metrics_path = Path(args.output_dir) / "metrics.json"
++            metrics_tmp = metrics_path.with_suffix(".json.tmp")
++            metrics_tmp.write_text(json.dumps(metrics_history, indent=2) + "\n")
++            metrics_tmp.replace(metrics_path)
+ 
+             if args.use_wandb:
+                 wandb_log = {
+-- 
+2.34.1
+
