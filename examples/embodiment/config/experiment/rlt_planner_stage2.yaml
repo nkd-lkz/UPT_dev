@@ -1,0 +1,36 @@
+# @package _global_
+# Weights-only warm start; fresh replay/optimizer, not the 64-env baseline resume.
+defaults:
+  - rlt_planner_pilot
+  - _self_
+
+cluster:
+  component_placement:
+    actor: 0-0
+    rollout: 1-1
+    env: 1-1
+runner:
+  max_epochs: 400
+  max_steps: 400
+  val_check_interval: 50
+  save_interval: 100
+  ckpt_path: ${oc.env:RLT_PLANNER_INITIAL_WEIGHTS}
+  resume_dir: null
+  logger:
+    backend_log_path: ${oc.env:RLT_PLANNER_METRICS}
+    project_name: rlinf-rlt
+    wandb_entity: ${oc.env:WANDB_ENTITY}
+    logger_backends: [tensorboard, wandb]
+algorithm:
+  rlt_schedule:
+    warmup_min_size: 256
+    warmup_post_collect_updates: 4096
+    max_updates_per_train_step: 128
+  replay_buffer:
+    min_buffer_size: 256
+    max_num_samples: 10000
+    sample_window_size: 10000
+    cache_size: 2000
+  actor_weight_schedule:
+    warmup_updates: 4096
+    ramp_updates: 4096

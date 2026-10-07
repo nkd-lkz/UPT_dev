@@ -67,11 +67,13 @@ class MetricLogger:
         logger_cfg = cfg.runner.logger
 
         self.log_path = logger_cfg.get("log_path", "logs")
+        # Keep frequent backend writes off a remote checkpoint filesystem.
+        self.backend_log_path = logger_cfg.get("backend_log_path", self.log_path)
         self.project_name = logger_cfg.get("project_name", "rlinf")
         self.experiment_name = logger_cfg.get("experiment_name", "default")
         self.per_worker_log = bool(cfg.runner.get("per_worker_log", False))
         self.per_worker_log_root = cfg.runner.get(
-            "per_worker_log_path", os.path.join(self.log_path, "worker_logs")
+            "per_worker_log_path", os.path.join(self.backend_log_path, "worker_logs")
         )
 
         logger_backends = logger_cfg.get("logger_backends", ["tensorboard"])
@@ -94,7 +96,7 @@ class MetricLogger:
         self._all_loggers = []
         self._worker_loggers: dict[tuple[str, int], dict] = {}
         self.logger = self._create_logger_bundle(
-            log_path=self.log_path,
+            log_path=self.backend_log_path,
             experiment_name=self.experiment_name,
             log_path_suffix="all" if self.per_worker_log else "",
         )

@@ -27,6 +27,9 @@ class RecoveryConfig:
     min_progress: float = 0.003
     max_attempts: int = 1
     max_planner_ticks: int = 300
+    protocol: str = "complete"
+    handoff_min_x: float = -0.16
+    handoff_max_yz: float = 0.045
 
     def __post_init__(self) -> None:
         if (
@@ -37,9 +40,18 @@ class RecoveryConfig:
                 self.max_planner_ticks,
             )
             <= 0
+            or not np.isfinite(self.min_progress)
             or self.min_progress <= 0
         ):
             raise ValueError("Recovery budgets and progress threshold must be positive")
+        if self.protocol not in {"complete", "preinsert_handoff"}:
+            raise ValueError("Unknown planner protocol")
+        if (
+            not np.isfinite([self.handoff_min_x, self.handoff_max_yz]).all()
+            or self.handoff_min_x >= 0
+            or self.handoff_max_yz <= 0
+        ):
+            raise ValueError("Handoff requires finite pre-insertion bounds")
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,42 @@ class RecoveryTrigger:
 
 class RecoveryFailure(RuntimeError):
     """A recovery recipe cannot continue within its declared contract."""
+
+
+def handoff_ready(evidence: PegEvidence, config: RecoveryConfig) -> bool:
+    """Check the declared held-near-hole fixture, not a collision certificate."""
+    return bool(
+        evidence.grasped
+        and not evidence.success
+        and evidence.recoverable
+        and evidence.hole_x >= config.handoff_min_x
+        and evidence.hole_yz <= config.handoff_max_yz
+    )
+
+
+def prepare_insertion_fixture(env, config: RecoveryConfig | None = None) -> dict:
+    """Execute a planner prefix after reset and fail closed on invalid fixtures.
+
+    The caller owns reset. Prefix ticks consume the ordinary episode horizon;
+    no simulated state or clock is rewound. Never use this as full-task eval.
+    """
+    config = config or RecoveryConfig(protocol="preinsert_handoff")
+    if config.protocol != "preinsert_handoff":
+        raise ValueError("Insertion fixtures require preinsert_handoff")
+    recovery = PegRecovery(env, config)
+    ticks = 0
+    try:
+        for action in recovery.actions():
+            _, _, terminated, truncated, _ = env.step(action)
+            ticks += 1
+            if bool(terminated[0]) or bool(truncated[0]):
+                raise RecoveryFailure("fixture_ended_before_handoff")
+        e = read_peg_evidence(env)
+        if not handoff_ready(e, config):
+            raise RecoveryFailure("fixture_not_held_near_hole")
+        return {"prefix_ticks": ticks, "hole_x": e.hole_x, "hole_yz": e.hole_yz}
+    finally:
+        recovery.close()
 
 
 def joint_target_to_delta(
@@ -261,6 +309,11 @@ class PegRecovery:
                 * env.agent.tcp.pose.sp
             )
             yield from self._move(pose, require_grasp=True)
+        if self.config.protocol == "preinsert_handoff":
+            if not handoff_ready(read_peg_evidence(env), self.config):
+                raise RecoveryFailure("handoff_not_held_near_hole")
+            self.stage = "handoff"
+            return
         self.stage = "insert"
         pose = (
             env.goal_pose.sp
@@ -286,9 +339,16 @@ class PlannerAssistance:
         self.executed_ticks = 0
         self.reason = "none"
         self.failure = "none"
+        self.handoffs = 0
+        self.handoff_holds = 0
+        self._hold_until_boundary = False
 
     def begin_chunk(self, *, critical_phase: bool) -> None:
         """Check past progress only when no recovery is already in progress."""
+        if self._hold_until_boundary:
+            self._hold_until_boundary = False
+            # A fresh observation must reach the policy before another attempt.
+            return
         if self.iterator is not None:
             return
         reason = self.trigger.observe(
@@ -312,6 +372,8 @@ class PlannerAssistance:
 
     def action(self, policy_action: np.ndarray) -> tuple[np.ndarray, bool]:
         """Choose the next command; failed recovery hands control back explicitly."""
+        if self._hold_until_boundary:
+            return self._handoff_hold()
         if self.iterator is None:
             return policy_action, False
         try:
@@ -319,6 +381,9 @@ class PlannerAssistance:
             self.executed_ticks += 1
             return action, True
         except StopIteration:
+            if self.config.protocol == "preinsert_handoff":
+                self.handoffs += 1
+                self._hold_until_boundary = True
             self.close()
         except RecoveryFailure as exc:
             self.failure = str(exc)
@@ -327,8 +392,17 @@ class PlannerAssistance:
                 self.failure,
                 self.executed_ticks,
             )
+            self._hold_until_boundary = self.config.protocol == "preinsert_handoff"
             self.close()
+        if self._hold_until_boundary:
+            return self._handoff_hold()
         return policy_action, False
+
+    def _handoff_hold(self) -> tuple[np.ndarray, bool]:
+        self.executed_ticks += 1
+        self.handoff_holds += 1
+        grip = -1.0 if read_peg_evidence(self.env).grasped else 1.0
+        return np.r_[np.zeros(7), grip].astype(np.float32), True
 
     def close(self) -> None:
         """Idempotently release the current recipe, retaining episode counters."""

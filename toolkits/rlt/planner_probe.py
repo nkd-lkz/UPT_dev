@@ -14,6 +14,7 @@ from rlinf.envs.sim.maniskill.planner_assistance import (
     PegRecovery,
     RecoveryConfig,
     RecoveryFailure,
+    handoff_ready,
     read_peg_evidence,
 )
 from rlinf.utils.logging import get_logger
@@ -30,6 +31,16 @@ def run(
 ) -> dict:
     """Record every real action and endpoint; never reset within recovery."""
     import gymnasium as gym
+
+    if not seeds or len(set(seeds)) != len(seeds) or min(seeds) < 0:
+        raise ValueError("Require distinct nonnegative reset seeds")
+    if case not in {
+        "from_reset",
+        "held_recovery",
+        "dropped_recovery",
+        "insertion_fixture",
+    }:
+        raise ValueError("Unknown planner probe case")
 
     from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
         register_rlinf_peg_insertion_side_variants,
@@ -64,7 +75,12 @@ def run(
                 writer = imageio.get_writer(
                     output / f"seed_{seed}.mp4", fps=10, ffmpeg_params=["-threads", "2"]
                 )
-            recovery = PegRecovery(env, RecoveryConfig())
+            config = RecoveryConfig(
+                protocol="preinsert_handoff"
+                if case == "insertion_fixture"
+                else "complete"
+            )
+            recovery = PegRecovery(env, config)
             actions = recovery.actions()
             restarted = False
             while True:
@@ -141,6 +157,39 @@ def run(
                     writer.append_data(env.render()[0].cpu().numpy())
                 if bool(terminated[0]) or bool(truncated[0]):
                     break
+            prefix_steps = len(rows)
+            fixture_ready = (
+                handoff_ready(read_peg_evidence(env), config)
+                if case == "insertion_fixture"
+                else None
+            )
+            if fixture_ready:
+                # Constant-command negative control: no further planning or policy.
+                while int(env.unwrapped.elapsed_steps[0]) < 500:
+                    before = (
+                        env.unwrapped.agent.robot.get_qpos()[0].cpu().numpy().copy()
+                    )
+                    hold = np.r_[np.zeros(7), -1].astype(np.float32)
+                    _, reward, terminated, truncated, _ = env.step(hold)
+                    rows.append(
+                        {
+                            "q_before": before,
+                            "q_after": env.unwrapped.agent.robot.get_qpos()[0]
+                            .cpu()
+                            .numpy()
+                            .copy(),
+                            "action": hold,
+                            "reward": float(reward[0]),
+                            "terminated": bool(terminated[0]),
+                            "truncated": bool(truncated[0]),
+                            "stage": "hold_control",
+                            "source": "constant_control",
+                        }
+                    )
+                    if writer is not None:
+                        writer.append_data(env.render()[0].cpu().numpy())
+                    if bool(terminated[0]) or bool(truncated[0]):
+                        break
             success = read_peg_evidence(env).success
             result = {
                 "seed": seed,
@@ -151,6 +200,13 @@ def run(
                 "failure": reason,
                 "restarted_from_held": restarted,
             }
+            if case == "insertion_fixture":
+                result.update(
+                    fixture_ready=fixture_ready,
+                    prefix_steps=prefix_steps,
+                    hold_steps=len(rows) - prefix_steps,
+                    source="planner_prefix_then_constant_control",
+                )
             np.savez_compressed(
                 output / f"seed_{seed}.npz",
                 **{key: np.asarray([row[key] for row in rows]) for key in rows[0]}
@@ -170,6 +226,12 @@ def run(
         "results": results,
         "success_rate": sum(r["success"] for r in results) / len(results),
     }
+    if case == "insertion_fixture":
+        report.update(
+            protocol="Insertion fixture feasibility and constant-command control; no learner evaluated",
+            fixture_ready_rate=sum(r["fixture_ready"] for r in results) / len(results),
+            hold_success_rate=report.pop("success_rate"),
+        )
     (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
@@ -181,7 +243,12 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[2026, 2027, 2028])
     parser.add_argument(
         "--case",
-        choices=["from_reset", "held_recovery", "dropped_recovery"],
+        choices=[
+            "from_reset",
+            "held_recovery",
+            "dropped_recovery",
+            "insertion_fixture",
+        ],
         default="from_reset",
     )
     parser.add_argument(

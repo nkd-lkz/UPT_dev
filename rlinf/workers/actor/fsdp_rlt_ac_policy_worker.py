@@ -14,6 +14,7 @@
 
 import asyncio
 import queue
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -641,6 +642,43 @@ class RLTACReplayMixin:
                 transition_trajs, completed_count = (
                     self._transition_replay_trajectories(traj)
                 )
+                export_dir = self.cfg.algorithm.get("correction_export_dir")
+                if export_dir:
+                    from rlinf.algorithms.rlt.correction_data import export_episode
+
+                    if (
+                        self._world_size != 1
+                        or self.cfg.env.train.total_num_envs != 1
+                        or self.cfg.env.train.rollout_epoch != 1
+                        or len(recv_list) != 1
+                    ):
+                        raise ValueError(
+                            "Correction export requires one complete single-env rollout"
+                        )
+                    contract = {
+                        "model": OmegaConf.to_container(
+                            self.cfg.actor.model, resolve=True
+                        ),
+                        "feature_model": OmegaConf.to_container(
+                            self.cfg.rollout.rlt_feature_model, resolve=True
+                        ),
+                        "environment": OmegaConf.to_container(
+                            self.cfg.env.train, resolve=True
+                        ),
+                        "algorithm": {
+                            "gamma": self.cfg.algorithm.gamma,
+                            "reference_dropout_prob": self.cfg.algorithm.reference_dropout_prob,
+                        },
+                        "reference_source": "frozen_vla_pre_action",
+                        "action_space": "environment_pd_joint_delta_pos",
+                        "terminal_bootstrap": False,
+                    }
+                    export_episode(
+                        Path(export_dir),
+                        f"{int(self.version):06d}",
+                        transition_trajs,
+                        contract,
+                    )
                 replay_list.extend(transition_trajs)
                 completed += completed_count
             self._last_replay_metrics = {
@@ -854,6 +892,11 @@ class RLTACFSDPPolicy(RLTACLossMixin, RLTACReplayMixin, EmbodiedSACFSDPPolicy):
             updates_to_run = pending_updates
             if max_updates > 0:
                 updates_to_run = min(updates_to_run, max_updates)
+            total_limit = int(schedule_cfg.get("total_update_limit", 0))
+            if total_limit > 0:
+                updates_to_run = min(
+                    updates_to_run, max(0, total_limit - int(self.update_step))
+                )
             if updates_to_run <= 0:
                 skip_reason = 2
         self.pending_update_budget = int(pending_updates)

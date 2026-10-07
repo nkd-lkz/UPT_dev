@@ -70,6 +70,34 @@ class EmbodiedRunner:
         critic=None,
     ):
         self.cfg = cfg
+        self.experiment_budget = None
+        budget_cfg = cfg.runner.get("rlt_experiment_budget", None)
+        if budget_cfg:
+            from rlinf.algorithms.rlt.experiment_budget import ExperimentBudget
+
+            if (
+                cfg.env.train.total_num_envs != 1
+                or cfg.env.train.rollout_epoch != 1
+                or cfg.env.train.auto_reset
+                or cfg.runner.get("resume_dir")
+                or cfg.runner.get("use_training_pipeline", False)
+                or cfg.runner.get("overlap_env_bootstrap", False)
+                or cfg.algorithm.loss_type != "rlt_ac"
+            ):
+                raise ValueError(
+                    "Executed-work pilot requires a fresh synchronous single-env RLT run"
+                )
+            self.experiment_budget = ExperimentBudget(**budget_cfg)
+            if (
+                int(cfg.env.train.get("training_control_budget", 0))
+                != self.experiment_budget.control_limit
+            ):
+                raise ValueError("Runner and environment control budgets differ")
+            if (
+                int(cfg.algorithm.rlt_schedule.get("total_update_limit", 0))
+                != self.experiment_budget.update_limit
+            ):
+                raise ValueError("Runner and learner update budgets differ")
         self.actor = actor
         self.rollout = rollout
         self.env = env
@@ -318,14 +346,14 @@ class EmbodiedRunner:
         training_metrics = [result.get("training_metrics", {}) for result in results]
         return rollout_metrics, training_metrics
 
-    def _maybe_eval_and_checkpoint(self, step: int) -> dict:
+    def _maybe_eval_and_checkpoint(self, step: int, *, force: bool = False) -> dict:
         run_val, save_model, _ = check_progress(
             self.global_step,
             self.max_steps,
             self.cfg.runner.val_check_interval,
             self.cfg.runner.save_interval,
             1.0,
-            run_time_exceeded=False,
+            run_time_exceeded=force,
         )
 
         eval_metrics = {}
@@ -493,6 +521,7 @@ class EmbodiedRunner:
 
         start_step = self.global_step
         start_time = time.time()
+        budget_done = False
         for _step in range(start_step, self.max_steps):
             # set global step
             self.actor.set_global_step(self.global_step).wait()
@@ -555,7 +584,23 @@ class EmbodiedRunner:
                         env_bootstrap_handle.wait()
 
                 self.global_step += 1
-                eval_metrics = self._maybe_eval_and_checkpoint(_step)
+                budget_done = False
+                if self.experiment_budget is not None:
+                    env_results = [
+                        result for result in env_handle.wait() if result is not None
+                    ]
+                    budget_done = self.experiment_budget.observe(
+                        compute_evaluate_metrics(env_results),
+                        self._aggregate_numeric_metrics(actor_training_metrics),
+                    )
+                    self.metric_logger.log(
+                        {
+                            f"budget/{k}": v
+                            for k, v in vars(self.experiment_budget).items()
+                        },
+                        step=_step,
+                    )
+                eval_metrics = self._maybe_eval_and_checkpoint(_step, force=budget_done)
 
             if profiled_step is not None:
                 self._close_profiling_window(profiled_step)
@@ -572,8 +617,14 @@ class EmbodiedRunner:
                 actor_training_metrics=actor_training_metrics,
                 eval_metrics=eval_metrics,
             )
+            if budget_done:
+                break
 
         self._finish_run()
+        if self.experiment_budget is not None and not budget_done:
+            raise RuntimeError(
+                "Episode safety cap reached before the executed-work budget"
+            )
 
     def run_pipeline(self):
         start_step = self.global_step

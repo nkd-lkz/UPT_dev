@@ -144,6 +144,29 @@ class ManiskillRLTEnv(ManiskillEnv):
         self._rlt_hole_radius_values: torch.Tensor | None = None
         self._planner_assistance = None
         planner_cfg = cfg.get("planner_assistance", {})
+        self._training_control_budget = int(cfg.get("training_control_budget", 0))
+        self._training_control_ticks = 0
+        self._insertion_fixture = bool(cfg.get("insertion_fixture", False))
+        self._fixture_prefix_ticks = 0
+        if self._training_control_budget < 0 or (
+            self._training_control_budget
+            and (num_envs != 1 or self.auto_reset or cfg.get("policy_mode") == "eval")
+        ):
+            raise ValueError("Control budget requires one non-autoreset training env")
+        if self._insertion_fixture and (
+            num_envs != 1
+            or self.auto_reset
+            or self.ignore_terminations
+            or cfg.get("policy_mode") != "eval"
+            or not self._is_peg_insertion_side
+            or planner_cfg.get("enable", False)
+            or not self._rlt_switch_enabled()
+            or self._rlt_switch_cfg.get("task_mode") != self._RLT_CRITICAL_PHASE
+            or self._rlt_switch_cfg.get("expert_takeover", {}).get("enable", False)
+        ):
+            raise ValueError(
+                "Insertion fixture requires unassisted single-env critical-phase evaluation"
+            )
         if planner_cfg.get("enable", False):
             if (
                 num_envs != 1
@@ -838,6 +861,11 @@ class ManiskillRLTEnv(ManiskillEnv):
         seed: Optional[Union[int, list[int]]] = None,
         options: Optional[dict] = None,
     ):
+        if (
+            self._training_control_budget
+            and self._training_control_ticks >= self._training_control_budget
+        ):
+            raise RuntimeError("Training control budget exhausted; runner must stop")
         if seed is None and options is None and self._evaluation_seeds:
             seed = self._evaluation_seeds[
                 self._evaluation_reset_index % len(self._evaluation_seeds)
@@ -856,6 +884,16 @@ class ManiskillRLTEnv(ManiskillEnv):
         if seed is not None:
             self._has_seeded_reset = True
         raw_obs, infos = self.env.reset(seed=seed, options=options)
+        self._fixture_prefix_ticks = 0
+        if self._insertion_fixture:
+            from rlinf.envs.sim.maniskill.planner_assistance import (
+                prepare_insertion_fixture,
+            )
+
+            fixture = prepare_insertion_fixture(self.env)
+            self._fixture_prefix_ticks = fixture["prefix_ticks"]
+            infos = self.env.unwrapped.get_info()
+            raw_obs = self.env.unwrapped.get_obs(info=infos)
         if "env_idx" in options:
             env_idx = options["env_idx"]
             if self._is_peg_insertion_side:
@@ -877,6 +915,7 @@ class ManiskillRLTEnv(ManiskillEnv):
                 self._planner_assistance.close()
             self._planner_assistance = PlannerAssistance(self.env, self._planner_config)
         self._show_goal_site_visual()
+        self._attach_rlt_switch_info(infos)
         extracted_obs = self._wrap_obs(raw_obs, infos=infos)
         return extracted_obs, infos
 
@@ -886,6 +925,12 @@ class ManiskillRLTEnv(ManiskillEnv):
         if isinstance(actions, torch.Tensor):
             actions = actions.to(self.device)
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        if self._training_control_budget:
+            self._training_control_ticks += 1
+            if self._training_control_ticks >= self._training_control_budget:
+                truncations = torch.ones(
+                    self.num_envs, device=self.device, dtype=torch.bool
+                )
         infos = maybe_augment_peg_insertion_info(
             env=self.env.unwrapped,
             infos=infos,
@@ -905,6 +950,13 @@ class ManiskillRLTEnv(ManiskillEnv):
 
         if self.record_metrics:
             infos = self._record_metrics(step_reward, infos)
+            if self._insertion_fixture and "episode" in infos:
+                infos["episode"]["fixture_prefix_ticks"] = torch.tensor(
+                    [self._fixture_prefix_ticks], device=self.device
+                )
+                infos["episode"]["insertion_policy_ticks"] = (
+                    self.elapsed_steps - self._fixture_prefix_ticks
+                )
         self._attach_rlt_switch_info(infos)
         if isinstance(truncations, bool):
             truncations = torch.tensor([truncations], device=self.device)
@@ -1262,6 +1314,12 @@ class ManiskillRLTEnv(ManiskillEnv):
                 )
                 last["episode"]["planner_failed"] = torch.tensor(
                     [planner.failure != "none"], device=self.device
+                )
+                last["episode"]["planner_handoffs"] = torch.tensor(
+                    [planner.handoffs], device=self.device
+                )
+                last["episode"]["planner_handoff_hold_ticks"] = torch.tensor(
+                    [planner.handoff_holds], device=self.device
                 )
 
         if past_dones.any() and self.auto_reset:

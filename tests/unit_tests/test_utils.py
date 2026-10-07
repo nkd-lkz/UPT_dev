@@ -34,6 +34,41 @@ from rlinf.runners.reasoning_runner import ReasoningRunner
 from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
 
 
+@pytest.mark.parametrize("separate_backend_path", [False, True])
+def test_metric_logger_can_write_backends_separately_from_checkpoints(
+    tmp_path, separate_backend_path
+):
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    from rlinf.utils.metric_logger import MetricLogger
+
+    checkpoint_root = tmp_path / "checkpoint-output"
+    local_root = tmp_path / "local-metrics"
+    logger_cfg = {
+        "log_path": str(checkpoint_root),
+        "logger_backends": ["tensorboard"],
+        "experiment_name": "test",
+    }
+    if separate_backend_path:
+        logger_cfg["backend_log_path"] = str(local_root)
+    cfg = OmegaConf.create({"runner": {"logger": logger_cfg, "per_worker_log": True}})
+    logger = MetricLogger(cfg)
+    logger.log({"test/value": 3.0}, step=7)
+    logger.log({"test/value": 4.0}, step=7, worker_group_name="actor", rank=0)
+    logger.finish()
+    expected = local_root if separate_backend_path else checkpoint_root
+    for directory, value in (
+        (expected / "tensorboard/all", 3.0),
+        (expected / "worker_logs/actor/rank_0/tensorboard", 4.0),
+    ):
+        events = EventAccumulator(str(directory)).Reload()
+        point = events.Scalars("test/value")[0]
+        assert (point.step, point.value) == (7, value)
+    assert cfg.runner.logger.log_path == str(checkpoint_root)
+    if separate_backend_path:
+        assert not checkpoint_root.exists()
+
+
 @pytest.mark.parametrize("skip", [False, True])
 @pytest.mark.parametrize("hf_variant", [False, True])
 def test_installer_can_skip_unused_libero_assets(tmp_path, skip, hf_variant):

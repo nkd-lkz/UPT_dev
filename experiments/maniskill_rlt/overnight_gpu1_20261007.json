@@ -1,0 +1,594 @@
+{
+  "gpu": 1,
+  "hours": 12,
+  "description": "Three paired training seeds; 15000 real control ticks per arm. Weights-only initial1100, fresh optimizer/replay. Bounded preinsert_handoff, separate from prior complete protocol. 50 fixed unassisted eval seeds. Insertion diagnostics follow primary comparisons.",
+  "jobs": [
+    {
+      "name": "seed1234_none",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--seed",
+        "1234",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none/launch.json"
+    },
+    {
+      "name": "seed1234_planner",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "planner",
+        "--seed",
+        "1234",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner/launch.json"
+    },
+    {
+      "name": "pair1234",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-m",
+        "toolkits.rlt.planner_report",
+        "--none",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none",
+        "--planner",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1234.json"
+      ],
+      "timeout_seconds": 180,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1234_none",
+        "seed1234_planner"
+      ],
+      "requires_gpu": false
+    },
+    {
+      "name": "seed1235_none",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--seed",
+        "1235",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none/launch.json"
+    },
+    {
+      "name": "seed1235_planner",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "planner",
+        "--seed",
+        "1235",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner/launch.json"
+    },
+    {
+      "name": "pair1235",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-m",
+        "toolkits.rlt.planner_report",
+        "--none",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none",
+        "--planner",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1235.json"
+      ],
+      "timeout_seconds": 180,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1235_none",
+        "seed1235_planner"
+      ],
+      "requires_gpu": false
+    },
+    {
+      "name": "seed1236_none",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--seed",
+        "1236",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none/launch.json"
+    },
+    {
+      "name": "seed1236_planner",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "planner",
+        "--seed",
+        "1236",
+        "--steps",
+        "1000",
+        "--control-budget",
+        "15000",
+        "--protocol",
+        "preinsert_handoff",
+        "--initial-weights",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage2_baseline_2xl40/stage2_20261005_111704_328815/maniskill_rlt_stage2_2xl40_20261005_111704_328815/checkpoints/global_step_1100/actor/model_state_dict/full_weights.pt",
+        "--export-corrections",
+        "--wandb",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner"
+      ],
+      "timeout_seconds": 7200,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner/launch.json"
+    },
+    {
+      "name": "pair1236",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-m",
+        "toolkits.rlt.planner_report",
+        "--none",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none",
+        "--planner",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1236.json"
+      ],
+      "timeout_seconds": 180,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1236_none",
+        "seed1236_planner"
+      ],
+      "requires_gpu": false
+    },
+    {
+      "name": "three_seed_report",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-m",
+        "toolkits.rlt.planner_report",
+        "--comparisons",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1234.json",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1235.json",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/pair1236.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/comparison.json"
+      ],
+      "timeout_seconds": 180,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "requires_gpu": false,
+      "depends_on": [
+        "pair1234",
+        "pair1235",
+        "pair1236"
+      ]
+    },
+    {
+      "name": "seed1234_none_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1234_none"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/none_insertion/launch.json"
+    },
+    {
+      "name": "seed1234_planner_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1234_planner"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1234/planner_insertion/launch.json"
+    },
+    {
+      "name": "seed1235_none_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1235_none"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/none_insertion/launch.json"
+    },
+    {
+      "name": "seed1235_planner_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1235_planner"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1235/planner_insertion/launch.json"
+    },
+    {
+      "name": "seed1236_none_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1236_none"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/none_insertion/launch.json"
+    },
+    {
+      "name": "seed1236_planner_insertion",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_planner_dev",
+      "argv": [
+        "/home/luokz/rlinf_rlt/UPT_dev/.venv/bin/python",
+        "-u",
+        "-m",
+        "toolkits.rlt.planner_experiment",
+        "--stage1",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/stage1/maniskill_rlt_stage1_resume750_20260926_153016/checkpoints/global_step_2000/actor",
+        "--dataset",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/datasets/lerobot/maniskill_peginsertionside_joint",
+        "--eval-episodes",
+        "50",
+        "--gpu",
+        "1",
+        "--port",
+        "6650",
+        "--arm",
+        "none",
+        "--checkpoint-run",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner",
+        "--eval-scope",
+        "insertion",
+        "--fixture-report",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/fixtures50_cpu/summary.json",
+        "--output",
+        "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner_insertion"
+      ],
+      "timeout_seconds": 5400,
+      "env": {
+        "PYTHONPATH": "",
+        "WANDB__SERVICE_WAIT": "120"
+      },
+      "depends_on": [
+        "seed1236_planner"
+      ],
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007/handoff15000/seed_1236/planner_insertion/launch.json"
+    }
+  ]
+}

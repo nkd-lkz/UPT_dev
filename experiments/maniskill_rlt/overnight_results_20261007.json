@@ -1,0 +1,198 @@
+{
+  "date": "2026-10-07",
+  "captured_at": "2026-10-07T21:24:07.112262+08:00",
+  "artifact_root": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/planner_overnight_20261007",
+  "completed": {
+    "warm_start_same_cache_fits": [
+      {
+        "report": "same_data_warm_fit2000_seed1234/report.json",
+        "seed": 1234,
+        "initial_weights_sha256": "cabc9fbb7df49807d04912bb2a7bae289b6262a39ad1dff91ebf62bb8b350e96",
+        "cache_sha256": "ff6dd6eb06e8379eab9f63b00490983232a3c1138c050ab698addb685f00ae8d",
+        "critic_updates_per_arm": 2000,
+        "actor_updates_per_arm": 500,
+        "initial_validation": {
+          "bc_mse": 0.059425514191389084,
+          "correction_mse": 0.12084727734327316,
+          "correction_arm_mse": 0.13781502842903137,
+          "correction_gripper_mse": 0.002073048148304224,
+          "reference_mse": 0.005373677704483271,
+          "accepted_planner_ticks": 65,
+          "rejected_planner_ticks": 0
+        },
+        "validation": {
+          "bc_only": {
+            "bc_mse": 0.058531373739242554,
+            "correction_mse": 0.1157500222325325,
+            "correction_arm_mse": 0.13126064836978912,
+            "correction_gripper_mse": 0.00717567652463913,
+            "reference_mse": 0.007883723825216293,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          },
+          "q_bc": {
+            "bc_mse": 0.10574617236852646,
+            "correction_mse": 0.2119383066892624,
+            "correction_arm_mse": 0.23839475214481354,
+            "correction_gripper_mse": 0.026743028312921524,
+            "reference_mse": 0.032512687146663666,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          }
+        }
+      },
+      {
+        "report": "same_data_warm_fit2000_seed1235/report.json",
+        "seed": 1235,
+        "initial_weights_sha256": "cabc9fbb7df49807d04912bb2a7bae289b6262a39ad1dff91ebf62bb8b350e96",
+        "cache_sha256": "ff6dd6eb06e8379eab9f63b00490983232a3c1138c050ab698addb685f00ae8d",
+        "critic_updates_per_arm": 2000,
+        "actor_updates_per_arm": 500,
+        "initial_validation": {
+          "bc_mse": 0.059425514191389084,
+          "correction_mse": 0.12084727734327316,
+          "correction_arm_mse": 0.13781502842903137,
+          "correction_gripper_mse": 0.002073048148304224,
+          "reference_mse": 0.005373677704483271,
+          "accepted_planner_ticks": 65,
+          "rejected_planner_ticks": 0
+        },
+        "validation": {
+          "bc_only": {
+            "bc_mse": 0.058048065751791,
+            "correction_mse": 0.11503998935222626,
+            "correction_arm_mse": 0.13030266761779785,
+            "correction_gripper_mse": 0.0082012377679348,
+            "reference_mse": 0.007317815907299519,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          },
+          "q_bc": {
+            "bc_mse": 0.08408446609973907,
+            "correction_mse": 0.1652223914861679,
+            "correction_arm_mse": 0.18459217250347137,
+            "correction_gripper_mse": 0.029633918777108192,
+            "reference_mse": 0.018369067460298538,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          }
+        }
+      },
+      {
+        "report": "same_data_warm_fit2000_seed1236/report.json",
+        "seed": 1236,
+        "initial_weights_sha256": "cabc9fbb7df49807d04912bb2a7bae289b6262a39ad1dff91ebf62bb8b350e96",
+        "cache_sha256": "ff6dd6eb06e8379eab9f63b00490983232a3c1138c050ab698addb685f00ae8d",
+        "critic_updates_per_arm": 2000,
+        "actor_updates_per_arm": 500,
+        "initial_validation": {
+          "bc_mse": 0.059425514191389084,
+          "correction_mse": 0.12084727734327316,
+          "correction_arm_mse": 0.13781502842903137,
+          "correction_gripper_mse": 0.002073048148304224,
+          "reference_mse": 0.005373677704483271,
+          "accepted_planner_ticks": 65,
+          "rejected_planner_ticks": 0
+        },
+        "validation": {
+          "bc_only": {
+            "bc_mse": 0.06017112731933594,
+            "correction_mse": 0.11901676654815674,
+            "correction_arm_mse": 0.1351107805967331,
+            "correction_gripper_mse": 0.006358576472848654,
+            "reference_mse": 0.008176314644515514,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          },
+          "q_bc": {
+            "bc_mse": 0.08988820761442184,
+            "correction_mse": 0.177909716963768,
+            "correction_arm_mse": 0.20021937787532806,
+            "correction_gripper_mse": 0.021742070093750954,
+            "reference_mse": 0.023016706109046936,
+            "accepted_planner_ticks": 65,
+            "rejected_planner_ticks": 0
+          }
+        }
+      }
+    ],
+    "fixture_probe": {
+      "report": "fixtures50_cpu/summary.json",
+      "candidates": 50,
+      "ready": 48,
+      "constant_control_successes": 0,
+      "failures": [
+        {
+          "seed": 12067,
+          "case": "insertion_fixture",
+          "success": false,
+          "steps": 300,
+          "source": "planner_prefix_then_constant_control",
+          "failure": "planner_tick_budget",
+          "restarted_from_held": false,
+          "fixture_ready": false,
+          "prefix_steps": 300,
+          "hold_steps": 0
+        },
+        {
+          "seed": 12070,
+          "case": "insertion_fixture",
+          "success": false,
+          "steps": 31,
+          "source": "planner_prefix_then_constant_control",
+          "failure": "planning_failed:grasp",
+          "restarted_from_held": false,
+          "fixture_ready": false,
+          "prefix_steps": 31,
+          "hold_steps": 0
+        }
+      ]
+    },
+    "planner400": {
+      "run": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/runs/planner_stage2_gpu01/planner_warm1100_1007_150132_retry2",
+      "protocol": "complete",
+      "training_episodes": 400,
+      "training_control_ticks": 102648,
+      "planner_ticks": 31819,
+      "planner_attempts": 281,
+      "planner_failures": 83,
+      "critic_updates": 8986,
+      "actor_updates": 2247,
+      "assisted_successes": 327,
+      "final_autonomous_successes": 18,
+      "eval_episodes": 50,
+      "failures_before_actor_phase": 28,
+      "failures_after_actor_phase": 4,
+      "initial_checkpoint_matched_evaluation": "pending"
+    }
+  },
+  "queue_status_files": [
+    "queue_gpu0_v2/status.json",
+    "queue_gpu1_v2/status.json"
+  ],
+  "queue_plans": [
+    "overnight_gpu0_20261007.json",
+    "overnight_gpu1_20261007.json"
+  ],
+  "tmux": [
+    "rlt_planner_audit_1007",
+    "rlt_planner_handoff_1007"
+  ],
+  "validation": {
+    "planner_tests_passed": 46,
+    "real_cpu_physics": true,
+    "broader_cpu_tests_passed": 223,
+    "broader_skipped": 6,
+    "broader_excluded": [
+      "test_vlm_trend_batch_video_metadata_stays_nested_per_sample: existing Transformers compatibility failure reproduced on baseline"
+    ],
+    "preflight": "Four insertion checkpoints compose with 48 scored / 50 candidate states; both queue graphs validate"
+  },
+  "limitations": [
+    "Offline repeats change optimizer/minibatch seed on the same data and starting weights; not independent online training seeds.",
+    "Insertion scores are conditional on 48/50 planner-prepared fixtures; complete tasks retain all 50.",
+    "Old replay export was refused at nonterminal recording gap 109->110; do not use its unsealed files as episode-disjoint data.",
+    "No new closed-loop improvement established. Read live queue states and completed manifests before reporting scores.",
+    "Online BC rule was not changed by the offline correction-quality diagnostic."
+  ]
+}
