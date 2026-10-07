@@ -289,7 +289,9 @@ def test_transport_and_replay_keep_terminal_snapshot_not_reset_memory(config):
 @pytest.mark.parametrize(
     "name", ["maniskill_rlt_stage2_ac_mlp", "maniskill_rlt_stage2_smoke_gpu2"]
 )
-@pytest.mark.parametrize("overlay", ["rlt_memory", "rlt_memory_response"])
+@pytest.mark.parametrize(
+    "overlay", ["rlt_memory", "rlt_memory_response", "rlt_memory_zero"]
+)
 def test_hydra_overlays_compose_without_starting_ray(name, overlay, monkeypatch):
     root = Path(__file__).resolve().parents[2]
     for key in ("RLT_SMOKE_RUN_DIR", "RLT_STAGE1_ACTOR", "RLT_DATASET_DIR"):
@@ -302,7 +304,10 @@ def test_hydra_overlays_compose_without_starting_ray(name, overlay, monkeypatch)
         cfg = compose(config_name=name, overrides=[f"+experiment={overlay}"])
         validate_interaction_memory_cfg(cfg)
         cfg.actor.fsdp_config.use_orig_params = False
-        with pytest.raises(ValueError, match="use_orig_params"):
+        if overlay == "rlt_memory":
+            with pytest.raises(ValueError, match="use_orig_params"):
+                validate_interaction_memory_cfg(cfg)
+        else:
             validate_interaction_memory_cfg(cfg)
         cfg.actor.fsdp_config.use_orig_params = True
         cfg.algorithm.target_update_type = "q_head_only"

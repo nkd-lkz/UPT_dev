@@ -809,6 +809,7 @@ def test_memory_comparison_changes_only_context_information(monkeypatch, tmp_pat
                 overrides=[
                     f"+experiment=rlt_memory_{reader}",
                     "+pilot=rlt_memory_matched",
+                    "actor.fsdp_config.use_orig_params=False",
                 ],
             )
         validate_interaction_memory_cfg(cfg)

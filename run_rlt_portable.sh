@@ -29,6 +29,11 @@ case "${RLT_SMOKE_PROFILE:-smoke}" in
     matched) world_overrides+=(+pilot=rlt_memory_matched) ;;
     *) echo 'RLT_SMOKE_PROFILE must be smoke, overnight or matched.' >&2; exit 2 ;;
 esac
+if [[ "$memory_enabled" == 1 && "${RLT_MEMORY_READER:-attention}" != attention ]]; then
+    # Parameter-free readers need no encoder optimizer ownership. Use the
+    # baseline flat-parameter path on this single-GPU pilot.
+    world_overrides+=(actor.fsdp_config.use_orig_params=False)
+fi
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
     echo "Usage: RLT_PHYSICAL_GPU=N bash run_rlt_portable.sh [--world|--memory] [--check|--probe]" >&2
     exit 2
