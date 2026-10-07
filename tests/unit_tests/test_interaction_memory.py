@@ -29,6 +29,182 @@ from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
 from rlinf.models.embodiment.modules.rlt_memory_encoder import RLTMemoryEncoder
 
 
+def test_diagnostic_rejects_nonfinite_unrecorded_and_intervened_rows(config):
+    from toolkits.rlt.diagnose_actor_learning import transition_batch
+
+    obs = {key: value[:1].unsqueeze(0) for key, value in _obs(config).items()}
+    record = {
+        "max_episode_length": 1,
+        "curr_obs": obs,
+        "next_obs": copy.deepcopy(obs),
+        "actions": torch.zeros(1, 1, 4),
+        "rewards": torch.zeros(1, 1, 2),
+        "dones": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "terminations": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "truncations": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "intervene_flags": torch.zeros(1, 1, 4, dtype=torch.bool),
+        "forward_inputs": {"record_transition": torch.ones(1, 1, 1, dtype=torch.bool)},
+    }
+    batch = transition_batch(record)
+    assert batch["actions"].shape == (1, 4)
+    assert torch.equal(batch["curr_obs"]["z_rl"], obs["z_rl"][0])
+    for key in ("curr_obs", "next_obs"):
+        bad = copy.deepcopy(record)
+        bad[key]["z_rl"].fill_(float("nan"))
+        with pytest.raises(ValueError, match="Nonfinite"):
+            transition_batch(bad)
+    bad = copy.deepcopy(record)
+    bad["forward_inputs"]["record_transition"].zero_()
+    with pytest.raises(ValueError, match="critical-phase"):
+        transition_batch(bad)
+    bad = copy.deepcopy(record)
+    bad["intervene_flags"].fill_(True)
+    with pytest.raises(ValueError, match="unassisted"):
+        transition_batch(bad)
+    bad = copy.deepcopy(record)
+    bad["dones"].fill_(True)
+    with pytest.raises(ValueError, match="termination"):
+        transition_batch(bad)
+
+
+def test_gpu_wait_requires_free_memory_and_no_compute_process():
+    from toolkits.rlt.wait_for_gpu import gpu_available
+
+    assert gpu_available("5\n", "")
+    assert not gpu_available("5\n", "1234\n")
+    assert not gpu_available("46945\n", "1234\n")
+    assert not gpu_available("2048\n", "")
+    for invalid in ("N/A", "5\n5", "-1", ""):
+        with pytest.raises(ValueError):
+            gpu_available(invalid, "")
+
+
+def test_diagnostic_cache_splits_versions_and_reports_missing_files(config, tmp_path):
+    import json
+
+    from toolkits.rlt.diagnose_actor_learning import prepare_cache
+
+    source = tmp_path / "source"
+    source.mkdir()
+    obs = {key: value[:1].unsqueeze(0) for key, value in _obs(config).items()}
+    record = {
+        "max_episode_length": 1,
+        "curr_obs": obs,
+        "next_obs": copy.deepcopy(obs),
+        "actions": torch.zeros(1, 1, 4),
+        "rewards": torch.zeros(1, 1, 2),
+        "dones": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "terminations": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "truncations": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "intervene_flags": torch.zeros(1, 1, 4, dtype=torch.bool),
+        "forward_inputs": {"record_transition": torch.ones(1, 1, 1, dtype=torch.bool)},
+    }
+    index = {}
+    for i in range(40):
+        group = f"collection-{i // 4}"
+        index[str(i)] = {"model_weights_id": group}
+        if i < 32:
+            record["model_weights_id"] = group
+            torch.save(record, source / f"trajectory_{i}_{group}.pt")
+    path = source / "trajectory_index.json"
+    path.write_text(json.dumps({"trajectory_index": index}))
+    original = path.read_bytes()
+    manifest = prepare_cache(source, tmp_path / "cache", limit=32, split_seed=601)
+    assert manifest["missing_indexed_records"] == 8
+    assert manifest["selected_records"] == 32
+    train = {
+        x["collection_version"] for x in manifest["sources"] if x["split"] == "train"
+    }
+    val = {
+        x["collection_version"]
+        for x in manifest["sources"]
+        if x["split"] == "validation"
+    }
+    assert train and val and not train & val
+    assert path.read_bytes() == original
+
+
+def test_matched_diagnostic_shares_samples_and_separates_q_effect(config, tmp_path):
+    from toolkits.rlt.diagnose_actor_learning import train_arm
+
+    cfg = OmegaConf.create(
+        {
+            "actor": {
+                "global_batch_size": 2,
+                "micro_batch_size": 1,
+                "model": {
+                    "model_type": "rlt_mlp_policy",
+                    "q_head_type": "default",
+                    "z_dim": 4,
+                    "proprio_dim": 3,
+                    "action_dim": 2,
+                    "num_action_chunks": 2,
+                    "ref_num_action_chunks": 2,
+                    "add_q_head": True,
+                    "fixed_std": 0.002,
+                    "interaction_memory": {
+                        "enabled": True,
+                        **asdict(config),
+                        "reader_type": "zero",
+                    },
+                },
+                "optim": {"lr": 1e-4, "clip_grad": 10.0},
+                "critic_optim": {"lr": 1e-4, "clip_grad": 10.0},
+            },
+            "algorithm": {
+                "q_head_type": "default",
+                "target_update_type": "all",
+                "target_update_freq": 1,
+                "tau": 0.005,
+                "gamma": 0.99,
+                "critic_actor_ratio": 1,
+                "reference_dropout_prob": 0.5,
+                "actor_weight_schedule": {
+                    "enable": True,
+                    "warmup_updates": 2,
+                    "ramp_updates": 0,
+                    "warmup_bc_weight": 7.0,
+                    "online_bc_weight": 7.0,
+                    "warmup_q_weight": 0.0,
+                    "online_q_weight": 0.05,
+                },
+            },
+            "env": {"train": {"env_type": "maniskill_rlt"}},
+        }
+    )
+    obs = _obs(config)
+    batch = {
+        "curr_obs": obs,
+        "next_obs": copy.deepcopy(obs),
+        "actions": torch.zeros(2, 4),
+        "rewards": torch.ones(2, 2),
+        "dones": torch.zeros(2, 2, dtype=torch.bool),
+        "terminations": torch.zeros(2, 2, dtype=torch.bool),
+        "intervene_flags": torch.zeros(2, 4, dtype=torch.bool),
+    }
+    cache = {"train": batch, "validation": batch}
+    for steps in (2, 4):
+        results = [
+            train_arm(
+                cfg,
+                cache,
+                tmp_path / f"{arm}_{steps}",
+                variant=arm,
+                steps=steps,
+                seed=11,
+            )
+            for arm in ("bc_only", "q_bc")
+        ]
+        left, right = results
+        assert left["initial_weights_sha256"] == right["initial_weights_sha256"]
+        assert left["sample_sequence_sha256"] == right["sample_sequence_sha256"]
+        assert left["actor_updates"] == right["actor_updates"] == steps
+        assert (left["final_weights_sha256"] == right["final_weights_sha256"]) == (
+            steps == 2
+        )
+    assert cfg.algorithm.actor_weight_schedule.online_q_weight == 0.05
+
+
 @pytest.fixture
 def config():
     return InteractionMemoryConfig(

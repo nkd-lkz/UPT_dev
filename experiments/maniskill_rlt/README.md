@@ -1,6 +1,6 @@
 # Inspect the RLT Interaction-Memory Branch
 
-For the current matched two-GPU control experiment, read [the October 3 campaign protocol](MATCHED_CAMPAIGN_2026-10-03.md). The earlier overnight pilot below uses different routing and is retained for history.
+Start with the [October 6 baseline diagnostic](BASELINE_DIAGNOSTIC_2026-10-06.md): matched BC-only/Q+BC learning on cached features, followed by frozen simulator evaluation. The [October 3 memory campaign](MATCHED_CAMPAIGN_2026-10-03.md) and earlier overnight pilot below are historical protocols.
 
 ## Run a bounded pilot on another server
 

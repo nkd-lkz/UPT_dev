@@ -1,6 +1,6 @@
 # 验收 RLT 交互记忆分支
 
-当前两卡同条件对照见 [10-03 实验协议](MATCHED_CAMPAIGN_2026-10-03.md)：零上下文与历史响应读取器，统一关键阶段切换、预算和初态。下方旧 overnight pilot 保留历史用途，不能直接混比。
+先读 [10-06 baseline 诊断](BASELINE_DIAGNOSTIC_2026-10-06.zh-CN.md)：在缓存特征上匹配比较 BC-only／Q+BC，再做冻结参数的仿真评估。[10-03 记忆实验](MATCHED_CAMPAIGN_2026-10-03.md)及下方旧 overnight pilot 保留历史用途。
 
 ## 在新服务器运行有界实验
 
