@@ -647,3 +647,69 @@ def test_frozen_memory_counterfactual_preserves_weights_input_and_rng(config):
     assert tensor_digest(model.state_dict()) == weights
     assert tensor_digest(obs) == inputs
     assert torch.equal(torch.get_rng_state(), rng)
+
+
+def test_frozen_memory_summary_rejects_unpaired_or_incomplete_evidence():
+    import copy
+
+    from toolkits.rlt.summarize_memory_evaluation import summarize
+
+    status = {
+        "checked_at": "test",
+        "campaign": "test",
+        "code_revision": "test",
+        "jobs": [],
+    }
+    for reader, variants in (
+        ("zero", ("native", "reference")),
+        ("response", ("native", "zero_context")),
+    ):
+        job = {"reader": reader, "exit_code": 0, "runs": []}
+        status["jobs"].append(job)
+        for seed in range(4001, 4005):
+            for variant in variants:
+                job["runs"].append(
+                    {
+                        "label": f"seed{seed}_{variant}",
+                        "exit_code": 0,
+                        "audit": {
+                            "weights_unchanged": True,
+                            "initial_observation_sha256": str(seed),
+                            "actor_slots": 0,
+                            "slots": 16,
+                            "action_difference_sum": 0,
+                            "action_difference_count": 16,
+                        },
+                        "episodes": [
+                            {
+                                "seed": seed,
+                                "lane": lane,
+                                "success_once": int(lane == 0),
+                                "entered_actor_phase_once": 1,
+                                "episode_len": 100,
+                            }
+                            for lane in range(16)
+                        ],
+                    }
+                )
+    result = summarize(status)
+    assert result["arms"]["response_native"]["successes"] == 4
+    assert result["paired_outcomes"]["response_native_vs_zero_native"] == {
+        "both_success": 4,
+        "left_only_success": 0,
+        "right_only_success": 0,
+        "both_fail": 60,
+    }
+    for fault in ("hash", "duplicate_lane", "weights", "queue"):
+        corrupt = copy.deepcopy(status)
+        run = corrupt["jobs"][1]["runs"][0]
+        if fault == "hash":
+            run["audit"]["initial_observation_sha256"] = "different"
+        elif fault == "duplicate_lane":
+            run["episodes"][1]["lane"] = 0
+        elif fault == "weights":
+            run["audit"]["weights_unchanged"] = False
+        else:
+            corrupt["jobs"][1]["exit_code"] = None
+        with pytest.raises(ValueError):
+            summarize(corrupt)

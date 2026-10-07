@@ -53,3 +53,28 @@ The replay checkpoint may contain stale index entries after cache eviction. This
 ## Decide the next change
 
 Compare paired episode outcomes before changing the network. If the response head barely reacts to history, inspect its input scale and learning signal. If it reacts but control does not improve, test whether the history describes useful execution conditions. If all learned heads trail the reference, repair the baseline learning setup first. Require repeatable control evidence before adding Stage 1B or claiming fewer corrections.
+
+## Completed results: October 4
+
+All 256 planned episodes completed. Initial observation fingerprints matched across arms for every seed. All weights remained unchanged. The reference arm routed no learned actions.
+
+| Arm | Successes / 64 | Actor-routed / scheduled chunk slots |
+|---|---:|---:|
+| zero | 16 / 64 | 502 / 3200 |
+| response | 15 / 64 | 550 / 3200 |
+| response-empty | 18 / 64 | 450 / 3200 |
+| reference | 19 / 64 | 0 / 3200 |
+
+All arms reached the automatic critical-phase gate in 26 of 64 episodes. The other 38 episodes failed before that gate. Relative to reference, zero lost three successes and gained none; response lost four and gained none. These are paired development observations from one training seed, not a significant treatment effect or evidence that memory is universally harmful.
+
+Masking response history changed the head's normalized action components by a mean absolute 0.00454 across all scheduled predictions. The head uses context, but this run does not show useful control effects. Completed lanes are included in that sensitivity statistic.
+
+Validate a completed monitor snapshot with:
+
+```bash
+python -m toolkits.rlt.summarize_memory_evaluation status.json public-results.json
+```
+
+The summary rejects incomplete queues, changed weights, missing or duplicate lanes, and mismatched initial observations. It retains each episode result without private paths.
+
+The next experiment should isolate baseline learning. First measure actor/reference action error at matched gate states. Then train BC-only and Q+BC zero-context heads from the same initialization on the same frozen transition set, with equal updates. Evaluate all saved checkpoints on a prespecified new set. This is an offline diagnostic, not a replacement online baseline. Do not select the best checkpoint using the current 64 episodes and report them again as a final test. Require a new online comparison before expanding the memory encoder or adding expert-cost claims.
