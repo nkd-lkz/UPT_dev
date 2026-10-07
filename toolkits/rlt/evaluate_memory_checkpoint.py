@@ -203,6 +203,7 @@ def main() -> None:
         def env_evaluate_step(self, raw_actions, stage_id):
             before = self.eval_prev_done[stage_id].clone()
             env_output, info = super().env_evaluate_step(raw_actions, stage_id)
+            before = before.to(self.eval_prev_done[stage_id].device)
             lanes = (
                 (self.eval_prev_done[stage_id] & ~before).nonzero().flatten().tolist()
             )
