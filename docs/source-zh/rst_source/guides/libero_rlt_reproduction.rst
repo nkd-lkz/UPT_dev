@@ -145,9 +145,93 @@ VLA 来自 ``AlphaBrainGroup/qwenoft-5traj-libero-goal``，revision 为 ``91ea08
 
 第一条命令不分配 GPU；第二条保存 ``plan.json``、原子更新的 ``status.json`` 和逐任务日志。声明了实验 manifest 的任务，必须同时退出码为 0 且 manifest 完整才算通过。训练仅在末轮保存 checkpoint，只为最后的 task 0 对照启用视频。等待、超时和跳过都不会标成已完成实验。
 
+固定权重比较相同失败初态
+------------------------
+
+公开 checkpoint 的成绩低于发布结果时，先比较评估入口，再考虑重训。``reference`` 直接执行冻结 SFT VLA 的参考动作；``rlt_a`` 则由已训练的 actor 根据参考动作、压缩 VLA 特征和本体状态输出动作。两组共享 VLA，但最终动作生成器不同。actor 直接预测动作，不是保证与 reference 相加的残差结构。
+
+从一次完整配对评估中筛选公开 RLT_a 的失败初态，再让上游 Python 主入口和本分支封装执行同一批 task/state：
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh audit \
+     --previous /path/to/completed/libero-release100 \
+     --tasks 5 6 9 --gpu 2 \
+     --output /path/to/new/libero-entry-audit --check
+   bash run_rlt_libero.sh audit \
+     --previous /path/to/completed/libero-release100 \
+     --tasks 5 6 9 --gpu 2 \
+     --output /path/to/new/libero-entry-audit
+
+第一条命令只检查失败初态选择，不分配 GPU。第二条在 GPU 2 繁忙时拒绝启动，先后校验四个权重文件的哈希，并串行运行两个入口；封装入口还会复评 reference 组。每回合保存视频和 JSONL 轨迹，包含输入图像哈希、本体状态、归一化 reference/actor action chunk、实际环境动作、奖励和结束标志，初始相机画面另外保存为 PNG。``summary.json`` 报告每个配对首次发生差异的记录，而不只是成功率之差。只有两个入口都完成且权重文件哈希未变，manifest 才标记完整。
+
+上游 Python 主入口保留自己的模型加载与推理逻辑。显式失败初态筛选、只读记录 hook、单线程评估和禁用机器相关的 ``.env`` 加载都会记录为适配项。两个入口共用未修改的上游 rollout 函数及已有 IPC/EGL 兼容层，因此轨迹一致只能排除这批样本上的入口差异，不能证明本地仿真环境与作者内部环境相同，也不能据此宣称复现了 92%。这些是按失败结果筛选的开发诊断回合，不是无偏 benchmark，也不用于新增训练。
+
+检查共同使用的仿真环境与发布文件
+--------------------------------
+
+两个入口即使输出一致，也可能共用不兼容的仿真环境。修改模型权重之前，先检查依赖约束、完整配置和 tokenizer，以及任务资源。CPU 盘点入口对 Hub 的 LFS 文件比较 SHA-256，对普通文件比较 Git blob 哈希：
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit inventory \
+     --libero-source /path/to/official/LIBERO-git \
+     --output /path/to/new/environment-inventory
+
+可选的 ``--libero-source`` 指向本地原版 LIBERO Git 仓库；命令将其 HEAD 文件树与当前生效的 LIBERO 路径比较，不 checkout 文件、不修改安装环境。``summary.json`` 保存逐文件校验结果，``manifest.json`` 记录依赖版本及不满足的有效约束。完成标记仅代表检查结束，不代表所有依赖和文件都通过。访问固定 revision 的 Hub 元数据需要网络，但不下载模型权重。
+
+要区分模型差异与环境差异，可以直接回放之前审计记录的实际动作，不加载 VLA：
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit replay \
+     --trace /path/to/audit/official/traces/rlt_a/task_9_state_7/trace.jsonl \
+     --snapshot-ticks 212 213 290 \
+     --output /path/to/new/action-replay
+
+回放在 GPU 2 繁忙时拒绝启动，按 UUID 选择 EGL 设备，保留记录中的 LIBERO Goal 初态、seed 和完整动作序列，包括等待动作。``physics.jsonl`` 保存 qpos、qvel、控制量、warm-start 加速度、接触、时间及双相机哈希；``model.json`` 保存碰撞掩码和几何体名称，指定时刻另存相机 PNG。这是开环诊断，不能作为自主 policy 成功率。比较版本或重复渲染时，应分别启动进程；依赖覆盖目录必须与正在训练的共享环境隔离。
+
+2026-10-07 检查的 20 个已下载发布文件全部与固定 Hub revision 一致。本地 LIBERO 的 585 个资源、135 个 BDDL 文件、250 个初态文件与原版 ``8f1084e`` 一致；三个源码差异涉及路径配置、下载及显式 ``torch.load(weights_only=False)``，环境 wrapper 和任务动力学文件一致。但 ``rlinf-libero==0.1.3`` 要求 ``mujoco>=3.0,<3.4``，共享环境实际是 3.8.1。仅通过隔离目录切换为 3.3.7 后，任务 5、6、9 的初态 0、1、2 上，RLT_a 从 3/9 变为 3/9，reference 从 4/9 变为 3/9。依赖冲突确实存在，但这组小实验不能将官方分数差距归因于它。
+
+在原环境下，对任务 9／初态 7 分别启动两个进程回放相同动作，331 条完整物理状态和主相机画面全部一致，腕部图像则有 15 步哈希不同。这把一部分轨迹不一致定位到了渲染／观测环节，而非物理状态差异；具体像素差异的成因及其对总成功率的影响尚未确定。
+
+原版 LIBERO 固定 robosuite 1.4.0，本机却使用 1.4.1；后者在 Panda XML 中新增 ``link7_collision`` 碰撞几何体。保持 MuJoCo 3.8.1、仅切换 robosuite 后，相同 9 个初态的 reference 仍为 4/9，RLT_a 仍为 3/9。该版本对照的任务 9／初态 7 开环回放也保持完整物理状态一致，记录中没有新增几何体参与的接触。因此，目前两项单版本修改都没有解释低成功率；这不排除其他初态的版本效应，也未检验两个版本同时改变的交互效应。
+
+样本数之外，还要逐任务比较。如果作者的 50 回合确实使用相同协议下的初态 0–49，那么本机任务 9 在初态 0–9 中已经失败 6 个，即使剩余全部成功也最多 44/50，低于作者报告的 46/50；单纯增加评估回合不能调和这组具体结果。发布文件尚未提供内部环境的完整依赖锁文件和逐初态轨迹，因此作者环境仍待核实。
+
+单独验证图像预处理
+------------------
+
+公开源码还存在共享的预处理差异：训练数据的 ``_pack_sample`` 将每个视角缩到 224×224，普通 VLA benchmark 客户端也先缩到 224×224；RLT 评估函数却直接传入 256×256 图像。发布配置没有 ``datasets.vla_data.image_size``，不会触发模型内部的可选缩放。CPU 实测发布 processor 的结果是：原入口每视角生成 81 个视觉 token，224 输入生成 64 个。这说明公开代码路径的输入分布不同，尚不证明发布权重内部训练的完整配置，也未证明这个差异造成了成功率下降。
+
+下面的可选诊断沿用普通 VLA benchmark 客户端的 OpenCV area resize，权重、环境、初态和动作处理不变；默认评估行为保持不变：
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh evaluate --gpu 2 \
+     --tasks 5 6 9 --states 0 1 2 --input-image-size 224 --video \
+     --output /path/to/new/libero-images224-pilot
+
+manifest 显式记录 ``input_image_size`` 和 ``preprocessing_diagnostic``。224 输入仅是单变量诊断，即使成功率上升，也不能直接将其计为作者 92% 结果的严格复现。该诊断尚未扩展到训练入口。
+
+2026-10-07 20:06 CST，9 个初态的 224 输入诊断已完成：reference 从原先的 4/9 变为 6/9，RLT_a 从 3/9 变为 5/9。两组权重均冻结。这是预先检查过的开发子集，只提示预处理值得继续验证；不能据此解释全部分数差距，也不能认为 RLT_a 优于 reference。
+
+晚间接续计划为 ``experiments/libero_rlt/overnight_audit_20261007.json``，先跑原来的 100 个 task/state 配对，再跑 10 个任务各 50 初态的 224 输入诊断，不按 pilot 成绩筛选任务。旧 6 小时队列已在等待期间停止，已完成证据保留；新队列的 12 小时时限包含等待，仍只使用 GPU 2，并要求连续两次空闲。tmux 会话为 ``rlt_libero_overnight_1007``，实时状态保存在 NAS 的 ``research/libero_environment_audit_20261007/overnight_queue/status.json``。其他用户占用 GPU 时不会抢占，等待到期会明确标记未执行项；不能将排队视为完成。
+
+100 回合完成后，以下 CPU 命令逐个初态比较原入口与 224 输入，将已看过的 9 个 pilot 初态和其余 91 个分开报告，同时保留新增成功与丢失成功的初态：
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit compare-preprocessing \
+     --baseline /path/to/completed/libero-release100 \
+     --candidate /path/to/completed/images224-matched100 \
+     --output /path/to/new/preprocessing-comparison
+
+命令拒绝未完成、带 assistance、使用新 learner 权重、初态或依赖版本不同的输入。其余 91 个仍是公开 benchmark 初态，不是未见测试集。汇总不能证明统计显著性；500 回合诊断也仍须注明修改过预处理。已完成版本对照、文件盘点、动作回放与结果索引保留在 ``experiments/libero_rlt/environment_audit_results_20261007.json``。复用日期化计划前必须更换输出目录。
+
 复现边界
 --------
 
 本分支没有把外部模型注册成 RLinf 模型类型，也没有将 ManiSkill checkpoint 转成 LIBERO 模型。它先提供可审计的外部公开模型复评入口，以及受控训练适配。独立评估分数只以成功完成的本机结果文件为准；上游宣称的 benchmark 分数不能填作本机结果。后续完整 token RLT 需要另外准备匹配的 Stage 1 encoder，不能混用 RLT_a 权重。
 
-2026-10-06 核对的官方 RLinf main 为 ``c70606f08cdca259b8dec03d4430926b5b8fac9d``。未合并的 `PR #1623 <https://github.com/RLinf/RLinf/pull/1623>`_ 涉及 replay checkpoint 保留范围，`PR #1527 <https://github.com/RLinf/RLinf/pull/1527>`_ 涉及 RLT 阶段路由；这里只记录相关性，没有自动合并到本地 baseline。
+2026-10-07 再次核对的官方 RLinf main 仍为 ``c70606f08cdca259b8dec03d4430926b5b8fac9d``。未合并的 `PR #1623 <https://github.com/RLinf/RLinf/pull/1623>`_ 涉及 replay checkpoint 保留范围，`PR #1527 <https://github.com/RLinf/RLinf/pull/1527>`_ 涉及 RLT 阶段路由；这里只记录相关性，没有自动合并到本地 baseline。AlphaBrain 源码和两个公开模型 revision 也未变化。

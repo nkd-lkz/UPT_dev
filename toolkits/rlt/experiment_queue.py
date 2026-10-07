@@ -8,6 +8,7 @@ import argparse
 import fcntl
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -15,15 +16,14 @@ import time
 from pathlib import Path
 
 LOG = logging.getLogger(__name__)
+LEASE_DIRECTORY = Path("/dev/shm")
 
 
 def validate_plan(plan: dict) -> None:
     """Require explicit argv, dependencies on earlier jobs, and finite budgets."""
-    if plan.get("gpu") != 2:
-        raise ValueError(
-            "This queue is reserved for GPU 2; GPUs 0/1 belong to baseline"
-        )
-    if not 0 < plan.get("hours", 0) <= 12:
+    if type(plan.get("gpu")) is not int or plan["gpu"] < 0:
+        raise ValueError("Require an explicit nonnegative physical GPU index")
+    if not math.isfinite(plan.get("hours", 0)) or not 0 < plan.get("hours", 0) <= 12:
         raise ValueError("Require a wall-clock budget in (0, 12] hours")
     known = set()
     for job in plan["jobs"]:
@@ -98,7 +98,12 @@ def run_plan(plan: dict, output: Path) -> dict:
     output.mkdir(parents=True, exist_ok=False)
     (output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     deadline = time.monotonic() + plan["hours"] * 3600
-    state = {"state": "running", "started_at": time.time(), "jobs": {}}
+    state = {
+        "state": "running",
+        "started_at": time.time(),
+        "gpu_index": plan["gpu"],
+        "jobs": {job["name"]: {"state": "pending"} for job in plan["jobs"]},
+    }
 
     def save():
         state["updated_at"] = time.time()
@@ -110,20 +115,20 @@ def run_plan(plan: dict, output: Path) -> dict:
         raise KeyboardInterrupt(f"Queue received signal {signum}")
 
     previous_sigterm = signal.signal(signal.SIGTERM, terminate)
-    lock = Path("/dev/shm/rlt-research-gpu2.lock").open("a")
+    lock = (LEASE_DIRECTORY / f"rlt-research-gpu{plan['gpu']}.lock").open("a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
         lock.close()
         signal.signal(signal.SIGTERM, previous_sigterm)
         raise RuntimeError(
-            "An experiment queue already owns the GPU 2 lease"
+            f"An experiment queue already owns the GPU {plan['gpu']} lease"
         ) from error
     process = None
     try:
         save()
         for job in plan["jobs"]:
-            row = state["jobs"][job["name"]] = {"state": "pending"}
+            row = state["jobs"][job["name"]]
             if any(
                 state["jobs"][dep]["state"] != "passed"
                 for dep in job.get("depends_on", [])
@@ -203,6 +208,11 @@ def run_plan(plan: dict, output: Path) -> dict:
     finally:
         if process is not None:
             stop_group(process)
+        for row in state["jobs"].values():
+            if row["state"] == "pending":
+                row["state"] = f"not_started_{state['state']}"
+            elif row["state"] in {"running", "waiting_gpu"}:
+                row["state"] = state["state"]
         save()
         lock.close()
         signal.signal(signal.SIGTERM, previous_sigterm)
@@ -210,7 +220,7 @@ def run_plan(plan: dict, output: Path) -> dict:
 
 
 def main() -> None:
-    """Run a reviewed JSON plan with a finite GPU 2 queue."""
+    """Run a reviewed plan on one explicitly authorized physical GPU."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -221,7 +231,7 @@ def main() -> None:
     validate_plan(plan)
     if args.check:
         print(
-            f"Validated {len(plan['jobs'])} jobs on GPU 2, wall limit {plan['hours']} hours"
+            f"Validated {len(plan['jobs'])} jobs on GPU {plan['gpu']}, wall limit {plan['hours']} hours"
         )
         return
     run_plan(plan, args.output)

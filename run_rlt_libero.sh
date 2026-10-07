@@ -33,5 +33,13 @@ if [[ "$1" == train ]]; then
     RLT_ALPHABRAIN_SOURCE=${RLT_ALPHABRAIN_TRAIN_SOURCE:-"$RLT_EXTERNAL_ROOT/AlphaBrain_rlt_runtime"}
 fi
 cd "$RLT_LIBERO_ROOT"
-exec "$RLT_LIBERO_PYTHON" -u -m toolkits.rlt.libero_reproduction "$@" \
+RLT_LIBERO_MODULE=toolkits.rlt.libero_reproduction
+if [[ "$1" == audit ]]; then
+    RLT_LIBERO_MODULE=toolkits.rlt.libero_audit
+    shift
+elif [[ "$1" == environment-audit ]]; then
+    RLT_LIBERO_MODULE=toolkits.rlt.libero_environment_audit
+    shift
+fi
+exec "$RLT_LIBERO_PYTHON" -u -m "$RLT_LIBERO_MODULE" "$@" \
     --source "$RLT_ALPHABRAIN_SOURCE" --storage "$RLT_LIBERO_ASSETS"

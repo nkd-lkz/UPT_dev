@@ -19,6 +19,7 @@ import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
 SOURCE_REVISION = "604924beb77b04b0da49326dfae6ea423a27d28a"
 TRAINING_REVISION = "16d9756790ba38e270a1831a218381d2211b1b46"
@@ -341,7 +342,49 @@ class ReferenceActor:
         return reference.float(), None
 
 
-def evaluate(args) -> dict:
+class ResizedVLA:
+    """Apply the upstream benchmark client's area resize in an explicit diagnostic.
+
+    The ordinary RL evaluator omits this resize. Keeping the adapter optional
+    prevents a preprocessing experiment from silently changing the baseline.
+    """
+
+    def __init__(self, model: Any, size: int) -> None:
+        if size <= 0:
+            raise ValueError("Image size must be positive")
+        self.model = model
+        self.size = size
+
+    def eval(self) -> ResizedVLA:
+        """Keep the wrapped frozen model in evaluation mode."""
+        self.model.eval()
+        return self
+
+    def get_vla_action(
+        self, *, batch_images: list[list[Any]], instructions: list[str]
+    ) -> tuple[Any, Any]:
+        """Resize both views before the model's existing input processor."""
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        images = [
+            [
+                Image.fromarray(
+                    cv2.resize(
+                        np.asarray(image),
+                        (self.size, self.size),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                )
+                for image in row
+            ]
+            for row in batch_images
+        ]
+        return self.model.get_vla_action(batch_images=images, instructions=instructions)
+
+
+def evaluate(args, *, cases: list[tuple[int, int]] | None = None) -> dict:
     """Run serial paired evaluation with one frozen VLA resident on one GPU."""
     import random
 
@@ -359,6 +402,13 @@ def evaluate(args) -> dict:
         _eval_deterministic_local,
     )
 
+    plan = episode_plan(args.tasks, args.states)
+    if cases is not None:
+        if not cases or len(set(cases)) != len(cases) or not set(cases) <= set(plan):
+            raise ValueError(
+                "Explicit cases must be unique members of the requested plan"
+            )
+        plan = cases
     vla_path, rlt_path = asset_paths(args.storage)
     if args.learner_dir is not None:
         rlt_path = args.learner_dir
@@ -398,6 +448,9 @@ def evaluate(args) -> dict:
             strict=True,
         )
         model.eval().requires_grad_(False)
+    image_size = getattr(args, "input_image_size", None)
+    if image_size is not None:
+        vla = ResizedVLA(vla, image_size)
     outcomes = {}
     for arm, enc, act in [
         ("reference", ReferenceEncoder(), ReferenceActor()),
@@ -407,35 +460,28 @@ def evaluate(args) -> dict:
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
         rows = []
-        for task in args.tasks:
-            for state in args.states:
-                result = _eval_deterministic_local(
-                    frozen_vla=vla,
-                    encoder=enc,
-                    actor=act,
-                    suite_name="libero_goal",
-                    task_id=task,
-                    action_norm_stats=stats,
-                    max_steps=MAX_STEPS["libero_goal"],
-                    chunk_len=8,
-                    episode_indices=[state],
-                    num_steps_wait=10,
-                    seed=args.seed,
-                    device="cuda:0",
-                    video_dir=str(args.output / "videos" / arm / f"task_{task}")
-                    if args.video
-                    else None,
-                )
-                if len(result) != 1 or result[0][:2] != (state, state):
-                    raise RuntimeError(
-                        "Upstream returned an unexpected episode identity"
-                    )
-                rows.append(
-                    {"task": task, "state": state, "success": bool(result[0][2])}
-                )
-                (args.output / f"{arm}.json").write_text(
-                    json.dumps(rows, indent=2) + "\n"
-                )
+        for task, state in plan:
+            result = _eval_deterministic_local(
+                frozen_vla=vla,
+                encoder=enc,
+                actor=act,
+                suite_name="libero_goal",
+                task_id=task,
+                action_norm_stats=stats,
+                max_steps=MAX_STEPS["libero_goal"],
+                chunk_len=8,
+                episode_indices=[state],
+                num_steps_wait=10,
+                seed=args.seed,
+                device="cuda:0",
+                video_dir=str(args.output / "videos" / arm / f"task_{task}")
+                if args.video
+                else None,
+            )
+            if len(result) != 1 or result[0][:2] != (state, state):
+                raise RuntimeError("Upstream returned an unexpected episode identity")
+            rows.append({"task": task, "state": state, "success": bool(result[0][2])})
+            (args.output / f"{arm}.json").write_text(json.dumps(rows, indent=2) + "\n")
         outcomes[arm] = rows
     return paired_summary(outcomes["reference"], outcomes["rlt_a"])
 
@@ -455,7 +501,15 @@ def main() -> None:
     parser.add_argument("--learner-dir", type=Path)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--libero-python", default=sys.executable)
+    parser.add_argument(
+        "--input-image-size",
+        type=int,
+        choices=[224],
+        help="Diagnostic only: apply benchmark-client area resize before VLA input",
+    )
     args = parser.parse_args()
+    if args.input_image_size is not None and args.mode != "evaluate":
+        parser.error("--input-image-size is an evaluation-only diagnostic")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
@@ -564,6 +618,8 @@ def main() -> None:
         "gpu_uuid": gpu_uuid,
         "egl_device_index": egl_index,
         "variant": "rlt_a",
+        "input_image_size": args.input_image_size,
+        "preprocessing_diagnostic": args.input_image_size is not None,
         "assistance": False,
         "mode": args.mode,
         "runtime_versions": runtime_versions(),

@@ -151,9 +151,190 @@ The queue supports only physical GPU 2. GPUs 0/1 remain reserved for the existin
 
 The first command allocates no GPU. The second writes ``plan.json``, atomic ``status.json`` and per-job logs. A passing command needs both exit status zero and a completed experiment manifest when one is declared. Checkpointing is final-only; video is enabled only for the final task-0 comparison. Waiting, timeout and skipped jobs are not reported as completed experiments.
 
+Audit the Same Failed States Without Training
+------------------------------------------------------------
+
+When a released checkpoint falls short of its published score, compare evaluation
+entries before retraining. ``reference`` executes the frozen SFT VLA proposal;
+``rlt_a`` executes the released actor conditioned on that proposal, compressed
+VLA features and proprioception. They share the VLA but not the final action
+generator. The actor directly predicts actions, not a guaranteed residual sum.
+
+Select the released RLT_a failures from a completed paired evaluation, then run
+the upstream Python main and this branch's wrapper on the same task/state pairs:
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh audit \
+     --previous /path/to/completed/libero-release100 \
+     --tasks 5 6 9 --gpu 2 \
+     --output /path/to/new/libero-entry-audit --check
+   bash run_rlt_libero.sh audit \
+     --previous /path/to/completed/libero-release100 \
+     --tasks 5 6 9 --gpu 2 \
+     --output /path/to/new/libero-entry-audit
+
+The first command validates failure selection without allocating a GPU. The
+second refuses a busy GPU 2, hashes the four weight files before and after the
+run, and executes both entries sequentially. The wrapper also repeats the
+reference arm. All episodes save videos and JSONL traces of input-image hashes,
+proprioception, normalized reference/actor chunks, executed environment actions,
+rewards and termination flags. Initial camera images are saved as PNG files.
+``summary.json`` reports the first differing record for each pair, not just a
+success-rate difference. A complete manifest requires both entries to finish
+and the checkpoint hashes to remain unchanged.
+
+The upstream Python main keeps its model loading and inference logic. Explicit
+failure-ID filtering, passive trace hooks, one evaluation thread and disabling
+machine-specific ``.env`` loading are recorded adaptations. Both entries share
+the unchanged upstream rollout helper and the existing IPC/EGL compatibility
+wrapper. Thus matching traces exclude an entry-specific difference on these
+cases; they do not validate the simulator against the author's internal setup
+or reproduce the published 92%. These are failure-selected development episodes,
+not an unbiased benchmark or a dataset for additional training.
+
+Check the Shared Simulator and Release Files
+------------------------------------------------------------
+
+Matching evaluation entries can still share an incompatible simulator. Before
+changing model weights, check installed requirements, the complete released
+configuration and tokenizer, and the benchmark assets. The CPU-only inventory
+compares SHA-256 for Hub LFS files and Git blob hashes for ordinary files:
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit inventory \
+     --libero-source /path/to/official/LIBERO-git \
+     --output /path/to/new/environment-inventory
+
+``--libero-source`` is optional and refers to a local upstream Git repository;
+the inventory compares its HEAD tree against the active LIBERO paths without
+checking out files or changing the installation. ``summary.json`` contains file
+hash comparisons. ``manifest.json`` records package versions and unsatisfied
+active LIBERO requirements. Completion means the inspection finished, not that
+every requirement or file matched. Internet access is needed for pinned Hub
+metadata; no weights are downloaded.
+
+To distinguish model differences from simulator differences, replay an existing
+audit's executed actions without loading a VLA:
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit replay \
+     --trace /path/to/audit/official/traces/rlt_a/task_9_state_7/trace.jsonl \
+     --snapshot-ticks 212 213 290 \
+     --output /path/to/new/action-replay
+
+Replay refuses a busy GPU 2, selects its EGL device by UUID, and preserves the
+recorded LIBERO Goal initial state, seed and action sequence, including settling
+actions. ``physics.jsonl`` records qpos, qvel, control, warm-start accelerations,
+contacts, time and both camera hashes. ``model.json`` records collision masks
+and geometry names; requested snapshots save camera pixels. This is an
+open-loop diagnostic, not an autonomous success-rate measurement. Run separate
+processes to compare simulator versions or repeated renders. Keep dependency
+overlays isolated from running training environments.
+
+On 2026-10-07, all 20 downloaded release files matched their pinned Hub revision.
+The installed LIBERO tree matched upstream ``8f1084e`` for 585 assets, 135 BDDL
+files and 250 initial-state files. Its three source differences concern path
+configuration, downloading and explicit ``torch.load(weights_only=False)``;
+the environment wrapper and task dynamics files matched. However,
+``rlinf-libero==0.1.3`` requires ``mujoco>=3.0,<3.4``, while the shared environment
+had 3.8.1. A separate 3.3.7 overlay changed RLT_a success from 3/9 to 3/9 and
+reference success from 4/9 to 3/9 on tasks 5, 6, 9 and states 0, 1, 2.
+The dependency violation is real; this pilot does not establish it as the cause
+of the published-score gap.
+
+Two process-isolated replays of task 9/state 7 under the original environment
+matched all 331 recorded physics states and all primary-camera images. Their
+wrist-camera hashes differed at 15 steps, locating one source of trace
+non-repeatability in rendering/observation rather than differing physics states.
+The exact pixel-level cause and its contribution to aggregate success remain
+unverified.
+
+The original LIBERO requirements also pin robosuite 1.4.0, whereas the shared
+environment has 1.4.1, whose Panda XML adds a ``link7_collision`` geometry.
+Changing only robosuite while keeping MuJoCo 3.8.1 preserved reference success
+at 4/9 and RLT_a success at 3/9 on the same nine initial states. Open-loop replay
+of task 9/state 7 also preserved the full recorded physics state, with no
+contacts involving the added geometry. Neither single-version change has
+explained the low success rate. Effects on other initial states, or interactions
+from changing both versions together, remain untested.
+
+Compare per-task outcomes as well as aggregate sample counts. If the author's
+50 episodes are the same states 0–49 under the same protocol, our six task-9
+failures among states 0–9 limit that task to 44/50 even if every remaining state
+succeeds, below the reported 46/50. More episodes alone cannot reconcile those
+particular outcomes. The release does not supply a full internal environment
+lockfile or per-initial-state traces, so its environment remains unverified.
+
+Test Image Preprocessing Separately
+----------------------------------------
+
+The public source has another shared discrepancy: training ``_pack_sample``
+resizes each view to 224 by 224, as does the ordinary VLA benchmark client,
+whereas the RL evaluator passes 256-by-256 images directly. The release config
+omits ``datasets.vla_data.image_size``, so the model's optional resize does not
+run. A CPU check of the released processor produces 81 visual tokens per view
+through the original path, versus 64 from 224-pixel input. This establishes an
+input-distribution difference between public code paths, not the complete
+internal training configuration of the released weights or its causal effect
+on success.
+
+The optional diagnostic below applies the ordinary VLA benchmark client's
+OpenCV area resize. Weights, environment, initial states and action processing
+stay fixed. Default evaluation behavior remains unchanged:
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh evaluate --gpu 2 \
+     --tasks 5 6 9 --states 0 1 2 --input-image-size 224 --video \
+     --output /path/to/new/libero-images224-pilot
+
+The manifest explicitly records ``input_image_size`` and
+``preprocessing_diagnostic``. Even if this single-variable experiment improves
+success, it is not by itself a strict reproduction of the published 92%.
+The diagnostic is not exposed through the training entry.
+
+The nine-state 224-input diagnostic completed at 20:06 CST on 2026-10-07.
+Reference success changed from 4/9 to 6/9 and RLT_a from 3/9 to 5/9 with frozen
+weights. These inspected development cases motivate further preprocessing
+checks; they neither explain the entire score gap nor establish an RLT_a
+advantage over reference.
+
+The continuation plan is ``experiments/libero_rlt/overnight_audit_20261007.json``:
+the original 100 task/state pairs, followed by a 224-input diagnostic over all
+50 states of each of the ten tasks, without selecting tasks by pilot score.
+The old six-hour queue was stopped while waiting, preserving its completed
+artifacts. The new twelve-hour budget includes waiting, uses GPU 2 only and
+requires two consecutive idle observations. Its tmux session is
+``rlt_libero_overnight_1007``; live state is in
+``research/libero_environment_audit_20261007/overnight_queue/status.json`` on NAS.
+Occupied GPUs are never preempted. A deadline records unstarted jobs rather than
+claiming completion.
+
+After the 100-case run finishes, compare original and resized outcomes on CPU:
+
+.. code-block:: bash
+
+   bash run_rlt_libero.sh environment-audit compare-preprocessing \
+     --baseline /path/to/completed/libero-release100 \
+     --candidate /path/to/completed/images224-matched100 \
+     --output /path/to/new/preprocessing-comparison
+
+The report separates the nine inspected pilot cases from the remaining 91 and
+lists both newly successful and newly failed states. It rejects incomplete or
+assisted evaluations, updated learner weights, unmatched initial states and
+different dependency versions. The remaining cases are still public benchmark
+states, not unseen test data. These summaries establish no statistical
+significance; even the 500-case diagnostic must disclose altered preprocessing.
+Completed version pilots, inventory and replays remain indexed by
+``experiments/libero_rlt/environment_audit_results_20261007.json``. Use fresh
+output paths before reusing a dated plan.
+
 Reproduction Boundaries
 -----------------------
 
 This branch does not register an external model type in RLinf or convert ManiSkill weights into LIBERO weights. It provides an auditable public-model evaluation adapter and a bounded training adapter. Local scores come only from successfully completed local result files; upstream benchmark claims are not local results. Full-token RLT needs a separately matched Stage 1 encoder, not RLT_a weights.
 
-Official RLinf main was ``c70606f08cdca259b8dec03d4430926b5b8fac9d`` when checked on 2026-10-06. Open `PR #1623 <https://github.com/RLinf/RLinf/pull/1623>`_ concerns retained replay checkpoints; `PR #1527 <https://github.com/RLinf/RLinf/pull/1527>`_ concerns RLT phase routing. Their relevance is recorded here; neither was automatically merged into the local baseline.
+Official RLinf main remained ``c70606f08cdca259b8dec03d4430926b5b8fac9d`` when rechecked on 2026-10-07. Open `PR #1623 <https://github.com/RLinf/RLinf/pull/1623>`_ concerns retained replay checkpoints; `PR #1527 <https://github.com/RLinf/RLinf/pull/1527>`_ concerns RLT phase routing. Their relevance is recorded here; neither was automatically merged into the local baseline. The AlphaBrain source and both public model revisions were also unchanged.

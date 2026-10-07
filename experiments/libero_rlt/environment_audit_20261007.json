@@ -1,0 +1,35 @@
+{
+  "gpu": 2,
+  "hours": 6,
+  "description": "Frozen public weights only. Diagnose the 224-pixel benchmark-client preprocessing omitted by the RLT evaluator. Never interrupt an occupied GPU, use GPU0/1, train, or relabel diagnostic scores as the published 92% benchmark. The expanded run uses the same 100 task/state pairs as the original evaluation regardless of pilot performance.",
+  "jobs": [
+    {
+      "name": "images224_pilot",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_libero_dev",
+      "argv": [
+        "bash", "run_rlt_libero.sh", "evaluate", "--gpu", "2",
+        "--tasks", "5", "6", "9", "--states", "0", "1", "2",
+        "--input-image-size", "224", "--video",
+        "--output", "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_environment_audit_20261007/images224_pilot"
+      ],
+      "timeout_seconds": 1800,
+      "env": {"PYTHONPATH": ""},
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_environment_audit_20261007/images224_pilot/manifest.json"
+    },
+    {
+      "name": "images224_matched100",
+      "cwd": "/home/luokz/rlinf_rlt/UPT_libero_dev",
+      "argv": [
+        "bash", "run_rlt_libero.sh", "evaluate", "--gpu", "2",
+        "--tasks", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "--states", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "--input-image-size", "224",
+        "--output", "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_environment_audit_20261007/images224_matched100"
+      ],
+      "timeout_seconds": 7200,
+      "depends_on": ["images224_pilot"],
+      "env": {"PYTHONPATH": ""},
+      "manifest": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_environment_audit_20261007/images224_matched100/manifest.json"
+    }
+  ]
+}
