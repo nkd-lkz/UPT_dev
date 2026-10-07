@@ -29,6 +29,184 @@ from rlinf.models.embodiment.mlp_policy.rlt_mlp_policy import RLTMLPPolicy
 from rlinf.models.embodiment.modules.rlt_memory_encoder import RLTMemoryEncoder
 
 
+def test_response_context_reads_only_completed_owned_evidence():
+    from rlinf.algorithms.rlt.response_context import ResponseContext
+
+    memory = ResponseContext("error")
+    command = torch.ones(7) * 0.1
+    assert torch.equal(memory.predict(command), torch.zeros(7))
+    memory.observe(command, command * 0.2)
+    before = memory.predict(command)
+    snapshot = memory.snapshot()
+    snapshot["commands"].fill_(999)
+    command.fill_(999)
+    assert torch.equal(memory.predict(torch.ones(7) * 0.1), before)
+    with pytest.raises(ValueError, match="finite"):
+        memory.observe(torch.ones(7), torch.full((7,), float("nan")))
+    assert torch.equal(memory.predict(torch.ones(7) * 0.1), before)
+
+
+def test_response_weights_recover_old_condition_without_deleting_evidence():
+    from rlinf.algorithms.rlt.response_context import ResponseContext
+
+    memory = ResponseContext("error")
+    command = torch.ones(7) * 0.1
+    for _ in range(8):
+        memory.observe(command, command)
+    for _ in range(4):
+        memory.observe(command, command * 0.2)
+    low = memory.snapshot()
+    assert low["weights"][:8].mean() < 0.1
+    for _ in range(4):
+        memory.observe(command, command)
+    restored = memory.snapshot()
+    assert len(restored["commands"]) == 16
+    assert restored["weights"][:8].mean() > 0.9
+    assert restored["weights"][8:12].mean() < 0.1
+    memory.begin_attempt()
+    assert len(memory.snapshot()["commands"]) == 16
+    cleared = ResponseContext("clear")
+    cleared.observe(command, command)
+    cleared.begin_attempt()
+    assert len(cleared.snapshot()["commands"]) == 0
+
+
+def test_response_stream_future_changes_cannot_alter_past_predictions():
+    from toolkits.rlt.probe_memory_conditions import analyze_stream
+
+    commands = torch.ones(18, 7) * 0.08
+    outcomes = commands.clone()
+    original = analyze_stream(commands, outcomes, [0, 6, 12])
+    outcomes[9:] *= 0.1
+    changed = analyze_stream(commands, outcomes, [0, 6, 12])
+    for mode in original:
+        assert original[mode]["predictions"][:10] == changed[mode]["predictions"][:10]
+    assert len(original["clear"]["weights_before_decision"][6]) == 0
+    assert len(original["retain"]["weights_before_decision"][6]) == 6
+
+
+def _paired_response_batch():
+    from torch.utils.data import default_collate
+
+    rows = []
+    c = InteractionMemoryConfig()
+    command = torch.zeros(10, 8)
+    command[:, :7] = 0.1
+    for condition in (0, 1):
+        memory = InteractionMemory(c)
+        memory.begin_attempt("pair")
+        memory.append_completed(
+            torch.zeros(9), command, torch.ones(9) * (0.1 + condition * 0.1)
+        )
+        rows.append(
+            {
+                **memory.snapshot(torch.zeros(9)),
+                "velocity": torch.zeros(9),
+                "command": torch.ones(7) * 0.1,
+                "target": torch.ones(7) * condition,
+                "pair": torch.tensor(0),
+                "query_id": torch.tensor(0),
+                "condition": torch.tensor(condition),
+            }
+        )
+    return default_collate(rows)
+
+
+def test_wrong_history_matches_current_input_and_does_not_mutate_evidence():
+    from toolkits.rlt.probe_memory_conditions import wrong_history
+
+    batch = _paired_response_batch()
+    original = batch["memory_events"].clone()
+    wrong = wrong_history(batch)
+    assert torch.equal(wrong["memory_events"][0], original[1])
+    assert torch.equal(batch["memory_events"], original)
+    assert torch.equal(wrong["target"], batch["target"])
+    batch["velocity"][0, 0] = 1
+    with pytest.raises(ValueError, match="Current observation"):
+        wrong_history(batch)
+
+
+def test_response_probe_ignores_condition_labels_and_current_outcome():
+    from toolkits.rlt.probe_memory_conditions import MatchedResponseProbe
+
+    batch = _paired_response_batch()
+    model = MatchedResponseProbe()
+    first = model(batch, history=True)
+    for field in ("condition", "pair", "query_id", "target"):
+        batch[field] = torch.full_like(batch[field], 777)
+    assert torch.equal(first, model(batch, history=True))
+    assert torch.equal(model(batch, history=False)[0], model(batch, history=False)[1])
+
+
+def test_matched_probe_keeps_pairs_disjoint_and_shares_training_budget():
+    from toolkits.rlt.probe_memory_conditions import analyze_matched
+
+    batch = _paired_response_batch()
+    rows = []
+    for pair in (0, 32, 40):
+        for i in range(2):
+            row = {key: value[i].clone() for key, value in batch.items()}
+            row["pair"] = torch.tensor(pair)
+            rows.append(row)
+    result = analyze_matched(rows, updates=3)
+    assert set(result["fixed"]["test"]["correct_response"]["pair_mse"]) == {"40"}
+    for left, right in zip(result["learned"][::2], result["learned"][1::2]):
+        assert left["initial_sha256"] == right["initial_sha256"]
+        assert left["samples_sha256"] == right["samples_sha256"]
+        assert left["updates"] == right["updates"] == 3
+
+
+def test_research_queue_rejects_invalid_frozen_evidence(tmp_path):
+    import json
+
+    from toolkits.rlt.run_research_queue import validate_evaluation
+
+    run = tmp_path / "stage2_test"
+    output = run / "stage2_portable"
+    output.mkdir(parents=True)
+    (run / "exit_code.txt").write_text("0\n")
+    audit = {
+        "weights_unchanged": True,
+        "actor_slots": 0,
+        "initial_observation_sha256": "a" * 64,
+    }
+    (output / "route-audit.json").write_text(json.dumps(audit))
+    episodes = [
+        {"lane": i, "seed": 4101, "success_once": int(i < 4)} for i in range(16)
+    ]
+    path = output / "episode-records.json"
+    path.write_text(json.dumps(episodes))
+    assert validate_evaluation(tmp_path, seed=4101, reference=True)["successes"] == 4
+    episodes[0]["lane"] = 1
+    path.write_text(json.dumps(episodes))
+    with pytest.raises(ValueError, match="distinct"):
+        validate_evaluation(tmp_path, seed=4101, reference=True)
+    episodes[0]["lane"] = 0
+    path.write_text(json.dumps(episodes))
+    audit["actor_slots"] = 1
+    (output / "route-audit.json").write_text(json.dumps(audit))
+    with pytest.raises(ValueError, match="Reference comparator"):
+        validate_evaluation(tmp_path, seed=4101, reference=True)
+
+
+def test_research_queue_executes_owned_child_with_timeout(tmp_path):
+    import sys
+
+    from toolkits.rlt.run_research_queue import execute_job
+
+    (tmp_path / "logs").mkdir()
+    job = {
+        "id": "test",
+        "cwd": str(tmp_path),
+        "command": [sys.executable, "-c", "import time; time.sleep(30)"],
+    }
+    states = []
+    code, elapsed = execute_job(
+        job, tmp_path, timeout=0.15, heartbeat=lambda pid, dt: states.append(pid)
+    )
+    assert code == 124 and elapsed < 5 and states
+
+
 def test_diagnostic_rejects_nonfinite_unrecorded_and_intervened_rows(config):
     from toolkits.rlt.diagnose_actor_learning import transition_batch
 

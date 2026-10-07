@@ -54,3 +54,27 @@ campaign launcher 显式设置 `RLT_MEMORY_READER=zero`、`RLT_EVAL_CHECKPOINT`�
 baseline 学习验收后，再测正确／无／匹配错误历史；随后做条件 A→B→A，比较清空、保留、时间衰减与后果误差降权；最后做记忆 × 已通过恢复验收的固定 expert。这些后续实验不自动启动。报告逐次尝试的无辅助成功率与纠错时长。
 
 CPU 测试覆盖数据拒绝、版本分组、缺失文件计数、原索引不变、相同初始化与采样、零 Q 热身一致及启用 Q 后的差异。GPU 检查拒绝被占用或无法读取的设备；设备占用时仿真验证仍待执行。
+## 10-06 晚间续跑与经验诊断
+
+本节说明 baseline 之后怎样继续验证历史信息，实际进度以 campaign 状态文件为准。两卡等待延长为 24 小时，每张卡实际执行总预算为 6 小时。`toolkits/rlt/run_research_queue.py` 保存逐任务状态、checkpoint 哈希和退出码。已完成且复验通过的任务可跳过；失败或被中断的任务必须先检查再重试。新队列采用固定提交的独立 checkout，保留原 baseline 版本；旧归档缺少 Git 元数据，而启动器在预检后会调用 `git rev-parse`。
+
+16 个 baseline run 全部通过回合、权重、路由与配对初态检查后，两卡先分别执行小型仿真 smoke，再运行响应诊断。这些检查只说明数据有效，不证明 baseline 收敛，也不会自动触发新 RL 或 expert 训练。
+
+| GPU | 先执行 | baseline 与 smoke 验收后 |
+|---|---|---|
+| 0 | BC-only、reference-only，各四个 seed | 56 对响应试验，每个条件四次查询 |
+| 1 | Q+BC、旧零 context head，各四个 seed | 六对稳定条件／A→B→A 响应流 |
+
+响应试验在两种机械臂驱动刚度下分别采集八个真实的 10 tick 动作块，再保留标定历史、复位到相同种子的查询场景。这是使用仿真复位能力的特权诊断，不能当作正常部署流程。两条件的完整仿真状态哈希、当前 qpos、速度和查询命令必须一致。错误历史来自配对条件，历史命令和有效槽数量保持匹配；隐藏刚度标签不进入预测器。按 pair 0–31／32–39／40–55 划分训练、验证与测试。三个 seed 分别训练同容量无历史／固定响应头，各 512 次更新；初始化和采样匹配，只报告预定最后一步。工程 smoke 只用两对数据，不训练模型。
+
+`rlinf/algorithms/rlt/response_context.py` 实现四种诊断读取规则：每次明确的尝试起点清空、始终保留、时间衰减、按最近四条已完成响应计算误差权重。容量均为 32。误差权重可以恢复，但近期一致性不是校准后的可信度。该模块尚未接入正式 actor。真实 A→B→A 与稳定条件使用相同尝试边界；条件编号和未来后果都不传给 reader。
+
+首轮合成测试采用线性系统、六个 seed 和固定阈值，不属于机器人仿真。恢复到 A 后，前四块 MSE 为保留 0.000389、误差降权 0.000696。这个反例不支持直接把降权升级到 RL；仿真诊断用于检验适用范围。
+
+在已有环境中，用新输出目录运行 CPU 诊断：
+
+```bash
+CUDA_VISIBLE_DEVICES='' "$RLINF_VENV/bin/python" -m toolkits.rlt.probe_memory_conditions synthetic --output "$CAMPAIGN/synthetic"
+```
+
+物理 GPU 空闲后，用同一模块执行 `matched --gpu 0 --output "$CAMPAIGN/matched"` 或 `shift --gpu 1 --output "$CAMPAIGN/shift"`；去掉 CPU 示例中的 `CUDA_VISIBLE_DEVICES=''`，由工具隔离所选 GPU。增加 `--smoke` 先做接口验收。工具取得项目 GPU 锁，并在创建仿真前再次检查显存和计算进程。指标单位是原始关节位移平方误差；这些诊断都不测量任务成功率、纠错节省或迁移收益。

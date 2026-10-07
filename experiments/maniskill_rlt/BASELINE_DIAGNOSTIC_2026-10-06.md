@@ -2,6 +2,31 @@
 
 This protocol compares BC-only and Q+BC on the same saved transitions before another online memory experiment. It uses the production small head and loss functions on CPU. Simulator evaluation follows when a GPU is available. The campaign manifest records actual progress and results.
 
+## Continue after the baseline evaluation
+
+The October 6 evening campaign extends GPU waiting to 24 hours and limits actual work to six hours per GPU. `toolkits/rlt/run_research_queue.py` keeps atomic job status, owned child-process timeouts, pinned checkpoint hashes and complete frozen-evaluation checks. Completed jobs can be resumed without repetition; failed or interrupted jobs require inspection before retrying. Independent detached checkouts retain the original baseline revision and the new diagnostic revision. An archive without Git metadata is unsuitable for the existing launcher, which calls `git rev-parse` after preflight.
+
+After all 16 baseline runs pass the episode, weight, route and paired-initial-state checks, each GPU runs a small simulator smoke before its diagnostic. These checks establish usable evidence, not baseline convergence. They authorize response diagnosis only; no new RL or expert training starts automatically.
+
+| GPU | First | After baseline validation and smoke |
+|---|---|---|
+| 0 | BC-only and reference-only, four seeds each | 56 paired response trials, four queries per condition |
+| 1 | Q+BC and old zero head, four seeds each | Six paired stationary / A-B-A response streams |
+
+The response trial collects eight real ten-tick command blocks under each arm stiffness, then restores the same seeded scene for each query while retaining calibration history. This is a privileged diagnostic reset, not a normal deployment reset. Full simulator-state hashes, current qpos, velocity and query commands must agree across conditions. Wrong history comes from the paired condition with the same historical commands and valid slots. The hidden stiffness label is never a predictor input. Pairs 0–31, 32–39 and 40–55 form training, validation and test partitions. Three seeds train equal-size no-history / fixed-response heads for 512 updates with identical initialization and sampling. Test uses the final update only. An engineering smoke uses two pairs and does not fit a model.
+
+`rlinf/algorithms/rlt/response_context.py` implements four diagnostic readers: clear at every declared attempt start, retain, time decay, and error weighting against the last four completed responses. All retain at most 32 records. Error weights can recover, but recent agreement is not calibrated confidence. The module is not wired into the production actor. Real A-B-A and stationary controls share attempt boundaries; condition IDs and future outcomes stay outside the reader.
+
+The first synthetic run uses a linear plant, six seeds and fixed thresholds. It is not robot simulation. At return to A, first-four-block MSE is 0.000389 for retention versus 0.000696 for error weighting. This counterexample does not justify promoting error weighting into RL. The simulator probe may reveal its limits, not automatically endorse it.
+
+Run the CPU diagnostic with the existing environment and a new output path:
+
+```bash
+CUDA_VISIBLE_DEVICES='' "$RLINF_VENV/bin/python" -m toolkits.rlt.probe_memory_conditions synthetic --output "$CAMPAIGN/synthetic"
+```
+
+Once a physical GPU is free, invoke the same module with `matched --gpu 0 --output "$CAMPAIGN/matched"` or `shift --gpu 1 --output "$CAMPAIGN/shift"`. Remove the CPU example's `CUDA_VISIBLE_DEVICES=''`; the tool isolates its selected GPU. Add `--smoke` for integration validation. The tool takes the shared project GPU lease and rechecks memory/processes before simulator creation. Recorded units are raw joint-displacement squared error. None of these prediction diagnostics measure task success, correction savings or transfer.
+
 ## Why this diagnostic comes first
 
 The October 4 frozen comparison found 16/64 successes for zero context, 15/64 for response memory, and 19/64 for reference-only. Only 26/64 episodes reached the learned actor. A memory condition at that gate cannot directly fix the other episodes. This diagnostic separates reference imitation error from the effect of the actor's Q term. It does not establish memory utility.
