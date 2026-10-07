@@ -575,3 +575,75 @@ def test_zero_context_matches_response_capacity_and_initialization():
     history["memory_events"].fill_(float("nan"))
     assert torch.count_nonzero(zero.memory_encoder(history)) == 0
     assert not list(zero.memory_encoder.parameters())
+
+
+@pytest.mark.parametrize("variant", ["native", "zero_context", "reference"])
+def test_frozen_evaluation_routes_at_version_zero_without_mutating_training(
+    monkeypatch, tmp_path, variant
+):
+    from rlinf.algorithms.rlt.route import RLTRouteContext, build_rlt_route
+    from toolkits.rlt.evaluate_memory_checkpoint import evaluation_config
+
+    root = Path(__file__).resolve().parents[2]
+    for key, value in {
+        "EMBODIED_PATH": str(root / "examples/embodiment"),
+        "RLT_STAGE1_ACTOR": str(tmp_path / "stage1"),
+        "RLT_DATASET_DIR": str(tmp_path / "dataset"),
+        "RLT_SMOKE_RUN_DIR": str(tmp_path / "output"),
+        "RLT_SMOKE_RENDER_DEVICE": "pci:0000:46:00.0",
+    }.items():
+        monkeypatch.setenv(key, value)
+    with initialize_config_dir(
+        config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+    ):
+        cfg = compose(
+            config_name="maniskill_rlt_stage2_smoke_gpu2",
+            overrides=["+experiment=rlt_memory_response", "+pilot=rlt_memory_matched"],
+        )
+    original = OmegaConf.to_container(cfg, resolve=True)
+    checkpoint = tmp_path / "full_weights.pt"
+    checkpoint.touch()
+    evaluated = evaluation_config(
+        cfg, checkpoint=checkpoint, variant=variant, num_envs=16, seed=4001
+    )
+    validate_interaction_memory_cfg(evaluated)
+    route = build_rlt_route(evaluated)
+    student = torch.ones(2, 10, 8)
+    result = route.route(
+        RLTRouteContext(
+            env_obs={},
+            rlt_obs={"ref_chunk": torch.zeros_like(student)},
+            student_actions=student,
+            result={"forward_inputs": {}},
+            mode="eval",
+            version=0,
+            rlt_switch_flags=torch.tensor([True, False]),
+        )
+    )
+    expected = torch.zeros_like(student)
+    if variant != "reference":
+        expected[0] = 1
+    torch.testing.assert_close(result.actions, expected)
+    assert evaluated.runner.only_eval and evaluated.runner.resume_dir is None
+    assert evaluated.rollout.expert_model is None
+    assert evaluated.env.eval.total_num_envs == 16
+    assert OmegaConf.to_container(cfg, resolve=True) == original
+
+
+def test_frozen_memory_counterfactual_preserves_weights_input_and_rng(config):
+    from dataclasses import replace
+
+    from toolkits.rlt.evaluate_memory_checkpoint import tensor_digest
+
+    model = _policy(replace(config, reader_type="response"))
+    model.eval().requires_grad_(False)
+    obs = _obs(config)
+    weights, inputs = tensor_digest(model.state_dict()), tensor_digest(obs)
+    rng = torch.get_rng_state().clone()
+    native, _ = model.predict_action_batch(obs, mode="eval")
+    empty = {**obs, "memory_valid": torch.zeros_like(obs["memory_valid"])}
+    cleared, _ = model.predict_action_batch(empty, mode="eval")
+    assert not torch.equal(native, cleared)
+    assert tensor_digest(model.state_dict()) == weights
+    assert tensor_digest(obs) == inputs
+    assert torch.equal(torch.get_rng_state(), rng)

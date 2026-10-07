@@ -34,9 +34,14 @@ if [[ "$memory_enabled" == 1 && "${RLT_MEMORY_READER:-attention}" != attention ]
     # baseline flat-parameter path on this single-GPU pilot.
     world_overrides+=(actor.fsdp_config.use_orig_params=False)
 fi
-if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
-    echo "Usage: RLT_PHYSICAL_GPU=N bash run_rlt_portable.sh [--world|--memory] [--check|--probe]" >&2
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe && "$1" != --eval ) ]]; then
+    echo "Usage: RLT_PHYSICAL_GPU=N bash run_rlt_portable.sh [--world|--memory] [--check|--probe|--eval]" >&2
     exit 2
+fi
+if [[ "${1:-}" == --eval ]]; then
+    [[ "$memory_enabled" == 1 ]] || { echo '--eval requires --memory.' >&2; exit 2; }
+    : "${RLT_EVAL_CHECKPOINT:?Set a frozen Stage 2 full_weights.pt checkpoint}"
+    [[ -f "$RLT_EVAL_CHECKPOINT" ]] || { echo 'Evaluation checkpoint is missing.' >&2; exit 2; }
 fi
 world_overrides+=(
     "cluster.component_placement.actor=$RLT_PHYSICAL_GPU-$RLT_PHYSICAL_GPU"
@@ -304,6 +309,18 @@ fi
 python examples/embodiment/train_embodied_agent.py \
     --config-name maniskill_rlt_stage2_smoke_gpu2 "${world_overrides[@]}" --cfg job --resolve \
     > "$RLT_SMOKE_RUN_DIR/resolved-config.yaml"
+if [[ "${1:-}" == --eval ]]; then
+    python -m toolkits.rlt.evaluate_memory_checkpoint \
+        --config "$RLT_SMOKE_RUN_DIR/resolved-config.yaml" \
+        --checkpoint "$RLT_EVAL_CHECKPOINT" \
+        --variant "${RLT_EVAL_VARIANT:-native}" \
+        --num-envs "${RLT_EVAL_ENVS:-16}" \
+        --seed "${RLT_EVAL_SEED:-4001}" &
+    train_pid=$!
+    wait "$train_pid"
+    train_pid=
+    exit 0
+fi
 python examples/embodiment/train_embodied_agent.py \
     --config-name maniskill_rlt_stage2_smoke_gpu2 "${world_overrides[@]}" &
 train_pid=$!
