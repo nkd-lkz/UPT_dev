@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 "$RLINF_VENV/bin/python" \
   --output "$CAMPAIGN/training" --steps 2048 --seed 1234 --threads 2
 ```
 
-batch 为 32，microbatch 为 8，每四次 critic 更新执行一次 actor 更新。每组执行 2,048 次 critic／512 次 actor 更新。前 512 次 critic 更新的 Q 系数为零，之后 512 次线性增加到 0.05；BC 系数保持 7.0。公共零 Q 热身期的两组权重应完全一致。
+batch 为 32，microbatch 为 8，每次 critic 更新都执行一次 actor 更新。每组执行 2,048 次 critic／2,048 次 actor 更新。实际 pilot 已把底层默认的 4:1 比例覆盖为 1:1。前 512 次 critic 更新的 Q 系数为零，之后 512 次线性增加到 0.05；BC 系数保持 7.0。公共零 Q 热身期的两组权重应完全一致。
 
 工具直接调用 `RLTACLossMixin` 的正式损失，只跳过 worker 计时装饰器。保留参数归属、Adam 默认值、随机动作采样、microbatch 顺序、全模型梯度裁剪与 target EMA。不复现 FSDP、增长中的 replay 或旧 optimizer 状态。
 

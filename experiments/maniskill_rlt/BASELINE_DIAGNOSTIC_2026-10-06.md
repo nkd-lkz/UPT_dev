@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 "$RLINF_VENV/bin/python" \
   --output "$CAMPAIGN/training" --steps 2048 --seed 1234 --threads 2
 ```
 
-The pilot config uses batch 32, microbatch 8 and four critic updates per actor update: 2,048 critic updates and 512 actor updates per arm. Q weight is zero for 512 critic updates, ramps to 0.05 over the next 512, then stays at 0.05. BC weight stays at 7.0. The arms should remain identical during the common zero-Q warmup.
+The pilot config uses batch 32, microbatch 8 and one critic update per actor update: 2,048 critic updates and 2,048 actor updates per arm. The resolved pilot overrides the base config's 4:1 ratio. Q weight is zero for 512 critic updates, ramps to 0.05 over the next 512, then stays at 0.05. BC weight stays at 7.0. The arms should remain identical during the common zero-Q warmup.
 
 The tool calls `RLTACLossMixin`'s production losses, bypassing only worker timing decorators. It preserves optimizer ownership, Adam defaults, stochastic sampling, microbatch ordering, whole-model gradient clipping and target EMA. It does not reproduce FSDP, growing replay or original optimizer state.
 
