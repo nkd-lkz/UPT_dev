@@ -1,0 +1,10 @@
+# @package _global_
+# Same head width and initialization as response; history contributes no context.
+defaults:
+  - rlt_memory_response
+  - _self_
+
+actor:
+  model:
+    interaction_memory:
+      reader_type: zero

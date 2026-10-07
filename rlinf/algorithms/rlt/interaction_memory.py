@@ -52,8 +52,8 @@ class InteractionMemoryConfig:
             raise ValueError("retrieval_size must be between zero and archive_size")
         if self.hidden_dim % self.num_heads:
             raise ValueError("hidden_dim must be divisible by num_heads")
-        if self.reader_type not in ("attention", "response"):
-            raise ValueError("reader_type must be attention or response")
+        if self.reader_type not in ("attention", "response", "zero"):
+            raise ValueError("reader_type must be attention, response or zero")
         if self.reader_type == "response" and (
             self.action_dim < 2
             or self.proprio_dim < self.action_dim - 1

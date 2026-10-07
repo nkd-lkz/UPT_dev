@@ -56,7 +56,7 @@ class RLTMemoryEncoder(nn.Module):
         super().__init__()
         self.config = config
         c = config
-        if c.reader_type == "response":
+        if c.reader_type in ("response", "zero"):
             # Parameter-free comparator with the same downstream context width.
             return
         self.event = nn.Sequential(
@@ -89,6 +89,9 @@ class RLTMemoryEncoder(nn.Module):
             raise ValueError("Memory observation does not match configured schema")
         if valid.dtype != torch.bool:
             raise ValueError("memory_valid must be boolean")
+        if c.reader_type == "zero":
+            # Preserve the response comparator's head width and initialization.
+            return events.new_zeros((batch, c.hidden_dim))
         if c.reader_type == "response":
             features = response_features(obs, c)
             return torch.nn.functional.pad(

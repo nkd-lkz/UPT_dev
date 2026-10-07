@@ -1,0 +1,15 @@
+# @package _global_
+# Bounded within-branch comparison, not a reproduction of the full RLT budget.
+defaults:
+  - rlt_overnight
+  - _self_
+
+env:
+  train:
+    total_num_envs: 4
+    rlt_policy_switch:
+      trigger_mode: auto
+  eval:
+    total_num_envs: 8
+    rlt_policy_switch:
+      trigger_mode: auto

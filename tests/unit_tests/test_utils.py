@@ -782,3 +782,67 @@ def test_redirected_entrypoint_failure_is_not_reported_as_success(tmp_path):
 
     assert result.returncode == 1, result.stderr
     assert "entrypoint failed" in (tmp_path / "exp" / "log" / "main.log").read_text()
+
+
+def test_memory_comparison_changes_only_context_information(monkeypatch, tmp_path):
+    """Keep task, data, optimization and head initialization controls aligned."""
+    from hydra import compose, initialize_config_dir
+
+    from rlinf.algorithms.rlt.interaction_memory import validate_interaction_memory_cfg
+
+    root = Path(__file__).resolve().parents[2]
+    for key, value in {
+        "EMBODIED_PATH": str(root / "examples/embodiment"),
+        "RLT_STAGE1_ACTOR": str(tmp_path / "actor"),
+        "RLT_DATASET_DIR": str(tmp_path / "data"),
+        "RLT_SMOKE_RUN_DIR": str(tmp_path / "run"),
+        "RLT_SMOKE_RENDER_DEVICE": "pci:0000:46:00.0",
+    }.items():
+        monkeypatch.setenv(key, value)
+    configs = []
+    for reader in ("zero", "response"):
+        with initialize_config_dir(
+            config_dir=str(root / "examples/embodiment/config"), version_base="1.1"
+        ):
+            cfg = compose(
+                config_name="maniskill_rlt_stage2_smoke_gpu2",
+                overrides=[
+                    f"+experiment=rlt_memory_{reader}",
+                    "+pilot=rlt_memory_matched",
+                ],
+            )
+        validate_interaction_memory_cfg(cfg)
+        assert cfg.env.train.total_num_envs == 4
+        assert cfg.env.eval.total_num_envs == 8
+        assert cfg.rollout.expert_model is None
+        assert cfg.actor.seed == 1234
+        for env in (cfg.env.train, cfg.env.eval):
+            assert env.rlt_policy_switch.trigger_mode == "auto"
+            assert not env.rlt_policy_switch.expert_takeover.enable
+        cfg.actor.model.interaction_memory.reader_type = "response"
+        configs.append(OmegaConf.to_container(cfg, resolve=True))
+    assert configs[0] == configs[1]
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        {"RLT_COMPARISON_HOURS": "0"},
+        {"RLT_COMPARISON_STEPS": "19"},
+        {"RLT_COMPARISON_INTERVAL": "0"},
+    ],
+)
+def test_memory_comparison_rejects_invalid_budget_before_creating_output(
+    tmp_path, budget
+):
+    root = Path(__file__).resolve().parents[2]
+    output = tmp_path / "run"
+    result = subprocess.run(
+        ["bash", str(root / "run_rlt_memory_comparison.sh"), "zero", "0"],
+        env={**os.environ, "RLT_OUTPUT_ROOT": str(output), **budget},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert not output.exists()

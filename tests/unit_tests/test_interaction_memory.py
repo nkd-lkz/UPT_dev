@@ -537,3 +537,36 @@ def test_response_reader_partial_commands_and_old_checkpoint(config):
     restored = InteractionMemory(config)
     restored.load_state_dict(state)
     assert restored.instance_id == "legacy"
+
+
+def test_zero_context_matches_response_capacity_and_initialization():
+    """Attribute this comparison to history, not a wider or different initial head."""
+    from dataclasses import replace
+
+    response_config = replace(InteractionMemoryConfig(), reader_type="response")
+    zero_config = replace(response_config, reader_type="zero")
+    torch.manual_seed(1234)
+    response = _policy(response_config)
+    torch.manual_seed(1234)
+    zero = _policy(zero_config)
+    assert response.state_dict().keys() == zero.state_dict().keys()
+    for key, tensor in response.state_dict().items():
+        torch.testing.assert_close(tensor, zero.state_dict()[key], rtol=0, atol=0)
+    empty = _obs(response_config, empty=True)
+    torch.testing.assert_close(
+        response.sac_forward(empty, deterministic=True)[0],
+        zero.sac_forward(empty, deterministic=True)[0],
+        rtol=0,
+        atol=0,
+    )
+    history = _obs(response_config)
+    assert torch.count_nonzero(response.memory_encoder(history)) > 0
+    torch.testing.assert_close(
+        zero.sac_forward(history, deterministic=True)[0],
+        zero.sac_forward(empty, deterministic=True)[0],
+        rtol=0,
+        atol=0,
+    )
+    history["memory_events"].fill_(float("nan"))
+    assert torch.count_nonzero(zero.memory_encoder(history)) == 0
+    assert not list(zero.memory_encoder.parameters())

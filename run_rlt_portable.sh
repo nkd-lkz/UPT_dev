@@ -15,13 +15,19 @@ case "${1:-}" in
         shift ;;
     --memory)
         memory_enabled=1
-        world_overrides=(+experiment=rlt_memory)
+        case "${RLT_MEMORY_READER:-attention}" in
+            attention) world_overrides=(+experiment=rlt_memory) ;;
+            response) world_overrides=(+experiment=rlt_memory_response) ;;
+            zero) world_overrides=(+experiment=rlt_memory_zero) ;;
+            *) echo 'RLT_MEMORY_READER must be attention, response or zero.' >&2; exit 2 ;;
+        esac
         shift ;;
 esac
 case "${RLT_SMOKE_PROFILE:-smoke}" in
     smoke) ;;
     overnight) world_overrides+=(+pilot=rlt_overnight) ;;
-    *) echo 'RLT_SMOKE_PROFILE must be smoke or overnight.' >&2; exit 2 ;;
+    matched) world_overrides+=(+pilot=rlt_memory_matched) ;;
+    *) echo 'RLT_SMOKE_PROFILE must be smoke, overnight or matched.' >&2; exit 2 ;;
 esac
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --check && "$1" != --probe ) ]]; then
     echo "Usage: RLT_PHYSICAL_GPU=N bash run_rlt_portable.sh [--world|--memory] [--check|--probe]" >&2
@@ -301,6 +307,10 @@ train_pid=
 if (( (world_enabled == 1 || memory_enabled == 1) && smoke_steps >= 2 )); then
     adapter_prefix=latent_world.
     [[ "$memory_enabled" == 0 ]] || adapter_prefix=memory_encoder.
+    if [[ "$memory_enabled" == 1 && "${RLT_MEMORY_READER:-attention}" != attention ]]; then
+        # These readers have no parameters; the learned critic must still update.
+        adapter_prefix=q_head.
+    fi
     audit_root="$RLT_SMOKE_RUN_DIR/stage2_portable/checkpoints"
     latest="$audit_root/global_step_$smoke_steps/actor/model_state_dict/full_weights.pt"
     mapfile -t saved_steps < <(

@@ -1,5 +1,7 @@
 # Inspect the RLT Interaction-Memory Branch
 
+For the current matched two-GPU control experiment, read [the October 3 campaign protocol](MATCHED_CAMPAIGN_2026-10-03.md). The earlier overnight pilot below uses different routing and is retained for history.
+
 ## Run a bounded pilot on another server
 
 After installing the OpenPI/ManiSkill environment in the sibling `UPT_dev/.venv` and making the shared dataset, Stage 1 step-2000 checkpoint, tokenizer and simulator assets available, run this command from this branch:
