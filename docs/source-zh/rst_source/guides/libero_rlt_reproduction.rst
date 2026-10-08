@@ -229,6 +229,32 @@ manifest 显式记录 ``input_image_size`` 和 ``preprocessing_diagnostic``。22
 
 命令拒绝未完成、带 assistance、使用新 learner 权重、初态或依赖版本不同的输入。其余 91 个仍是公开 benchmark 初态，不是未见测试集。汇总不能证明统计显著性；500 回合诊断也仍须注明修改过预处理。已完成版本对照、文件盘点、动作回放与结果索引保留在 ``experiments/libero_rlt/environment_audit_results_20261007.json``。复用日期化计划前必须更换输出目录。
 
+先验收学习闭环，再扩大训练
+--------------------------
+
+独立的 acceptance 队列会先建立新协议下的 task 0 reference，再检验从头初始化的 actor 能否保留其能力，最后加入 critic 目标。2026-10-07 全套诊断中的 reference 84.2% 仍属于旧协议，不能与本轮单任务结果直接比较。
+
+协议 ``libero-rlt-a-acceptance-v1`` 固定 MuJoCo 3.3.7、robosuite 1.4.1、NumPy 1.26.4、Transformers 4.53.2 和 tokenizers 0.21.4。训练与评估都将两个 256 像素视角通过 OpenCV area resize 缩到 224 像素，使用同一冻结 VLA／encoder 和官方动作转换。本机 acceptance venv 单独覆盖 MuJoCo 和 Transformers，通过共享 venv 读取现有 GPU 依赖，不修改共享安装。这是当前路线的依赖隔离，不是供未使用的 OpenPI、LeRobot 或 dm-control 运行的全新环境。配置时发现共享 Transformers 的安装元数据为 4.57.6，实际模块却为 4.53.2；新 venv 安装一致的 4.53.2，并同时记录模块与安装版本。
+
+在已准备好的 supermicro 主机上，在 tmux 内启动有限时长的队列：
+
+.. code-block:: bash
+
+   cd "$HOME/rlinf_rlt/UPT_libero_dev"
+   bash run_rlt_libero_acceptance.sh \
+     --gpus 0 1 --control-budget 32000 --bc-updates 5000 \
+     --max-hours 12 --wandb online --output /path/to/new/acceptance
+
+命令对指定 GPU 连续检查两次空闲，等待计入 12 小时总时限，不结束其他用户进程。``status.json`` 区分等待、运行、执行失败和 BC 验收停止。W&B 可连接时同步指标；有时限的连接尝试失败后，JSONL 仍保留本地记录。输出应放在容量充足的结果盘。每 16,000 个仿真 tick 及结束时只保存小网络、optimizer 和 replay，不重复保存冻结 VLA。
+
+队列先采集 task 0 公开初态 0–29 的 reference 轨迹：0–23 用于 BC，24–29 用于动作跟随误差验证，30–49 用于开发阶段的闭环门槛。这些公开初态均已被查看过。另用 seed 20000–20049 生成 50 个随机初态，保存 XML 和物理状态，检查重复恢复与状态去重。只有仿真器能读取这些状态，actor 的输入仍是两路图像和本体状态。独立验证只在开发决策完成后评估，其数据不进入 replay。这是同一任务的新初始配置，不是新任务，也不证明预训练 VLA 从未见过相似配置。
+
+BC 热身执行 5,000 次 actor 更新，reference dropout 为 0.5，动作分布固定标准差为 0.1。开发门槛要求：留出数据 MSE 同时小于 0.02 和初始值的一半，夹爪阈值判断不一致率不超过 5%，reference 成功率至少 50%，并且 20 个配对回合中的 BC 成功数至多比 reference 少 2 个。这是工程停止条件，不是统计非劣性结论；不通过就停止在线 RL，不用剩余 GPU 时间继续放大尚未验收的 actor。
+
+验收通过后，GPU 0 跑 BC-only，GPU 1 跑 Q＋BC，两组从完全相同的热身 checkpoint、optimizer 和 replay 出发。两边按相同调度训练用于诊断的 critic，但只有 Q＋BC 将 Q 项传入 actor 梯度。每组最多使用 32,000 个仿真 tick，包含稳定等待；剩余预算不足以开始有控制动作的新回合时，最多留下 10 个 tick。指标记录实际 actor／critic 更新数，每个执行 chunk 记录真实行为版本。此同步 learner 是明确标注的 RLT_a 训练适配：按已执行 tick 折扣、对时间截断 bootstrap、将未执行完整的非终止 chunk 前缀排除出 TD，并在每次 actor 更新后直接使用新权重。它不是未修改的 AlphaBrain 训练脚本，也不是 full-token RLT。
+
+Seed 42 是开发实验。只有其 Q＋BC 在开发评估中超过 BC-only 且达到 reference，才继续 seed 43、44；每个新 seed 仍须通过独立的 BC 验收。50 个生成初态的结果另行报告，包含配对成功与失败；解释结果时必须披露条件式扩展和单任务范围。整轮实验关闭记忆、planner 和人工辅助。
+
 复现边界
 --------
 

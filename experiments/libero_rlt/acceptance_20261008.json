@@ -1,0 +1,57 @@
+{
+  "recorded_at": "2026-10-08T12:31:00+08:00",
+  "scope": "Task-0 RLT_a learning-loop acceptance, not a full-suite benchmark",
+  "branch": "research/rlt-libero-reproduction",
+  "protocol": "libero-rlt-a-acceptance-v1",
+  "tmux": "rlt_libero_acceptance_1008",
+  "output": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_acceptance_20261008_1230",
+  "live_status": "/mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_acceptance_20261008_1230/status.json",
+  "status_at_recording": "waiting_gpu",
+  "training_started_at_recording": false,
+  "gpu_indices": [0, 1],
+  "gpu2_touched": false,
+  "external_gpu_processes_interrupted": false,
+  "command": "bash run_rlt_libero_acceptance.sh --gpus 0 1 --control-budget 32000 --bc-updates 5000 --max-hours 12 --wandb online --output /mnt/nas_ailab_434/Personal_File/luokz/rlinf_rlt_maniskill/research/libero_acceptance_20261008_1230",
+  "runtime": {
+    "venv": "/home/luokz/rlinf_rlt/.venv-libero-acceptance",
+    "isolation": "Local MuJoCo and Transformers overrides; other dependencies read from the shared venv without modifying it",
+    "mujoco": "3.3.7",
+    "robosuite": "1.4.1",
+    "numpy": "1.26.4",
+    "transformers": "4.53.2",
+    "tokenizers": "0.21.4",
+    "torch": "2.11.0+cu128",
+    "rlinf_libero_active_requirements": "passed",
+    "full_pip_check": "Not clean for unrelated inherited OpenPI, LeRobot and dm-control requirements; do not use this venv for those workflows"
+  },
+  "tests": {
+    "cpu_suite": {"passed": 38, "skipped": 3},
+    "libero_osmesa_integration": {"passed": 1, "scope": "Fresh state save/restore, state uniqueness, IPC observations; CPU software rendering only"},
+    "ruff": "passed",
+    "shell_syntax": "passed",
+    "sphinx_en": "zero warnings",
+    "sphinx_zh": "zero warnings",
+    "gpu_acceptance": "pending GPU availability"
+  },
+  "schedule": {
+    "collection_published_states": [0, 29],
+    "bc_training_published_states": [0, 23],
+    "bc_following_holdout_states": [24, 29],
+    "development_rollout_states": [30, 49],
+    "validation_generated_seeds": [20000, 20049],
+    "initial_seed": 42,
+    "conditional_replication_seeds": [43, 44],
+    "physical_steps_per_training_arm_including_settling": 32000,
+    "bc_actor_updates": 5000,
+    "memory": false,
+    "planner": false,
+    "human_assistance": false,
+    "gates": "Stop RL if BC following/control fails; expand seeds only after a positive development comparison; never use new validation outcomes to expand training"
+  },
+  "upstream_read_only_checks": {
+    "rlinf_main": "e27e63153687d91a13a3412bb0336db07b4737e7",
+    "alphabrain_main": "604924beb77b04b0da49326dfae6ea423a27d28a",
+    "automatically_merged": false
+  },
+  "claims": "Engineering tests and a live waiting queue are not model-training results. Read live status and completed per-job manifests before reporting performance. The prior 84.2% reference score belongs to the old full-suite protocol."
+}

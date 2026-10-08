@@ -332,6 +332,78 @@ Completed version pilots, inventory and replays remain indexed by
 ``experiments/libero_rlt/environment_audit_results_20261007.json``. Use fresh
 output paths before reusing a dated plan.
 
+Accept the Learning Loop Before Scaling
+------------------------------------------------------------
+
+Use the separate acceptance campaign to establish a new task-0 reference and
+test whether a fresh actor preserves it before adding the critic objective.
+The 84.2% reference result from the 2026-10-07 full-suite diagnostic remains an
+old-protocol result. Do not compare its absolute score to this task-0 experiment.
+
+Protocol ``libero-rlt-a-acceptance-v1`` fixes MuJoCo 3.3.7, robosuite 1.4.1,
+NumPy 1.26.4, Transformers 4.53.2 and tokenizers 0.21.4. Both training and
+evaluation resize both 256-pixel views to 224 pixels using OpenCV area resize,
+then use the same frozen VLA/encoder and official action conversion. The local
+acceptance venv overrides MuJoCo and Transformers while reading the existing GPU
+stack from the shared venv; it does not modify that shared installation. This
+is dependency isolation for this route, not a clean installation for the unused
+OpenPI, LeRobot or dm-control packages. During setup, the shared Transformers
+metadata reported 4.57.6 while its actual module reported 4.53.2; the acceptance
+venv installs a coherent 4.53.2 copy and records both module and package versions.
+
+On the prepared supermicro host, start the finite campaign in tmux:
+
+.. code-block:: bash
+
+   cd "$HOME/rlinf_rlt/UPT_libero_dev"
+   bash run_rlt_libero_acceptance.sh \
+     --gpus 0 1 --control-budget 32000 --bc-updates 5000 \
+     --max-hours 12 --wandb online --output /path/to/new/acceptance
+
+The command waits for two consecutive idle checks on each assigned GPU, with a
+12-hour total deadline including waiting. It never stops another user's task.
+``status.json`` distinguishes waiting, running, execution failure and a stopped
+BC gate. W&B receives metrics when reachable; JSONL remains the primary local
+record if its bounded connection attempt fails. Store outputs on a large result
+volume. Only small heads, optimizer states and replay are checkpointed, every
+16,000 simulator ticks and at completion; the frozen VLA is not duplicated.
+
+The campaign first collects reference trajectories on published task-0 states
+0–29. States 0–23 train BC; 24–29 measure held-out following error; 30–49 are the
+development rollout gate. All are previously inspected public states. A separate
+bank of 50 random resets, with seeds 20000–20049, stores XML and physical states
+and checks repeat restoration and duplicate states. Only the simulator sees this
+state bank: the actor still receives two images and proprioception. Validation
+outcomes are read only after development decisions and are never inserted into
+replay. These are new initial configurations of the same task, not new tasks or
+proof that the VLA never saw similar configurations during pretraining.
+
+BC uses 5,000 actor updates, reference dropout 0.5 and the released head's fixed
+standard deviation 0.1. Its development gate requires held-out MSE below both
+0.02 and half its initial value, at most 5% gripper-threshold disagreements,
+reference success of at least 50%, and no more than two lost successes relative
+to reference on 20 paired episodes. This is an engineering stop condition, not
+a statistical noninferiority claim. A failure stops online RL instead of spending
+the remaining GPU budget on an actor that has not passed basic acceptance.
+
+After acceptance, GPU 0 runs BC-only and GPU 1 runs Q+BC from the identical
+warmup checkpoint, optimizer states and replay. Both train a diagnostic critic
+with the same schedule; only Q+BC sends its Q term into the actor gradient. Each
+arm gets up to 32,000 simulator ticks including settling; at most ten unused
+ticks can remain rather than starting an episode with no controllable step.
+Actual actor/critic counts and the behavior version for every executed chunk
+are saved. The synchronous learner is an explicit RLT_a training adapter: it
+discounts by executed ticks, bootstraps time limits, excludes unfinished
+nonterminal chunk prefixes from TD, and publishes every actor update. It is not
+the unchanged AlphaBrain training script or full-token RLT.
+
+Seed 42 is the development pilot. Seeds 43 and 44 run only if Q+BC exceeds
+BC-only and reaches reference on the development gate; each new seed must also
+pass its own BC gate. Results on the 50 generated validation states are reported
+separately, with matched successes and losses. Conditional replication and a
+single-task result must remain explicit when interpreting the outcome. Memory,
+planner and human assistance are disabled throughout this experiment.
+
 Reproduction Boundaries
 -----------------------
 

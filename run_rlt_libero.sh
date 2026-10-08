@@ -40,6 +40,9 @@ if [[ "$1" == audit ]]; then
 elif [[ "$1" == environment-audit ]]; then
     RLT_LIBERO_MODULE=toolkits.rlt.libero_environment_audit
     shift
+elif [[ "$1" == acceptance ]]; then
+    RLT_LIBERO_MODULE=toolkits.rlt.libero_acceptance
+    shift
 fi
 exec "$RLT_LIBERO_PYTHON" -u -m "$RLT_LIBERO_MODULE" "$@" \
     --source "$RLT_ALPHABRAIN_SOURCE" --storage "$RLT_LIBERO_ASSETS"
