@@ -114,6 +114,35 @@ class MatchedResponseProbe(nn.Module):
         )
 
 
+class StandardizedResponseProbe(MatchedResponseProbe):
+    """Use training-only input statistics while preserving the original head."""
+
+    def __init__(self, training_batch: dict):
+        super().__init__()
+        values = self.features(training_batch)
+        self.register_buffer("input_mean", values.mean(0))
+        self.register_buffer("input_scale", values.std(0).clamp_min(1e-3))
+
+    @staticmethod
+    def features(batch: dict) -> torch.Tensor:
+        """Read the same input allowlist as the unscaled diagnostic."""
+        return torch.cat(
+            (
+                batch["memory_query"],
+                batch["velocity"],
+                batch["command"],
+                response_features(batch, InteractionMemoryConfig()),
+            ),
+            -1,
+        )
+
+    def forward(self, batch: dict, *, history: bool) -> torch.Tensor:
+        values = (self.features(batch) - self.input_mean) / self.input_scale
+        if not history:
+            values = torch.cat((values[:, :25], torch.zeros_like(values[:, 25:])), -1)
+        return self.head(values)
+
+
 def metrics(prediction: torch.Tensor, batch: dict) -> dict:
     """Report raw-radian squared error with pair-level measurements."""
     error = (prediction - batch["target"]).square().mean(-1)
@@ -124,7 +153,9 @@ def metrics(prediction: torch.Tensor, batch: dict) -> dict:
     return {"mse": float(error.mean()), "pair_mse": values}
 
 
-def analyze_matched(rows: list[dict], *, updates: int = 512) -> dict:
+def analyze_matched(
+    rows: list[dict], *, updates: int = 512, standardize: bool = False
+) -> dict:
     """Train same-capacity heads; final test uses the predeclared final update."""
     batches = {
         split: default_collate([r for r in rows if pair_split(int(r["pair"])) == split])
@@ -156,7 +187,11 @@ def analyze_matched(rows: list[dict], *, updates: int = 512) -> dict:
     for seed in (5201, 5202, 5203):
         for enabled in (False, True):
             torch.manual_seed(seed)
-            model = MatchedResponseProbe()
+            model = (
+                StandardizedResponseProbe(train)
+                if standardize
+                else MatchedResponseProbe()
+            )
             initial_hash = tensor_digest(model.state_dict())
             optim = torch.optim.Adam(model.parameters(), lr=3e-4)
             sampler = torch.Generator().manual_seed(seed + 100)
@@ -195,6 +230,7 @@ def analyze_matched(rows: list[dict], *, updates: int = 512) -> dict:
                     "seed": seed,
                     "history": enabled,
                     "updates": updates,
+                    "standardized_inputs": standardize,
                     "initial_sha256": initial_hash,
                     "samples_sha256": sampling_hash.hexdigest(),
                     "metrics": result,
@@ -701,15 +737,36 @@ def collect_phase_shift(env, output: Path, *, seeds: int, stages: str = "all") -
 def main() -> None:
     """Run bounded diagnostics with fixed methods and no test-driven tuning."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("synthetic", "matched", "shift", "phase"))
+    parser.add_argument(
+        "mode", choices=("synthetic", "matched", "shift", "phase", "fit")
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gpu", type=int)
     parser.add_argument("--pairs", type=int, default=56)
     parser.add_argument("--seeds", type=int, default=6)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--stages", choices=("all", "fixed", "changing"), default="all")
+    parser.add_argument("--dataset", type=Path)
+    parser.add_argument("--standardize", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(2)
+    if args.mode == "fit":
+        if args.dataset is None or not args.dataset.is_file():
+            raise ValueError("Fitting requires an existing matched dataset")
+        args.output.mkdir(parents=True, exist_ok=False)
+        records = torch.load(args.dataset, weights_only=True, map_location="cpu")
+        write_report(
+            args.output,
+            {
+                "completed": True,
+                "scope": "post-hoc input-scaling diagnostic on inspected data; no new held-out claim",
+                "data_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
+                "results": analyze_matched(
+                    records["rows"], standardize=args.standardize
+                ),
+            },
+        )
+        return
     if args.mode == "synthetic":
         synthetic(args.output)
         return

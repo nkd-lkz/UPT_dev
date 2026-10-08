@@ -45,3 +45,22 @@ CPU 合同测试覆盖组合独立性、接触拒绝和队列验收。GPU 集成
 只有正确历史在保留测试对上优于无历史及匹配错误历史，才能支持额外信息这一判断。只有误差降权在目标变化下优于简单保留，才值得升级该模块。保留已有合成反例：返回 A 后，保留 MSE 为 0.000389，误差降权为 0.000696。预测结果即使为正，也须通过匹配的闭环控制测试，才有理由实现 Stage 1B 或正式适用性模块。当前不能宣称减少干预或实现 physical RSI。
 
 10 月 8 日核查官方 RLinf：main 为 `0067f7d5`，PR #1623 已合并，修复 replay checkpoint 的保留轨迹内容；π0.5 转换与模型路径文档 PR #1658 仍开放。冻结实验不引入这些变化。恢复在线训练前，另行验收 replay 保存／加载；当前复评只恢复模型权重。
+
+## 接续输入尺度审计与闭环跟踪
+
+10 月 8 日约 20:39，24 个 baseline／响应／接触任务全部完成。冻结复评为 BC-only 18/64、Q+BC 19/64、reference 21/64、旧零 context 21/64；均有 26/64 回合到达 gate。固定响应公式使用正确历史时，测试 MSE 为 2.89e-7；训练集全局增益为 9.68e-5，错误历史为 3.82e-4。神经 head 有无历史都约为 4.8e-4。接触×刚度组合中，误差降权没有稳定优于保留。因此先检查有效证据怎样进入决策，再扩展 Stage 1B。
+
+`toolkits.rlt.probe_memory_conditions` 的 `fit --standardize` 复用原 matched 数据及其 train／validation／test 划分。输入均值与尺度只在训练对上拟合，网络容量、三个 seed、512 次更新和采样序列保持一致。关闭历史时，将归一化后的历史特征置零；目标、配对编号和条件标签仍不输入。由于这些数据已经被检查，这只是事后优化诊断，不能当作新的保留验证结果。
+
+`toolkits.rlt.probe_response_control` 检验既有固定响应统计能否改善一个简单反馈控制器，不替换或训练 RLT actor。七关节正弦目标路径在三次尝试中重复。各方法使用相同初态哈希及目标。固定、清空、保留、衰减、误差降权共五种方式共享此前拟合的全局增益。自适应增益以这个先验做 ridge 正则，截断到 [0.25, 2]，用当前目标误差除以增益产生命令。命令限幅 ±0.08，每块执行 10 步。记忆只记录真正执行的命令和完成后的位移；控制器不接收接触或刚度标签。
+
+沿用八种接触×刚度组合。smoke 使用 seed 58001，完整实验使用新 seed 58101–58106。每次尝试执行 24 块动作和 20 步初态稳定，每条三尝试响应流共 780 个控制步。阶段固定／变化两半各有 120 条流、93,600 步。逐 seed 报告跟踪 MSE、前四块误差、5 mrad 目标到达率、限幅比例、命令能量及接触失败。失败接触也保留在报告中，不能只挑成功抓持来提高均值。若跟踪误差降低但抓持失败增加，就不能认定接触控制改善。特权初态构造将结论限制在局部关节跟踪，不能延伸为插入成功、纠错节省或 physical RSI。
+
+```bash
+CUDA_VISIBLE_DEVICES='' "$RLINF_VENV/bin/python" -m toolkits.rlt.probe_memory_conditions fit \
+  --standardize --dataset "$MATCHED_DATA" --output "$CAMPAIGN/scaled_fit"
+"$RLINF_VENV/bin/python" -m toolkits.rlt.probe_response_control \
+  --gpu 0 --stages fixed --smoke --dataset "$MATCHED_DATA" --output "$CAMPAIGN/fixed_smoke"
+```
+
+第二组 smoke 使用 `--gpu 1 --stages changing`。工程验收后去掉 `--smoke`，使用新输出目录。`MATCHED_DATA` 是原始 `matched.pt`，输出记录其哈希。跟踪结果若为正，才支持单独设计带 gate 的 RLT 动作校准实验，不能直接归因到已训练 actor。

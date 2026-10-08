@@ -130,6 +130,19 @@ def validate_job(job: dict) -> dict:
         raise ValueError(
             "Incomplete contact-stage factorial or invalid contact preparation"
         )
+    if job["kind"] == "control":
+        rows = result.get("rows", [])
+        keys = {(r["seed"], r["stage"], r["dynamics"], r["method"]) for r in rows}
+        if (
+            len(rows) != job["streams"]
+            or len(keys) != len(rows)
+            or not result.get("all_initial_states_matched")
+            or any(r["control_ticks"] != 780 for r in rows)
+            or result.get("control_ticks") != 780 * len(rows)
+            or result.get("invalid_contact_streams")
+            != sum(not r["contact_valid"] for r in rows)
+        ):
+            raise ValueError("Incomplete or unmatched closed-loop tracking evidence")
     return {"scope": result["scope"], "results_path": str(root / "results.json")}
 
 

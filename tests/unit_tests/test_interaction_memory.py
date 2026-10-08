@@ -156,6 +156,96 @@ def test_matched_probe_keeps_pairs_disjoint_and_shares_training_budget():
         assert left["updates"] == right["updates"] == 3
 
 
+def test_standardized_response_ignores_labels_and_disabled_history():
+    from toolkits.rlt.probe_memory_conditions import StandardizedResponseProbe
+
+    batch = _paired_response_batch()
+    model = StandardizedResponseProbe(batch)
+    before = model(batch, history=True)
+    for key in ("target", "condition", "pair", "query_id"):
+        batch[key].fill_(999)
+    assert torch.equal(model(batch, history=True), before)
+    off = model(batch, history=False)
+    assert torch.equal(off[0], off[1])
+    batch["memory_events"].mul_(2)
+    assert torch.equal(model(batch, history=False), off)
+
+
+def test_response_tracking_uses_past_executed_commands_and_shared_cold_start():
+    from toolkits.rlt.probe_response_control import METHODS, ResponseTracker
+
+    error = torch.full((7,), 0.02)
+    prior = torch.ones(7)
+    trackers = {name: ResponseTracker(name, prior) for name in METHODS}
+    prior.fill_(99)
+    for tracker in trackers.values():
+        assert torch.equal(tracker.command(error)[0], error)
+        tracker.observe(torch.full((7,), 0.08), torch.full((7,), 0.04))
+    assert torch.equal(trackers["fixed"].command(error)[0], error)
+    adapted = trackers["retain"].command(error)[0]
+    assert torch.all(adapted > error) and torch.all(adapted < 0.08)
+    trackers["clear"].begin_attempt()
+    trackers["retain"].begin_attempt()
+    assert torch.equal(trackers["clear"].command(error)[0], error)
+    assert torch.equal(trackers["retain"].command(error)[0], adapted)
+    action, audit = trackers["retain"].command(torch.ones(7))
+    assert torch.all(action <= 0.08) and audit["clipped_joints"] == 7
+    with pytest.raises(ValueError, match="finite"):
+        trackers["retain"].command(torch.full((7,), float("nan")))
+
+
+def test_tracking_prior_excludes_validation_and_test_outcomes():
+    from toolkits.rlt.probe_response_control import fit_prior, target_offsets
+
+    rows = [
+        {
+            "pair": torch.tensor(pair),
+            "command": torch.full((7,), 0.1),
+            "target": torch.full((7,), value, dtype=torch.float32),
+        }
+        for pair, value in ((0, 0.08), (32, 99), (40, 999))
+    ]
+    a = fit_prior(rows)
+    rows[-1]["target"].fill_(float("nan"))
+    assert torch.equal(a, fit_prior(rows))
+    assert torch.equal(target_offsets(58101), target_offsets(58101))
+    assert not torch.equal(target_offsets(58101), target_offsets(58102))
+    assert target_offsets(58101).abs().max() <= 0.06
+
+
+def test_tracking_queue_retains_contact_failures_but_rejects_unmatched_results(
+    tmp_path,
+):
+    import json
+
+    from toolkits.rlt.run_research_queue import validate_job
+
+    job = {"kind": "control", "output": str(tmp_path), "streams": 1}
+    row = {
+        "seed": 58101,
+        "stage": "free_fixed",
+        "dynamics": "stationary",
+        "method": "fixed",
+        "control_ticks": 780,
+        "contact_valid": False,
+    }
+    report = {
+        "completed": True,
+        "scope": "test",
+        "rows": [row],
+        "control_ticks": 780,
+        "all_initial_states_matched": True,
+        "invalid_contact_streams": 1,
+    }
+    target = tmp_path / "results.json"
+    target.write_text(json.dumps(report))
+    assert validate_job(job)["scope"] == "test"
+    report["all_initial_states_matched"] = False
+    target.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="unmatched"):
+        validate_job(job)
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_research_queue_rejects_invalid_frozen_evidence(tmp_path, nested):
     import json
