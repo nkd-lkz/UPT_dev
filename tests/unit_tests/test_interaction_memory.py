@@ -156,13 +156,14 @@ def test_matched_probe_keeps_pairs_disjoint_and_shares_training_budget():
         assert left["updates"] == right["updates"] == 3
 
 
-def test_research_queue_rejects_invalid_frozen_evidence(tmp_path):
+@pytest.mark.parametrize("nested", [False, True])
+def test_research_queue_rejects_invalid_frozen_evidence(tmp_path, nested):
     import json
 
     from toolkits.rlt.run_research_queue import validate_evaluation
 
     run = tmp_path / "stage2_test"
-    output = run / "stage2_portable"
+    output = run / "stage2_portable" if nested else run
     output.mkdir(parents=True)
     (run / "exit_code.txt").write_text("0\n")
     audit = {
@@ -205,6 +206,90 @@ def test_research_queue_executes_owned_child_with_timeout(tmp_path):
         job, tmp_path, timeout=0.15, heartbeat=lambda pid, dt: states.append(pid)
     )
     assert code == 124 and elapsed < 5 and states
+
+
+def test_contact_factorial_separates_drive_and_stage_changes():
+    from toolkits.rlt.probe_memory_conditions import phase_schedule
+
+    schedules = phase_schedule()
+    assert len(schedules) == 8
+    for stage in {row["stage"] for row in schedules}:
+        pair = [row for row in schedules if row["stage"] == stage]
+        assert pair[0]["contact"] == pair[1]["contact"]
+        assert pair[0]["stiffness"] == [1000.0, 1000.0, 1000.0]
+        assert pair[1]["stiffness"] == [1000.0, 250.0, 1000.0]
+    assert sum(len(set(row["contact"])) == 1 for row in schedules) == 4
+
+
+def test_contact_audit_rejects_slip_and_unintended_contact():
+    from toolkits.rlt.probe_memory_conditions import validate_contact_trace
+
+    held = {"grasped": True, "finger_peg_force_newtons": [1.0, 1.0]}
+    free = {"grasped": False, "finger_peg_force_newtons": [0.0, 0.0]}
+    assert validate_contact_trace([held] * 10, grasped=True)["valid"]
+    assert validate_contact_trace([free] * 10, grasped=False)["valid"]
+    assert not validate_contact_trace([held] * 8 + [free] * 2, grasped=True)["valid"]
+    assert not validate_contact_trace([held], grasped=False)["valid"]
+    touching = {"grasped": False, "finger_peg_force_newtons": [0.2, 0.0]}
+    assert not validate_contact_trace([touching], grasped=False)["valid"]
+    with pytest.raises(ValueError, match="Invalid"):
+        validate_contact_trace(
+            [{"grasped": False, "finger_peg_force_newtons": [float("nan"), 0.0]}],
+            grasped=False,
+        )
+
+
+def test_queue_requires_a_valid_contact_factorial(tmp_path):
+    import json
+
+    from toolkits.rlt.run_research_queue import validate_job
+
+    job = {"kind": "phase", "output": str(tmp_path), "streams": 4}
+    report = {
+        "completed": True,
+        "scope": "test",
+        "rows": [{}] * 4,
+        "all_contact_stages_valid": False,
+    }
+    (tmp_path / "results.json").write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="contact"):
+        validate_job(job)
+    report["all_contact_stages_valid"] = True
+    (tmp_path / "results.json").write_text(json.dumps(report))
+    assert validate_job(job)["scope"] == "test"
+
+
+def test_queue_waits_for_external_evidence_without_executing_or_overwriting_it(
+    tmp_path,
+):
+    import json
+    import time
+
+    from toolkits.rlt.run_research_queue import job_states, run_queue
+
+    source, followup = tmp_path / "source", tmp_path / "followup"
+    (source / "jobs").mkdir(parents=True)
+    followup.mkdir()
+    evidence = source / "jobs" / "baseline.json"
+    evidence.write_text(json.dumps({"state": "failed", "error": "audit rejected"}))
+    original = evidence.read_bytes()
+    jobs = [
+        {"id": "baseline", "gpu": 0, "evidence_campaign": str(source)},
+        {"id": "phase", "gpu": 0, "dependencies": ["baseline"]},
+    ]
+    (followup / "manifest.json").write_text(
+        json.dumps(
+            {"jobs": jobs, "wait_deadline": time.time() + 10, "run_seconds_per_gpu": 10}
+        )
+    )
+    assert job_states(followup, jobs)["baseline"]["state"] == "failed"
+    run_queue(followup, 0)
+    assert evidence.read_bytes() == original
+    assert not (followup / "jobs" / "baseline.json").exists()
+    assert (
+        json.loads((followup / "jobs" / "phase.json").read_text())["state"]
+        == "dependency_failed"
+    )
 
 
 def test_diagnostic_rejects_nonfinite_unrecorded_and_intervened_rows(config):

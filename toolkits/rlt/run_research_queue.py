@@ -39,6 +39,16 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def job_states(campaign: Path, jobs: list[dict]) -> dict[str, dict]:
+    """Read prerequisite campaigns without taking ownership of their jobs."""
+    return {
+        job["id"]: read_json(
+            Path(job.get("evidence_campaign", campaign)) / "jobs" / f"{job['id']}.json"
+        )
+        for job in jobs
+    }
+
+
 def gpu_status(gpu: int) -> dict:
     """Fail closed on unreadable memory, active compute processes or query errors."""
 
@@ -64,11 +74,13 @@ def gpu_status(gpu: int) -> dict:
 
 def validate_evaluation(root: Path, *, seed: int, reference: bool) -> dict:
     """Reject incomplete, duplicated, changing-weight or wrongly routed episodes."""
-    paths = list(root.glob("stage2_*/stage2_portable/episode-records.json"))
+    paths = list(root.glob("stage2_*/episode-records.json")) + list(
+        root.glob("stage2_*/stage2_portable/episode-records.json")
+    )
     if len(paths) != 1:
         raise ValueError("Expected exactly one completed evaluation run")
     path = paths[0]
-    code = path.parents[1] / "exit_code.txt"
+    code = root / path.relative_to(root).parts[0] / "exit_code.txt"
     if not code.exists() or code.read_text().strip() != "0":
         raise ValueError("Evaluation launcher did not finish successfully")
     audit = read_json(path.parent / "route-audit.json")
@@ -111,6 +123,13 @@ def validate_job(job: dict) -> dict:
         )
     if job["kind"] == "shift" and len(result.get("rows", [])) != job.get("streams", 12):
         raise ValueError("Expected six paired A-B-A/stationary streams")
+    if job["kind"] == "phase" and (
+        len(result.get("rows", [])) != job["streams"]
+        or not result.get("all_contact_stages_valid")
+    ):
+        raise ValueError(
+            "Incomplete contact-stage factorial or invalid contact preparation"
+        )
     return {"scope": result["scope"], "results_path": str(root / "results.json")}
 
 
@@ -213,6 +232,11 @@ def run_queue(campaign: Path, gpu: int) -> None:
     jobs = manifest["jobs"]
     if gpu not in (0, 1) or not jobs:
         raise ValueError("Expected GPU 0/1 and a nonempty manifest")
+    if len({job["id"] for job in jobs}) != len(jobs):
+        raise ValueError("Duplicate job identifiers")
+    owned_jobs = [
+        job for job in jobs if job["gpu"] == gpu and "evidence_campaign" not in job
+    ]
     (campaign / "logs").mkdir(exist_ok=True)
     queue_path = campaign / f"gpu{gpu}.json"
     lease = (campaign / f"gpu{gpu}.lock").open("a")
@@ -233,7 +257,7 @@ def run_queue(campaign: Path, gpu: int) -> None:
         write_json(queue_path, queue)
 
     try:
-        for job in [j for j in jobs if j["gpu"] == gpu]:
+        for job in owned_jobs:
             path = campaign / "jobs" / f"{job['id']}.json"
             prior = read_json(path)
             if prior.get("state") == "completed":
@@ -245,10 +269,7 @@ def run_queue(campaign: Path, gpu: int) -> None:
                 )
             update("waiting", job=job["id"])
             while True:
-                states = {
-                    j["id"]: read_json(campaign / "jobs" / f"{j['id']}.json")
-                    for j in jobs
-                }
+                states = job_states(campaign, jobs)
                 dependencies = [
                     states[d].get("state", "pending")
                     for d in job.get("dependencies", [])
@@ -326,7 +347,7 @@ def run_queue(campaign: Path, gpu: int) -> None:
                 path, {"state": "failed", "job": job["id"], "error": repr(error)}
             )
         # Mark pending owned jobs so another GPU cannot wait forever for them.
-        for job in [j for j in jobs if j["gpu"] == gpu]:
+        for job in owned_jobs:
             path = campaign / "jobs" / f"{job['id']}.json"
             if read_json(path).get("state") not in TERMINAL:
                 write_json(path, {"state": "dependency_failed", "error": repr(error)})

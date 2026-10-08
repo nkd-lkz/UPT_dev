@@ -2,6 +2,8 @@
 
 This protocol compares BC-only and Q+BC on the same saved transitions before another online memory experiment. It uses the production small head and loss functions on CPU. Simulator evaluation follows when a GPU is available. The campaign manifest records actual progress and results.
 
+The October 6 GPU wait expired. The [October 8 continuation](CONTACT_FACTORIAL_2026-10-08.md) restarts the frozen evaluation and adds separate contact-stage and drive-change diagnostics. Historical budgets below describe the earlier launch.
+
 ## Continue after the baseline evaluation
 
 The October 6 evening campaign extends GPU waiting to 24 hours and limits actual work to six hours per GPU. `toolkits/rlt/run_research_queue.py` keeps atomic job status, owned child-process timeouts, pinned checkpoint hashes and complete frozen-evaluation checks. Completed jobs can be resumed without repetition; failed or interrupted jobs require inspection before retrying. Independent detached checkouts retain the original baseline revision and the new diagnostic revision. An archive without Git metadata is unsuitable for the existing launcher, which calls `git rev-parse` after preflight.

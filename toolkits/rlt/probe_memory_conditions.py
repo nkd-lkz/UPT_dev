@@ -518,15 +518,196 @@ def collect_shift(env, output: Path, *, seeds: int) -> None:
     )
 
 
+def contact_observation(env) -> dict:
+    """Read physical contact evidence for audit, never as a predictor input."""
+    base = env.unwrapped
+    forces = [
+        float(
+            torch.linalg.vector_norm(
+                base.scene.get_pairwise_contact_forces(link, base.peg)
+            )
+        )
+        for link in (base.agent.finger1_link, base.agent.finger2_link)
+    ]
+    return {
+        "finger_peg_force_newtons": forces,
+        "grasped": bool(base.agent.is_grasping(base.peg).item()),
+    }
+
+
+def phase_schedule() -> list[dict]:
+    """Cross physical drive changes with independently specified contact stages."""
+    return [
+        {
+            "stage": stage,
+            "contact": contacts,
+            "dynamics": dynamics,
+            "stiffness": stiffness,
+        }
+        for stage, contacts in (
+            ("free_fixed", [False, False, False]),
+            ("grasp_fixed", [True, True, True]),
+            ("free_grasp_free", [False, True, False]),
+            ("grasp_free_grasp", [True, False, True]),
+        )
+        for dynamics, stiffness in (
+            ("stationary", [1000.0, 1000.0, 1000.0]),
+            ("A_B_A", [1000.0, 250.0, 1000.0]),
+        )
+    ]
+
+
+def validate_contact_trace(trace: list[dict], *, grasped: bool) -> dict:
+    """Require the declared stage throughout a probe; reject failed preparation."""
+    if not trace:
+        raise ValueError("Missing contact trace")
+    force = torch.tensor([x["finger_peg_force_newtons"] for x in trace])
+    if (
+        force.shape != (len(trace), 2)
+        or not torch.isfinite(force).all()
+        or (force < 0).any()
+    ):
+        raise ValueError("Invalid contact force trace")
+    fraction = sum(x["grasped"] for x in trace) / len(trace)
+    valid = fraction >= 0.9 if grasped else fraction == 0 and float(force.max()) < 0.1
+    return {
+        "valid": valid,
+        "grasp_fraction": fraction,
+        "max_force_newtons": float(force.max()),
+    }
+
+
+def prepare_contact(env, seed: int, stiffness: float, *, grasped: bool) -> dict:
+    """Prepare a privileged calibration scene, then physically settle the grasp.
+
+    Placing the peg at the fingers is diagnostic state construction. This is
+    neither a learned recovery skill nor an assisted task-success measurement.
+    """
+    import sapien
+
+    reset_condition(env, seed, stiffness)
+    base = env.unwrapped
+    if grasped:
+        # Start the fingers beside the peg so gravity cannot drop it during
+        # a long open-to-closed approach. Contact must still pass the audit.
+        qpos = base.agent.robot.get_qpos().clone()
+        qpos[:, -2:] = base.peg_half_sizes[:, 1:2] + 0.0005
+        base.agent.robot.set_qpos(qpos)
+        base.peg.set_pose(base.agent.tcp.pose * sapien.Pose([0.04, 0, 0]))
+        base.peg.set_linear_velocity(torch.zeros(1, 3))
+        base.peg.set_angular_velocity(torch.zeros(1, 3))
+    hold = torch.zeros(8)
+    hold[7] = -1
+    trace = []
+    for _ in range(20):
+        _, _, terminated, truncated, _ = env.step(hold.numpy())
+        if bool(terminated.any()) or bool(truncated.any()):
+            raise ValueError("Contact preparation terminated")
+        trace.append(contact_observation(env))
+    audit = validate_contact_trace(trace[-10:], grasped=grasped)
+    if not audit["valid"]:
+        raise ValueError(
+            f"Contact preparation failed: requested_grasp={grasped}, audit={audit}"
+        )
+    return {"state_sha256": tensor_digest(base.get_state_dict()), "contact": audit}
+
+
+def collect_phase_shift(env, output: Path, *, seeds: int, stages: str = "all") -> None:
+    """Cross contact-stage and drive shifts using paired commands and seeds."""
+    rows, raw = [], []
+    for seed in range(57001, 57001 + seeds):
+        generator = torch.Generator().manual_seed(seed)
+        # Repeat the same excitation in all three attempts to isolate changes.
+        block = (torch.rand(12, 8, generator=generator) - 0.5) * 0.04
+        block[:, 7] = -1
+        commands = block.repeat(3, 1)
+        for schedule in phase_schedule():
+            fixed = len(set(schedule["contact"])) == 1
+            if (stages == "fixed" and not fixed) or (stages == "changing" and fixed):
+                continue
+            outcomes, attempts = [], []
+            for attempt, (grasped, stiffness) in enumerate(
+                zip(schedule["contact"], schedule["stiffness"])
+            ):
+                preparation = prepare_contact(env, seed, stiffness, grasped=grasped)
+                trace = []
+                start = (
+                    env.unwrapped.agent.robot.get_qpos()[0, :9].detach().cpu().clone()
+                )
+                for command in block:
+                    for _ in range(10):
+                        _, _, terminated, truncated, _ = env.step(command.numpy())
+                        if bool(terminated.any()) or bool(truncated.any()):
+                            raise ValueError(
+                                "Phase probe terminated before completing a chunk"
+                            )
+                        trace.append(contact_observation(env))
+                    end = (
+                        env.unwrapped.agent.robot.get_qpos()[0, :9]
+                        .detach()
+                        .cpu()
+                        .clone()
+                    )
+                    outcomes.append((end - start)[:7])
+                    start = end
+                audit = validate_contact_trace(trace, grasped=grasped)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "requested_grasp": grasped,
+                        "preparation": preparation,
+                        "contact_audit": audit,
+                        "trace": trace,
+                    }
+                )
+            data = torch.stack(outcomes)
+            if not torch.isfinite(data).all():
+                raise ValueError("Nonfinite phase response")
+            valid = all(x["contact_audit"]["valid"] for x in attempts)
+            rows.append(
+                {
+                    "seed": seed,
+                    **schedule,
+                    "contact_valid": valid,
+                    "attempts": attempts,
+                    "results": analyze_stream(commands[:, :7], data, [0, 12, 24]),
+                }
+            )
+            raw.append(
+                {"seed": seed, **schedule, "commands": commands, "outcomes": data}
+            )
+            write_report(
+                output,
+                {
+                    "completed": False,
+                    "scope": "contact-stage engineering probe",
+                    "rows": rows,
+                },
+            )
+    path = output / "phase-streams.pt"
+    torch.save(raw, path)
+    write_report(
+        output,
+        {
+            "completed": True,
+            "scope": "privileged contact-stage x drive response diagnostic; no task success or policy learning",
+            "data_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "all_contact_stages_valid": all(row["contact_valid"] for row in rows),
+            "rows": rows,
+        },
+    )
+
+
 def main() -> None:
     """Run bounded diagnostics with fixed methods and no test-driven tuning."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("synthetic", "matched", "shift"))
+    parser.add_argument("mode", choices=("synthetic", "matched", "shift", "phase"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gpu", type=int)
     parser.add_argument("--pairs", type=int, default=56)
     parser.add_argument("--seeds", type=int, default=6)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--stages", choices=("all", "fixed", "changing"), default="all")
     args = parser.parse_args()
     torch.set_num_threads(2)
     if args.mode == "synthetic":
@@ -545,6 +726,8 @@ def main() -> None:
     try:
         if args.mode == "matched":
             collect_matched(env, args.output, pairs=args.pairs)
+        elif args.mode == "phase":
+            collect_phase_shift(env, args.output, seeds=args.seeds, stages=args.stages)
         else:
             collect_shift(env, args.output, seeds=args.seeds)
     finally:
