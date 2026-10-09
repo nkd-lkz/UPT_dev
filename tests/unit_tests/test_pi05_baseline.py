@@ -27,6 +27,7 @@ from toolkits.rlt.pi05_baseline import (
 from toolkits.rlt.pi05_campaign import (
     acceptance_cases,
     acceptance_plan,
+    audit_acceptance,
     campaign_plan,
     paired_comparison,
     paired_gate,
@@ -384,6 +385,288 @@ def test_paired_final_comparison_reports_uncertainty_and_rejects_changed_resets(
     actor[0]["state_sha256"] = "changed"
     with pytest.raises(ValueError, match="do not match"):
         paired_comparison(reports)
+
+
+@pytest.fixture
+def completed_acceptance(tmp_path):
+    """Write the public artifacts of a complete, fixed-budget campaign."""
+    plan = acceptance_plan(
+        tmp_path, tmp_path, tmp_path, tmp_path, 1, 1, 42, "online", "team"
+    )
+    (tmp_path / "queue").mkdir()
+    (tmp_path / "queue/plan.json").write_text(json.dumps(plan))
+    jobs = {job["name"]: job for job in plan["jobs"]}
+    (tmp_path / "queue/status.json").write_text(
+        json.dumps(
+            {"state": "finished", "jobs": {name: {"state": "passed"} for name in jobs}}
+        )
+    )
+    sets = acceptance_cases(tmp_path, 1)
+    (tmp_path / "cases").mkdir()
+    for split, cases in sets.items():
+        (tmp_path / "cases" / f"{split}.json").write_text(json.dumps(cases))
+    stages = {
+        "reference_gate": "development",
+        "reference_collect": "collection",
+        "warmup": None,
+        "actor_gate": "development",
+        "q_bc": "online",
+        "bc_only": "online",
+        "reference_final": "heldout",
+        "warmup_final": "heldout",
+        "q_bc_eval": "heldout",
+        "bc_only_eval": "heldout",
+    }
+    for order, (name, split) in enumerate(stages.items()):
+        directory = tmp_path / name
+        directory.mkdir()
+        args = jobs[name]["argv"]
+        # Parse only the public options represented by the stage manifests.
+        options = {
+            flag[2:].replace("-", "_"): args[args.index(flag) + 1]
+            for flag in (
+                "--task",
+                "--seed",
+                "--wandb",
+                "--evaluation-role",
+                "--checkpoint",
+                "--objective",
+                "--interaction-ticks",
+                "--encoder-steps",
+                "--bc-steps",
+            )
+            if flag in args
+        }
+        for key in ("task", "seed", "interaction_ticks", "encoder_steps", "bc_steps"):
+            if key in options:
+                options[key] = int(options[key])
+        options.update(
+            mode=args[2], updates_per_chunk=5, collect=name == "reference_collect"
+        )
+        actor_updates = 0 if name.startswith("reference") else 6000
+        critic_updates = 0
+        if name in ("q_bc", "bc_only", "q_bc_eval", "bc_only_eval"):
+            actor_updates, critic_updates = 11000, 10000
+        report = {
+            "complete": True,
+            "exit_code": 0,
+            "gate_passed": True,
+            "args": options,
+            "protocol": PROTOCOL,
+            "adapter_sha256": {"adapter.py": "fixed-digest"},
+            "versions": {"torch": "fixed-version"},
+            "started_at": order * 100,
+            "finished_at": order * 100 + 50,
+            "actor_updates": actor_updates,
+            "critic_updates": critic_updates,
+        }
+        if split is None:
+            ids = [c["id"] for c in sets["collection"]]
+            report.update(
+                encoder_updates=1000, train_episodes=ids[:52], heldout_episodes=ids[52:]
+            )
+        else:
+            cases = sets[split][:100] if split == "online" else sets[split]
+            ticks = 200 if split == "online" else 90
+            episodes = [
+                {
+                    **c,
+                    "state_sha256": f"reset-{c['seed']}",
+                    "success": i < 60,
+                    "ticks": ticks,
+                }
+                for i, c in enumerate(cases)
+            ]
+            successes = sum(e["success"] for e in episodes)
+            report.update(
+                episodes=episodes,
+                successes=successes,
+                success_rate=successes / len(episodes),
+                interaction_ticks=ticks * len(episodes),
+                settling_ticks=10 * len(episodes),
+                case_manifest_sha256=file_hash(tmp_path / "cases" / f"{split}.json"),
+            )
+        (directory / "manifest.json").write_text(json.dumps(report))
+        (directory / "wandb_run.json").write_text(
+            json.dumps({"mode": "online", "url": f"https://wandb.example/{name}"})
+        )
+    return tmp_path
+
+
+def test_acceptance_audit_checks_complete_artifacts_and_shared_cost(
+    completed_acceptance,
+):
+    result = audit_acceptance(completed_acceptance)
+    assert result["state"] == "passed", result["violations"]
+    assert not result["pending_stages"]
+    cost = result["completed_training_cost_by_arm"]["q_bc_eval"]
+    assert cost == {
+        "stage_wall_seconds": 150,
+        "interaction_ticks": 25760,
+        "settling_ticks": 1640,
+    }
+    assert (
+        result["completed_training_cost_by_arm"]["warmup_final"]["interaction_ticks"]
+        == 5760
+    )
+    assert summarize_campaign(completed_acceptance)["engineering_pipeline_complete"]
+
+
+def test_acceptance_audit_preserves_missing_and_live_work(completed_acceptance):
+    root = completed_acceptance
+    for name in (
+        "bc_only",
+        "reference_final",
+        "warmup_final",
+        "q_bc_eval",
+        "bc_only_eval",
+    ):
+        (root / name / "manifest.json").unlink()
+    path = root / "q_bc/manifest.json"
+    report = json.loads(path.read_text())
+    report.update(complete=False)
+    for key in (
+        "exit_code",
+        "finished_at",
+        "episodes",
+        "interaction_ticks",
+        "actor_updates",
+        "critic_updates",
+    ):
+        report.pop(key)
+    path.write_text(json.dumps(report))
+    (root / "q_bc/online_status.json").write_text(
+        json.dumps(
+            {"interaction_ticks": 5000, "actor_updates": 7250, "critic_updates": 2500}
+        )
+    )
+    result = audit_acceptance(root)
+    assert result["state"] == "incomplete" and not result["violations"]
+    assert "q_bc" in result["pending_stages"]
+    assert result["stage_costs"]["q_bc"]["interaction_ticks"] == 5000
+    assert "q_bc_eval" not in result["completed_training_cost_by_arm"]
+    assert not summarize_campaign(root)["engineering_pipeline_complete"]
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "value", "message"),
+    [
+        ("q_bc", "interaction_ticks", 19999, "interaction accounting"),
+        ("warmup", "encoder_updates", 999, "encoder budget"),
+        ("q_bc", "actor_updates", 6000, "learner update"),
+        ("q_bc_eval", "critic_updates", 0, "checkpoint update counters"),
+        (
+            "bc_only",
+            "adapter_sha256",
+            {"adapter.py": "changed"},
+            "adapter_sha256 mismatch",
+        ),
+        ("reference_final", "started_at", 1, "started before"),
+        ("warmup_final", "success_rate", 1.0, "success rate mismatch"),
+        ("q_bc", "protocol", {"track": "rlt_a"}, "incompatible protocol"),
+        ("q_bc", "finished_at", 0, "invalid stage timestamps"),
+        ("q_bc", "finished_at", None, "invalid stage timestamps"),
+    ],
+)
+def test_acceptance_audit_rejects_incomparable_results(
+    completed_acceptance, name, field, value, message
+):
+    path = completed_acceptance / name / "manifest.json"
+    report = json.loads(path.read_text())
+    report[field] = value
+    path.write_text(json.dumps(report))
+    result = audit_acceptance(completed_acceptance)
+    assert result["state"] == "failed"
+    assert any(message in error for error in result["violations"])
+    assert not summarize_campaign(completed_acceptance)["engineering_pipeline_complete"]
+
+
+def test_acceptance_audit_rejects_reset_leakage_and_changed_cases(completed_acceptance):
+    root = completed_acceptance
+    path = root / "q_bc_eval/manifest.json"
+    report = json.loads(path.read_text())
+    report["episodes"][0]["state_sha256"] = (
+        "reset-110000"  # A collection initial state.
+    )
+    report["args"]["checkpoint"] = str(root / "warmup/warmup.pt")
+    path.write_text(json.dumps(report))
+    declared = root / "cases/heldout.json"
+    cases = json.loads(declared.read_text())
+    cases[0]["seed"] += 999
+    declared.write_text(json.dumps(cases))
+    result = audit_acceptance(root)
+    assert result["state"] == "failed"
+    for text in (
+        "different cases share",
+        "reset changed",
+        "checkpoint path mismatch",
+        "declared cases differ",
+        "case manifest digest mismatch",
+    ):
+        assert any(text in error for error in result["violations"])
+    summary = summarize_campaign(root)
+    assert not summary["engineering_pipeline_complete"]
+    assert summary["comparison_error"]
+    assert not summary["comparison"]
+
+
+def test_acceptance_audit_rechecks_warmup_gate_and_logging(completed_acceptance):
+    root = completed_acceptance
+    (root / "q_bc/wandb_run.json").unlink()
+    path = root / "actor_gate/manifest.json"
+    report = json.loads(path.read_text())
+    for episode in report["episodes"][:3]:
+        episode["success"] = False
+    report.update(successes=17, success_rate=0.85)
+    path.write_text(json.dumps(report))
+    result = audit_acceptance(root)
+    assert result["state"] == "failed"
+    assert any("paired_gate" in error for error in result["violations"])
+    assert any("missing online W&B" in error for error in result["violations"])
+
+
+def test_acceptance_audit_rejects_a_consistently_reported_short_budget(
+    completed_acceptance,
+):
+    path = completed_acceptance / "q_bc/manifest.json"
+    report = json.loads(path.read_text())
+    report["episodes"][-1]["ticks"] -= 1
+    report["interaction_ticks"] -= 1
+    path.write_text(json.dumps(report))
+    result = audit_acceptance(completed_acceptance)
+    assert result["state"] == "failed"
+    assert any("executed budget mismatch" in error for error in result["violations"])
+
+
+def test_acceptance_audit_cli_uses_distinct_exit_codes_and_new_snapshots(
+    completed_acceptance,
+):
+    root = completed_acceptance
+    report = root / "audit.json"
+    command = [
+        sys.executable,
+        "-m",
+        "toolkits.rlt.pi05_campaign",
+        "audit",
+        "--root",
+        str(root),
+        "--report",
+        str(report),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert json.loads(report.read_text())["state"] == "passed"
+    original = report.read_bytes()
+    again = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert again.returncode == 2 and report.read_bytes() == original
+    (root / "bc_only_eval/manifest.json").unlink()
+    incomplete = subprocess.run(
+        command[:-2], capture_output=True, text=True, timeout=30
+    )
+    assert incomplete.returncode == 3
+    (root / "queue/plan.json").unlink()
+    absent = subprocess.run(command[:-2], capture_output=True, text=True, timeout=30)
+    assert absent.returncode == 4
 
 
 def test_seeded_reference_does_not_consume_learning_rng():

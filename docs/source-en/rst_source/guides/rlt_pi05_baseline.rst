@@ -107,6 +107,17 @@ For a compact report, run the following command. It keeps missing scores distinc
    ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign status \
      --root "$RLT_PI05_RUN"
 
+The live status recomputes ``acceptance_audit`` from the artifacts. For acceptance campaigns, ``engineering_pipeline_complete`` requires both completed evaluations and a passed audit. To save a separate audit snapshot without loading a model or reserving a GPU, choose a new report filename:
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign audit \
+     --root "$RLT_PI05_RUN" --report "$RLT_PI05_RUN/audit-01.json"
+
+The command checks the declared case files and their digests, task and training seed, recorded protocol/code/package versions, whole-episode warmup split, executed interaction budgets, checkpoint paths and update counters. It also rechecks the paired warmup gate, confirms that each physical reset belongs to one case ID, and rejects held-out evaluation started before both online arms finished. Logging must match the declared plan; completed online-logged stages must have a W&B run record. Exit codes distinguish passed (0), failed (2), incomplete (3), and a directory without an acceptance plan (4). An existing report is never overwritten. A missing result remains incomplete rather than becoming a zero success rate, and inconsistent paired results suppress the comparison instead of producing a score.
+
+``stage_costs`` includes live online progress and recorded elapsed time; ``completed_training_cost_by_arm`` adds reference collection, encoder/BC warmup, and that arm's online training after those stages finish. Shared preparation is included once for each arm's from-scratch cost, so summing the arms would double-count it. The elapsed timestamps include model loading and checkpoint I/O but exclude imports, W&B finalization, queue waits, evaluation, upstream VLA pretraining and manual debugging. They are not measurements of GPU-active time or human effort. Existing manifests identify head checkpoints by path and update counters, not a hash of checkpoint bytes; the audit checks recorded consistency, not cryptographic weight provenance. Passing it establishes a one-task engineering comparison, not an RL improvement or full-suite reproduction.
+
 On the development host, ``rlt_pi05_v3_gpu0_1009`` and ``rlt_pi05_v3_gpu1_1009`` manage the v3 queues under ``research/rlt_pi05_20261009``: ``acceptance-v3-task0-seed42`` on GPU 0 and ``acceptance-v3-task1-seed42`` on GPU 1. Read their live status rather than inferring progress from a tmux session. They wait for existing compute processes to exit, not merely for utilization to reach zero. Task 3 and additional training seeds remain follow-up work. Earlier v1/v2 acceptance and CPU/pilot outputs are preserved as compatibility-failure evidence, not accepted baseline scores. The old RLT_a/planner queues were paused between jobs to give this baseline priority; their completed artifacts were not removed. Failure manifests and skipped jobs remain available rather than being relabelled as completed training.
 
 When no GPU is available, ``cpu-reference`` can check the actual simulator loop with CPU inference and an installed OSMesa software renderer. Set ``LD_LIBRARY_PATH`` if OSMesa is unpacked outside the system paths. This mode never reserves a CUDA device; the required ``--gpu`` argument is ignored. It is slow and uses CPU BF16 autocast, so its results do not replace matched GPU evaluations:

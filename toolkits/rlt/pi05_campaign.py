@@ -13,8 +13,340 @@ import time
 from pathlib import Path
 
 from toolkits.rlt.experiment_queue import run_plan
-from toolkits.rlt.pi05_assets import REVISION
-from toolkits.rlt.pi05_baseline import write_json
+from toolkits.rlt.pi05_assets import REVISION, file_hash
+from toolkits.rlt.pi05_baseline import PROTOCOL, write_json
+
+FINAL_ARMS = ("reference_final", "warmup_final", "q_bc_eval", "bc_only_eval")
+
+
+def audit_acceptance(root: Path) -> dict:
+    """Check recorded acceptance provenance and costs without loading GPU models.
+
+    Missing or running stages remain incomplete. A completed stage with bad
+    provenance fails even when it reports a high success rate. Checkpoint paths
+    and update counters are checked; legacy manifests do not hash head weights.
+    Elapsed costs include loading and checkpoint I/O, not just GPU computation.
+    """
+    plan_path = root / "queue/plan.json"
+    plan = json.loads(plan_path.read_text()) if plan_path.exists() else {}
+    if "task" not in plan or "training_seed" not in plan:
+        return {"state": "not_applicable", "reason": "No acceptance plan"}
+    errors, pending, costs, reports = [], [], {}, {}
+    planned_jobs = {job["name"]: job for job in plan.get("jobs", [])}
+
+    def check(condition: bool, message: str) -> None:
+        if not condition:
+            errors.append(message)
+
+    sets = acceptance_cases(root, plan["task"])
+    case_hashes = {}
+    for split, expected in sets.items():
+        path = root / "cases" / f"{split}.json"
+        if not path.exists():
+            errors.append(f"{split}: missing declared cases")
+            continue
+        actual = json.loads(path.read_text())
+        identity = ("id", "task", "kind", "seed")
+        check(
+            len(actual) == len(expected)
+            and all(
+                all(a.get(k) == b[k] for k in identity)
+                for a, b in zip(actual, expected, strict=True)
+            ),
+            f"{split}: declared cases differ from the fixed acceptance profile",
+        )
+        case_hashes[split] = file_hash(path)
+    stages = {
+        "reference_gate": ("development", "reference"),
+        "reference_collect": ("collection", "reference"),
+        "warmup": (None, "warmup"),
+        "actor_gate": ("development", "actor-eval"),
+        "q_bc": ("online", "online"),
+        "bc_only": ("online", "online"),
+        **{
+            name: (
+                "heldout",
+                "reference" if name == "reference_final" else "actor-eval",
+            )
+            for name in FINAL_ARMS
+        },
+    }
+    by_id, by_hash = {}, {}
+    for name, (split, mode) in stages.items():
+        path = root / name / "manifest.json"
+        if not path.exists():
+            pending.append(name)
+            continue
+        report = json.loads(path.read_text())
+        reports[name] = report
+        args = report.get("args", {})
+        check(report.get("protocol") == PROTOCOL, f"{name}: incompatible protocol")
+        check(args.get("task") == plan["task"], f"{name}: task mismatch")
+        check(args.get("seed") == plan["training_seed"], f"{name}: seed mismatch")
+        check(args.get("mode") == mode, f"{name}: mode mismatch")
+        role = (
+            "training"
+            if name in ("reference_collect", "warmup", "q_bc", "bc_only")
+            else split
+        )
+        check(args.get("evaluation_role") == role, f"{name}: evaluation role mismatch")
+        planned_args = planned_jobs.get(name, {}).get("argv", [])
+        requested_logging = (
+            planned_args[planned_args.index("--wandb") + 1]
+            if "--wandb" in planned_args
+            else None
+        )
+        check(
+            requested_logging is not None and args.get("wandb") == requested_logging,
+            f"{name}: logging mode differs from the declared plan",
+        )
+        if split:
+            check(
+                report.get("case_manifest_sha256") == case_hashes.get(split)
+                and split in case_hashes,
+                f"{name}: case manifest digest mismatch",
+            )
+        if name in ("q_bc", "bc_only"):
+            check(args.get("objective") == name, f"{name}: actor objective mismatch")
+            check(
+                args.get("interaction_ticks") == 20000,
+                f"{name}: requested budget mismatch",
+            )
+            check(
+                args.get("updates_per_chunk") == 5, f"{name}: update schedule mismatch"
+            )
+        if name in (
+            "actor_gate",
+            "q_bc",
+            "bc_only",
+            "warmup_final",
+            "q_bc_eval",
+            "bc_only_eval",
+        ):
+            owner = name.removesuffix("_eval") if name.endswith("_eval") else "warmup"
+            checkpoint = (
+                root / owner / ("warmup.pt" if owner == "warmup" else "online.pt")
+            )
+            check(
+                Path(args.get("checkpoint") or "").resolve() == checkpoint.resolve(),
+                f"{name}: checkpoint path mismatch",
+            )
+        if report.get("error") or report.get("exit_code", 0) != 0:
+            errors.append(
+                f"{name}: unsuccessful stage ({report.get('error', report.get('exit_code'))})"
+            )
+        complete = report.get("complete") is True
+        cost = {"complete": complete}
+        start = report.get("started_at")
+        end = (
+            report.get("finished_at")
+            if complete
+            else report.get("finished_at", time.time())
+        )
+        valid_time = (
+            all(
+                isinstance(value, (int, float)) and math.isfinite(value)
+                for value in (start, end)
+            )
+            and end >= start
+        )
+        if complete:
+            check(valid_time, f"{name}: invalid stage timestamps")
+        if valid_time:
+            cost["stage_wall_seconds"] = end - start
+        progress = report
+        if not complete:
+            pending.append(name)
+            live = root / name / "online_status.json"
+            if live.exists():
+                progress = json.loads(live.read_text())
+        for key in (
+            "interaction_ticks",
+            "settling_ticks",
+            "actor_updates",
+            "critic_updates",
+            "encoder_updates",
+        ):
+            if key in progress:
+                cost[key] = progress[key]
+        wandb_path = root / name / "wandb_run.json"
+        if wandb_path.exists():
+            wandb_run = json.loads(wandb_path.read_text())
+            cost["wandb_url"] = wandb_run.get("url")
+        else:
+            wandb_run = {}
+        costs[name] = cost
+        if not complete:
+            continue
+        if requested_logging == "online":
+            check(
+                wandb_run.get("mode") == "online" and bool(wandb_run.get("url")),
+                f"{name}: missing online W&B run record",
+            )
+        check(report.get("gate_passed") is True, f"{name}: stage gate did not pass")
+        if name == "warmup":
+            check(
+                args.get("encoder_steps") == 1000 and args.get("bc_steps") == 6000,
+                "warmup: requested training budget mismatch",
+            )
+            check(
+                report.get("encoder_updates") == 1000, "warmup: encoder budget mismatch"
+            )
+            check(report.get("actor_updates") == 6000, "warmup: actor budget mismatch")
+            check(
+                report.get("critic_updates") == 0, "warmup: unexpected critic updates"
+            )
+            expected_ids = [c["id"] for c in sets["collection"]]
+            check(
+                set(report.get("train_episodes", [])) == set(expected_ids[:52]),
+                "warmup: training episode split mismatch",
+            )
+            check(
+                set(report.get("heldout_episodes", [])) == set(expected_ids[52:]),
+                "warmup: validation episode split mismatch",
+            )
+            continue
+        episodes = report.get("episodes", [])
+        expected = sets[split]
+        count_ok = (
+            0 < len(episodes) <= len(expected)
+            if split == "online"
+            else len(episodes) == len(expected)
+        )
+        check(count_ok, f"{name}: episode count mismatch")
+        for episode, case in zip(episodes, expected):
+            check(
+                all(episode.get(k) == case[k] for k in ("id", "task", "kind", "seed")),
+                f"{name}: episode identity mismatch",
+            )
+            digest, case_id = episode.get("state_sha256"), episode.get("id")
+            check(bool(digest), f"{name}: missing reset hash")
+            check(
+                by_id.get(case_id, digest) == digest,
+                f"{name}: reset changed for {case_id}",
+            )
+            check(
+                by_hash.get(digest, case_id) == case_id,
+                f"{name}: different cases share a physical reset",
+            )
+            by_id[case_id], by_hash[digest] = digest, case_id
+        check(
+            all(type(e.get("success")) is bool for e in episodes),
+            f"{name}: invalid success flags",
+        )
+        successes = sum(e.get("success") is True for e in episodes)
+        check(
+            report.get("successes") == successes, f"{name}: success accounting mismatch"
+        )
+        check(
+            bool(episodes) and report.get("success_rate") == successes / len(episodes),
+            f"{name}: success rate mismatch",
+        )
+        valid_ticks = all(
+            type(e.get("ticks")) is int
+            and 0 < e["ticks"] <= PROTOCOL["max_control_steps"]
+            for e in episodes
+        )
+        check(valid_ticks, f"{name}: invalid episode tick count")
+        ticks = sum(e["ticks"] for e in episodes) if valid_ticks else None
+        check(
+            report.get("interaction_ticks") == ticks,
+            f"{name}: interaction accounting mismatch",
+        )
+        check(
+            report.get("settling_ticks") == len(episodes) * PROTOCOL["settling_steps"],
+            f"{name}: settling accounting mismatch",
+        )
+        if split == "online":
+            check(ticks == 20000, f"{name}: executed budget mismatch")
+            critic_updates = report.get("critic_updates", 0)
+            expected_updates = (
+                5 * sum(math.ceil(e["ticks"] / PROTOCOL["chunk_len"]) for e in episodes)
+                if valid_ticks
+                else 0
+            )
+            check(
+                critic_updates == expected_updates > 0
+                and report.get("actor_updates") == 6000 + critic_updates // 2,
+                f"{name}: learner update accounting mismatch",
+            )
+        if split == "heldout":
+            check(not args.get("collect"), f"{name}: held-out data collection enabled")
+            if name == "reference_final":
+                check(
+                    report.get("actor_updates") == report.get("critic_updates") == 0,
+                    f"{name}: reference has learner updates",
+                )
+            else:
+                owner = (
+                    "warmup" if name == "warmup_final" else name.removesuffix("_eval")
+                )
+                origin = reports.get(owner, {})
+                check(
+                    all(
+                        report.get(k) == origin.get(k)
+                        for k in ("actor_updates", "critic_updates")
+                    ),
+                    f"{name}: checkpoint update counters mismatch",
+                )
+    anchor = reports.get("reference_gate", {})
+    actor_gate = reports.get("actor_gate", {})
+    if anchor.get("complete") and actor_gate.get("complete"):
+        try:
+            check(
+                paired_gate(anchor, actor_gate)["gate_passed"],
+                "paired_gate: warmup lost too many development successes",
+            )
+        except ValueError as error:
+            errors.append(f"paired_gate: {error}")
+    for name, report in reports.items():
+        for key in ("adapter_sha256", "versions"):
+            check(
+                bool(report.get(key)) and report.get(key) == anchor.get(key),
+                f"{name}: {key} mismatch",
+            )
+        if name in FINAL_ARMS:
+            for source in ("q_bc", "bc_only"):
+                training = reports.get(source, {})
+                finished, started = (
+                    training.get("finished_at"),
+                    report.get("started_at"),
+                )
+                check(
+                    training.get("complete") is True
+                    and isinstance(finished, (int, float))
+                    and isinstance(started, (int, float))
+                    and finished <= started,
+                    f"{name}: held-out evaluation started before {source} completed",
+                )
+    arm_costs = {}
+    for arm, dependencies in {
+        "warmup_final": ("reference_collect", "warmup"),
+        "q_bc_eval": ("reference_collect", "warmup", "q_bc"),
+        "bc_only_eval": ("reference_collect", "warmup", "bc_only"),
+    }.items():
+        if all(
+            costs.get(n, {}).get("complete") and "stage_wall_seconds" in costs[n]
+            for n in dependencies
+        ):
+            arm_costs[arm] = {
+                key: sum(costs[n].get(key, 0) for n in dependencies)
+                for key in (
+                    "stage_wall_seconds",
+                    "interaction_ticks",
+                    "settling_ticks",
+                )
+            }
+    return {
+        "state": "failed" if errors else "incomplete" if pending else "passed",
+        "violations": errors,
+        "pending_stages": pending,
+        "stage_costs": costs,
+        "completed_training_cost_by_arm": arm_costs,
+        "cost_scope": "Collection plus warmup plus each arm's online training. Shared preparation is counted once per arm; do not sum arms as total campaign cost. Excludes upstream VLA pretraining, evaluation, queue waits and manual debugging. Manifest wall time includes loading/checkpoint I/O but not imports or W&B finalization; it is not GPU-active time.",
+        "checkpoint_identity": "Recorded paths and update counters; head checkpoint bytes were not hashed by legacy manifests.",
+        "claim_scope": "Single task and training seed; engineering acceptance, not proof of RL improvement or full-suite reproduction.",
+    }
 
 
 def paired_gate(reference: dict, actor: dict) -> dict:
@@ -94,11 +426,19 @@ def summarize_campaign(root: Path) -> dict:
             report = json.loads(path.read_text())
             if report.get("complete") is True and report.get("exit_code") == 0:
                 final_reports[name] = report
+    audit = audit_acceptance(root)
+    comparison_error = None
+    try:
+        comparison = paired_comparison(final_reports)
+    except ValueError as error:
+        comparison, comparison_error = {}, str(error)
     return {
         "queue_state": queue.get("state", "not_started"),
         "gpu_index": queue.get("gpu_index"),
         "jobs": results,
-        "engineering_pipeline_complete": all(
+        "engineering_pipeline_complete": comparison_error is None
+        and audit["state"] in ("passed", "not_applicable")
+        and all(
             results[name]["state"] == "passed"
             and results[name].get("manifest_complete") is True
             for name in ("reference_final", "warmup_final", "q_bc_eval", "bc_only_eval")
@@ -108,7 +448,9 @@ def summarize_campaign(root: Path) -> dict:
         "scope": plan.get(
             "scope", "single-task development pilot; not evidence of an RL improvement"
         ),
-        "comparison": paired_comparison(final_reports),
+        "comparison": comparison,
+        "comparison_error": comparison_error,
+        "acceptance_audit": audit,
     }
 
 
@@ -501,7 +843,9 @@ def campaign_plan(root: Path, repo: Path, assets: Path, source: Path, gpu: int) 
 def main() -> None:
     """Wait for checked assets, run a gate, or own a twelve-hour GPU queue."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["run", "wait-assets", "paired-gate", "status"])
+    parser.add_argument(
+        "mode", choices=["run", "wait-assets", "paired-gate", "status", "audit"]
+    )
     parser.add_argument("--root", type=Path)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--source", type=Path)
@@ -513,9 +857,30 @@ def main() -> None:
         "--wandb", choices=["online", "offline", "disabled"], default="disabled"
     )
     parser.add_argument("--wandb-entity")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Save a new audit snapshot without overwriting an existing report",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    if args.mode == "status":
+    if args.report is not None and args.mode != "audit":
+        parser.error("--report applies only to audit")
+    if args.mode == "audit":
+        if args.root is None:
+            parser.error("audit requires --root")
+        report = audit_acceptance(args.root)
+        if args.report is not None:
+            if args.report.exists():
+                parser.error("Audit report already exists; choose a new snapshot path")
+            write_json(args.report, report)
+        print(json.dumps(report, indent=2))
+        raise SystemExit(
+            {"passed": 0, "failed": 2, "incomplete": 3, "not_applicable": 4}[
+                report["state"]
+            ]
+        )
+    elif args.mode == "status":
         if args.root is None:
             parser.error("status requires --root")
         print(json.dumps(summarize_campaign(args.root), indent=2))
