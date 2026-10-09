@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from toolkits.rlt.libero_acceptance import split_cache
+from toolkits.rlt.libero_acceptance import Metrics, split_cache
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, model_state
 from toolkits.rlt.pi05_baseline import PROTOCOL, write_json
 
@@ -91,7 +91,7 @@ def save_heads(
     temp.replace(path)
 
 
-def warmup(args: Namespace) -> dict:
+def warmup(args: Namespace, metrics: Metrics) -> dict:
     """Fit reconstruction and BC on development episodes, keeping one fifth out."""
     cache = torch.load(args.cache, map_location="cpu", weights_only=True)
     validate_checkpoint(cache)
@@ -130,6 +130,9 @@ def warmup(args: Namespace) -> dict:
         if step % 25 == 0:
             history.append({"step": step + 1, "reconstruction": loss.item()})
             write_json(args.output / "encoder_history.json", {"updates": history})
+            metrics.append(
+                {"encoder/update": step + 1, "encoder/reconstruction": loss.item()}
+            )
     after = reconstruction(heldout)
     encoder.eval().requires_grad_(False)
     del optimizer
@@ -154,11 +157,19 @@ def warmup(args: Namespace) -> dict:
     learner = make_learner()
     initial = learner.following(heldout_rows)
     for step in range(args.bc_steps):
-        metrics = learner.update(train_rows, warmup=True)
+        update_metrics = learner.update(train_rows, warmup=True)
         if step % 100 == 0:
-            write_json(args.output / "bc_status.json", metrics)
+            write_json(args.output / "bc_status.json", update_metrics)
+            metrics.append({f"warmup/{k}": v for k, v in update_metrics.items()})
     learner.publish_warmup()
     final = learner.following(heldout_rows)
+    metrics.append(
+        {
+            "encoder/heldout_before": before,
+            "encoder/heldout_after": after,
+            **{f"warmup/heldout_{k}": v for k, v in final.items()},
+        }
+    )
     save_heads(args.output / "warmup.pt", encoder, learner)
     passed = (
         after < before

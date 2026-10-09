@@ -19,7 +19,7 @@ The adapter maps the legacy class name explicitly and loads every weight strictl
 Prepare Verified Assets
 -----------------------
 
-Use the prepared LIBERO acceptance environment without changing dependencies under existing jobs. ``run_rlt_pi05.sh`` selects the sibling ``.venv-libero-acceptance`` and isolated EGL/dependency directories. Override ``RLT_PI05_VENV`` and ``RLT_EXTERNAL_ROOT`` on another host. The wrapper disables online W&B and Hugging Face lookups during inference.
+Use the prepared LIBERO acceptance environment without changing dependencies under existing jobs. ``run_rlt_pi05.sh`` selects the sibling ``.venv-libero-acceptance`` and isolated EGL/dependency directories. Override ``RLT_PI05_VENV`` and ``RLT_EXTERNAL_ROOT`` on another host. Hugging Face lookups remain offline during inference. W&B is disabled by default; ``--wandb online`` explicitly enables it and requires authenticated run creation before computation starts.
 
 Download to a large filesystem; the immutable release contains roughly 9.4 GB of weights. The downloader resumes partial files and verifies Git blob or LFS hashes before writing ``verified.json``:
 
@@ -70,6 +70,29 @@ The queue has a twelve-hour wall-clock budget, including resource waits. Each GP
 
 These small development sets detect integration failures. They are not the independent frozen-200 evaluation, a full-suite acceptance, or a statistically powered improvement claim. Preserve a separate test set before choosing hyperparameters or reporting research results.
 
+Expand to Matched Acceptance
+----------------------------------------
+
+For a larger comparison, select ``--profile acceptance``. This fixes reset seeds before running and saves generated simulator snapshots for reuse across arms; it does not cycle the 50 published initial states and call them 100 independent cases. ``--task`` supports the preselected Goal tasks 0, 1 and 3. Each campaign covers one task and one training seed, so completion is not a multi-seed or full-suite claim.
+
+The acceptance profile first checks the reference on 20 development initial states, requiring at least 12 successes. It then collects 64 reference rollouts, holds out the last 12 whole episodes for reconstruction and BC diagnostics, and trains the encoder for 1000 updates and the actor for 6000 BC updates. The warmed actor must succeed on at least as many development cases as the reference minus two before online training starts. These are engineering gates, not targets chosen from the final test set.
+
+BC-only and Q+BC start from the identical warmup checkpoint and each execute 20,000 control ticks, with five learner updates per chunk. Settling ticks, episode counts and actual actor/critic updates are recorded separately because successful episodes can end mid-chunk. The reference's stochastic flow sampling is seeded by case and control tick in an isolated RNG context; learner random-number consumption cannot change it. No human, planner or memory assistance is enabled.
+
+Only after both online jobs complete does the queue evaluate reference, warmup-only, BC-only and Q+BC on the same 100 held-out generated initial states. It uses final-budget checkpoints, not the best test score, and rejects mismatched reset hashes in the comparison. ``summary.json`` reports Wilson 95% intervals and paired gained/lost successes. Freeze these results; any test-informed change requires a newly declared holdout before another confirmatory claim.
+
+Start a single task with online logging as follows. Run another task in a separate output directory only on a separately authorized GPU:
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign run \
+     --profile acceptance --task 0 --seed 42 --gpu 0 \
+     --wandb online --wandb-entity your-team \
+     --root "$RLT_PI05_RUN" --assets "$RLT_PI05_ASSETS" \
+     --source "$RLT_PI05_SOURCE"
+
+Each acceptance queue retains the twelve-hour total limit, including waits; individual jobs have a four-hour limit within it. Failed gates stop their dependants, and deadline-expired work stays explicitly incomplete. Local ``metrics.jsonl`` files accompany W&B runs in project ``rlt-pi05-libero``; ``wandb_run.json`` stores each run link. Losses, success rates, control ticks and durations are logged alongside the pinned configuration. An online-authentication failure does not silently switch to disabled logging.
+
 Inspect the Results
 -------------------
 
@@ -82,7 +105,7 @@ For a compact report, run the following command. It keeps missing scores distinc
    ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign status \
      --root "$RLT_PI05_RUN"
 
-On the development host, the active campaign lives under ``research/rlt_pi05_20261009/pilot-v2`` on the NAS, and ``rlt_pi05_baseline_1009`` is its tmux session. The earlier ``pilot`` queue was stopped while waiting for a GPU to add the warmup-only comparison; its evidence remains intact. The separate ``cpu-audit/manifest.json`` records strict model loading and a synthetic forward. A CPU audit is not a LIBERO success result. Failure manifests and skipped jobs remain available for acceptance instead of being relabelled as completed training.
+On the development host, ``rlt_pi05_acceptance_1009`` owns two waiting queues: ``research/rlt_pi05_20261009/acceptance-task0-seed42`` on GPU 0 and ``acceptance-task1-seed42`` on GPU 1. They wait for existing compute processes to exit, not merely for utilization to reach zero. Task 3 and additional training seeds remain follow-up work. Earlier ``pilot`` and ``pilot-v2`` outputs are preserved; the old RLT_a/planner queues were paused between jobs to give this baseline priority. Their completed artifacts were not removed. The separate ``cpu-audit/manifest.json`` records strict loading and a synthetic forward. The earlier ``cpu-reference`` completed one real episode with 0/1 success: it proves loop execution, not baseline acceptance. Failure manifests and skipped jobs remain available rather than being relabelled as completed training.
 
 When no GPU is available, ``cpu-reference`` can check the actual simulator loop with CPU inference and an installed OSMesa software renderer. Set ``LD_LIBRARY_PATH`` if OSMesa is unpacked outside the system paths. This mode never reserves a CUDA device; the required ``--gpu`` argument is ignored. It is slow and uses CPU BF16 autocast, so its results do not replace matched GPU evaluations:
 

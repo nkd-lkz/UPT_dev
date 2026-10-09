@@ -19,7 +19,7 @@
 准备已校验的模型
 -----------------
 
-使用已准备的 LIBERO acceptance 环境，避免修改正在运行的旧任务的依赖。``run_rlt_pi05.sh`` 默认选择相邻目录的 ``.venv-libero-acceptance`` 以及独立的 EGL 和依赖目录；其他主机可通过 ``RLT_PI05_VENV`` 和 ``RLT_EXTERNAL_ROOT`` 指定路径。推理阶段关闭在线 W&B 和 Hugging Face 查询。
+使用已准备的 LIBERO acceptance 环境，避免修改正在运行的旧任务的依赖。``run_rlt_pi05.sh`` 默认选择相邻目录的 ``.venv-libero-acceptance`` 以及独立的 EGL 和依赖目录；其他主机可通过 ``RLT_PI05_VENV`` 和 ``RLT_EXTERNAL_ROOT`` 指定路径。推理阶段保持 Hugging Face 离线。W&B 默认关闭；显式传入 ``--wandb online`` 后，必须先通过认证并创建在线 run，才开始计算。
 
 模型权重约 9.4 GB，应存放在大容量文件系统。下载器支持续传，核对 Git blob 或 LFS 哈希后才写入 ``verified.json``：
 
@@ -70,6 +70,29 @@
 
 这些小规模开发集用于发现接入错误，不等于此前的独立 frozen-200 复评、完整任务集验收或具有统计效力的提升证据。调参和报告研究结果之前，应另行保留独立测试集。
 
+扩大配对验收规模
+-----------------
+
+需要更大规模对比时，选择 ``--profile acceptance``。该配置在运行前固定初态 seed，生成并保存仿真快照供各组复用，不会循环使用 50 个公开初态并将其称为 100 个独立样本。``--task`` 支持预先选定的 Goal Task 0、1、3。每个队列只覆盖一个任务、一个训练 seed，完成后不能称为多 seed 或全任务集验收。
+
+扩大验收先在 20 个开发初态上检查 reference，要求至少成功 12 次；通过后采集 64 回合 reference rollout，将最后 12 个完整回合留作重建和 BC 诊断，执行 1000 次 encoder 更新和 6000 次 actor BC 更新。热身 actor 在开发初态上的成功次数最多比 reference 少两次，才进入在线训练。这些阈值用于工程验收，不根据最终测试结果选择。
+
+BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 tick，每个 chunk 更新五次。成功回合可能在 chunk 中途结束，因此复位后的稳定 tick、回合数和实际 actor/critic 更新次数单独记录。Reference 的 flow 采样根据初态与控制 tick 设置 seed，并隔离随机数状态，避免 learner 消耗随机数后改变 reference 噪声。整个 baseline 不启用人工、planner 或 memory 辅助。
+
+两组在线训练都完成后，才用同一组 100 个独立生成的留出初态评估 reference、仅热身、BC-only 和 Q+BC。使用预算终点的 checkpoint，不按测试集最高分选模型；比较时检查初态哈希一致。``summary.json`` 报告 Wilson 95% 区间，以及配对新增成功和丢失成功的次数。这些测试结果应冻结；如果参考测试结果修改方案，需要重新声明留出集，才能再次作确认性结论。
+
+以下命令启动单任务在线记录。另一任务必须使用独立输出目录，并放到另一张获准使用的 GPU 上：
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign run \
+     --profile acceptance --task 0 --seed 42 --gpu 0 \
+     --wandb online --wandb-entity your-team \
+     --root "$RLT_PI05_RUN" --assets "$RLT_PI05_ASSETS" \
+     --source "$RLT_PI05_SOURCE"
+
+每条扩大验收队列仍限时十二小时，包含等待资源的时间；单任务在总预算内最多运行四小时。验收失败会停止依赖阶段，超过截止时间的工作明确保留为未完成。W&B 项目为 ``rlt-pi05-libero``，本地同时写入 ``metrics.jsonl``，每个 run 的链接保存在 ``wandb_run.json``。固定配置与损失、成功率、控制步数、耗时一起记录。在线认证失败不会静默退回关闭记录的模式。
+
 检查输出与状态
 ---------------
 
@@ -82,7 +105,7 @@
    ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign status \
      --root "$RLT_PI05_RUN"
 
-开发服务器上的当前实验输出位于 NAS 的 ``research/rlt_pi05_20261009/pilot-v2``，对应 tmux 会话 ``rlt_pi05_baseline_1009``。此前 ``pilot`` 队列在等待 GPU 时停止，以补入仅热身对照，原有记录保持不变。单独的 ``cpu-audit/manifest.json`` 记录严格加载和合成输入前向；CPU 检查不是 LIBERO 成功率。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
+开发服务器通过 ``rlt_pi05_acceptance_1009`` 管理两条等待队列：GPU 0 对应 NAS 的 ``research/rlt_pi05_20261009/acceptance-task0-seed42``，GPU 1 对应 ``acceptance-task1-seed42``。必须等原有计算进程退出，不能只看利用率是否为零。Task 3 和额外训练 seed 留作后续工作。此前 ``pilot`` 和 ``pilot-v2`` 的记录均保留；旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。单独的 ``cpu-audit/manifest.json`` 记录严格加载和合成输入前向；此前 ``cpu-reference`` 完成了一个真实回合，成功数为 0/1，只能证明执行闭环，不能算 baseline 验收通过。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
 
 没有空闲 GPU 时，可以用 ``cpu-reference`` 通过 CPU 推理和 OSMesa 软件渲染检查真实仿真闭环。若 OSMesa 解压在系统路径之外，需要设置 ``LD_LIBRARY_PATH``。该模式不会占用 CUDA 设备，必填的 ``--gpu`` 参数在此被忽略。CPU BF16 autocast 推理较慢，其结果不能替代配对 GPU 评估：
 

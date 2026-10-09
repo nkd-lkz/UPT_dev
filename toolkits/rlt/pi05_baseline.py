@@ -24,6 +24,8 @@ from toolkits.rlt.pi05_assets import REVISION, SOURCE_COMMIT, file_hash
 if TYPE_CHECKING:
     from torch import nn
 
+    from toolkits.rlt.libero_acceptance import Metrics
+
 PROTOCOL = {
     "id": "alphabrain-rlt-pi05-libero-v1",
     "track": "rlt",
@@ -58,10 +60,11 @@ PROTOCOL = {
     "actor_update_every": 2,
     "target_tau": 0.005,
     "exploration_std": 0.1,
+    "reference_randomness": "per-case and per-control-tick; isolated from learner RNG",
 }
 
 
-def write_json(path: Path, value: dict) -> None:
+def write_json(path: Path, value: dict | list) -> None:
     """Publish complete JSON atomically in the artifact directory."""
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
@@ -153,7 +156,12 @@ class Pi05Reference:
         self.model = model
 
     def predict(
-        self, observation: dict, instruction: str, *, capture: bool = False
+        self,
+        observation: dict,
+        instruction: str,
+        *,
+        capture: bool = False,
+        seed: int | None = None,
     ) -> dict:
         """Return native actions and optionally detached real-image features."""
         import torch
@@ -169,7 +177,17 @@ class Pi05Reference:
             else None
         )
         try:
-            with torch.no_grad():
+            devices = (
+                [torch.cuda.current_device()] if torch.cuda.is_initialized() else []
+            )
+            rng = (
+                torch.random.fork_rng(devices=devices)
+                if seed is not None
+                else nullcontext()
+            )
+            with torch.no_grad(), rng:
+                if seed is not None:
+                    torch.manual_seed(seed)
                 result = self.model.predict_action(
                     batch_images=[
                         [
@@ -247,7 +265,28 @@ def cpu_audit(args: argparse.Namespace) -> dict:
     }
 
 
-def evaluate(args: argparse.Namespace) -> dict:
+def evaluation_cases(args: argparse.Namespace) -> list[dict]:
+    """Load declared resets, or retain the small published-state smoke protocol."""
+    from toolkits.rlt.libero_acceptance import read_cases
+
+    if args.cases is not None:
+        cases = read_cases(args.cases)
+        if any(c["task"] != args.task for c in cases):
+            raise ValueError("Case manifest task differs from --task")
+        return cases
+    return [
+        {
+            "id": f"dev-task{args.task}-state{args.state_start + i}",
+            "task": args.task,
+            "kind": "published",
+            "state": args.state_start + i,
+            "seed": args.seed + i,
+        }
+        for i in range(args.episodes)
+    ]
+
+
+def evaluate(args: argparse.Namespace, metrics: Metrics) -> dict:
     """Run explicit development cases and retain a small RLT training cache."""
     import torch
 
@@ -264,30 +303,34 @@ def evaluate(args: argparse.Namespace) -> dict:
     env = RemoteEnvironment()
     results, cache, replay = [], [], []
     parity = None
+    total_ticks = 0
+    seen_states = set()
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    cases = evaluation_cases(args)
     try:
-        for episode in range(args.episodes):
-            seed = args.seed + episode
-            random.seed(seed)
+        for episode, case in enumerate(cases):
+            if (
+                args.mode == "online"
+                and args.interaction_ticks
+                and total_ticks >= args.interaction_ticks
+            ):
+                break
+            seed = case["seed"]
             np.random.seed(seed)
-            torch.manual_seed(seed)
-            state = args.state_start + episode
-            case = {
-                "id": f"dev-task{args.task}-state{state}",
-                "task": args.task,
-                "kind": "published",
-                "state": state,
-                "seed": seed,
-            }
-            obs = env.reset(case)
+            obs = env.reset(case, create_snapshot=args.create_snapshots)
+            if env.reset_hash in seen_states:
+                raise ValueError("Duplicate physical initial state in case manifest")
+            seen_states.add(env.reset_hash)
             for _ in range(PROTOCOL["settling_steps"]):
                 obs, _, _ = env.step(
                     np.asarray([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
                 )
             if parity is None:
-                torch.manual_seed(seed)
-                plain = reference.predict(obs, env.instruction)
-                torch.manual_seed(seed)
-                captured = reference.predict(obs, env.instruction, capture=True)
+                plain = reference.predict(obs, env.instruction, seed=seed)
+                captured = reference.predict(
+                    obs, env.instruction, capture=True, seed=seed
+                )
                 error = float(np.max(np.abs(plain["ref"] - captured["ref"])))
                 if error != 0:
                     raise ValueError(
@@ -297,12 +340,17 @@ def evaluate(args: argparse.Namespace) -> dict:
             success, ticks = False, 0
             started = time.monotonic()
             row = None
-            while ticks < PROTOCOL["max_control_steps"]:
+            limit = PROTOCOL["max_control_steps"]
+            if args.mode == "online" and args.interaction_ticks:
+                limit = min(limit, args.interaction_ticks - total_ticks)
+            trace = []
+            while ticks < limit:
                 if row is None:
                     row = reference.predict(
                         obs,
                         env.instruction,
                         capture=args.collect or learner is not None,
+                        seed=seed * 1000 + ticks,
                     )
                 if args.collect:
                     cache.append(
@@ -323,6 +371,25 @@ def evaluate(args: argparse.Namespace) -> dict:
                     commands = env_commands(action_chunk.numpy())
                 else:
                     commands = row["commands"]
+                if episode == 0:
+                    from PIL import Image
+
+                    if ticks == 0:
+                        for view in ("primary_image", "wrist_image"):
+                            Image.fromarray(np.asarray(obs[view])).save(
+                                args.output / f"initial_{view}.png"
+                            )
+                    trace.append(
+                        {
+                            "tick": ticks,
+                            "state": np.asarray(obs["state"]).tolist(),
+                            "commands": commands.tolist(),
+                        }
+                    )
+                    write_json(
+                        args.output / "first_episode_trace.json",
+                        {"case": case, "chunks": trace},
+                    )
                 chunk_ticks, chunk_reward = 0, 0.0
                 for action in commands:
                     obs, reward, done = env.step(action)
@@ -332,11 +399,13 @@ def evaluate(args: argparse.Namespace) -> dict:
                     if done or reward > 0:
                         success = True
                         break
-                    if ticks >= PROTOCOL["max_control_steps"]:
+                    if ticks >= limit:
                         break
                 row = None
                 if args.mode == "online":
-                    row = reference.predict(obs, env.instruction, capture=True)
+                    row = reference.predict(
+                        obs, env.instruction, capture=True, seed=seed * 1000 + ticks
+                    )
                     following = encode_row(encoder, row, obs["state"])
                     replay.append(
                         {
@@ -350,13 +419,25 @@ def evaluate(args: argparse.Namespace) -> dict:
                         }
                     )
                     for _ in range(args.updates_per_chunk):
-                        metrics = learner.update(replay)
+                        update_metrics = learner.update(replay)
                     write_json(
                         args.output / "online_status.json",
-                        metrics | {"replay_chunks": len(replay)},
+                        update_metrics
+                        | {
+                            "replay_chunks": len(replay),
+                            "interaction_ticks": total_ticks + ticks,
+                        },
+                    )
+                    metrics.append(
+                        {f"train/{k}": v for k, v in update_metrics.items()}
+                        | {
+                            "train/interaction_ticks": total_ticks + ticks,
+                            "train/replay_chunks": len(replay),
+                        }
                     )
                 if success:
                     break
+            total_ticks += ticks
             results.append(
                 {
                     **case,
@@ -367,6 +448,21 @@ def evaluate(args: argparse.Namespace) -> dict:
                 }
             )
             write_json(args.output / "episodes.json", {"episodes": results})
+            prefix = "train" if args.mode == "online" or args.collect else "eval"
+            metrics.append(
+                {
+                    f"{prefix}/episode": episode + 1,
+                    f"{prefix}/success": int(success),
+                    f"{prefix}/success_rate": sum(r["success"] for r in results)
+                    / len(results),
+                    f"{prefix}/interaction_ticks": total_ticks,
+                    f"{prefix}/episode_seconds": results[-1]["seconds"],
+                }
+            )
+            if episode == 0:
+                Image.fromarray(np.asarray(obs["primary_image"])).save(
+                    args.output / "final_primary_image.png"
+                )
             print(f"Episode {episode}: success={success} ticks={ticks}", flush=True)
             if args.mode == "online":
                 save_heads(args.output / "online.pt", encoder, learner)
@@ -382,11 +478,15 @@ def evaluate(args: argparse.Namespace) -> dict:
         "capture_parity": parity,
         "runtime_config": config,
         "feature_rows": len(cache),
-        "gate_passed": successes >= args.min_successes,
+        "gate_passed": successes >= args.min_successes
+        and (not args.interaction_ticks or total_ticks == args.interaction_ticks),
+        "interaction_ticks": total_ticks,
+        "settling_ticks": len(results) * PROTOCOL["settling_steps"],
+        "case_manifest_sha256": file_hash(args.cases) if args.cases else None,
         "actor_updates": learner.actor_updates if learner is not None else 0,
         "critic_updates": learner.critic_updates if learner is not None else 0,
         "objective": args.objective if learner is not None else "reference",
-        "evaluation_role": "development smoke; never final held-out evaluation",
+        "evaluation_role": args.evaluation_role,
     }
 
 
@@ -420,11 +520,29 @@ def main() -> None:
     parser.add_argument("--bc-steps", type=int, default=2000)
     parser.add_argument("--updates-per-chunk", type=int, default=5)
     parser.add_argument("--objective", choices=["q_bc", "bc_only"], default="q_bc")
+    parser.add_argument("--cases", type=Path)
+    parser.add_argument("--create-snapshots", action="store_true")
+    parser.add_argument("--interaction-ticks", type=int, default=0)
+    parser.add_argument(
+        "--evaluation-role",
+        choices=["development", "heldout", "training"],
+        default="development",
+    )
+    parser.add_argument(
+        "--wandb", choices=["online", "offline", "disabled"], default="disabled"
+    )
+    parser.add_argument("--wandb-project", default="rlt-pi05-libero")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--group", default="rlt-pi05-acceptance")
     args = parser.parse_args()
+    # Keep validation free of runtime imports until CUDA/EGL have been isolated.
+    case_count = (
+        len(json.loads(args.cases.read_text())) if args.cases else args.episodes
+    )
     if (
         not 0 <= args.task < 10
         or not 1 <= args.episodes <= 50
-        or not 0 <= args.min_successes <= args.episodes
+        or not 0 <= args.min_successes <= case_count
     ):
         parser.error("Invalid development case/gate budget")
     if not 0 <= args.state_start <= 50 - args.episodes:
@@ -439,11 +557,21 @@ def main() -> None:
         parser.error("Actor modes require an explicit checkpoint")
     if not 1 <= args.updates_per_chunk <= 10:
         parser.error("Require 1 to 10 updates per action chunk")
+    if args.interaction_ticks < 0 or (args.interaction_ticks and args.mode != "online"):
+        parser.error("Interaction budgets apply only to online training")
+    if args.evaluation_role == "heldout" and (
+        args.collect
+        or args.mode not in {"reference", "actor-eval"}
+        or args.cases is None
+    ):
+        parser.error("Held-out runs require explicit cases and cannot collect or train")
+    args.wandb_required = args.wandb == "online"
     args.output.mkdir(parents=True, exist_ok=False)
     report = {
         "complete": False,
         "protocol": PROTOCOL,
         "started_at": time.time(),
+        "case_manifest_sha256": file_hash(args.cases) if args.cases else None,
         "args": {
             k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
         },
@@ -468,6 +596,7 @@ def main() -> None:
             )
         },
     }
+    metrics = None
     try:
         configure_source(args.source)
         if args.mode in {"cpu-audit", "cpu-reference"}:
@@ -485,12 +614,24 @@ def main() -> None:
         else:
             report["device"] = configure_gpu(args.gpu, args.output)
         write_json(args.output / "manifest.json", report)
+        from toolkits.rlt.libero_acceptance import Metrics
+
+        metrics = Metrics(args)
+        if metrics.wandb:
+            metrics.wandb.config.update(
+                {
+                    "protocol": PROTOCOL,
+                    "versions": report["versions"],
+                    "adapter_sha256": report["adapter_sha256"],
+                    "case_manifest_sha256": report["case_manifest_sha256"],
+                }
+            )
         if args.mode == "cpu-audit":
             report.update(cpu_audit(args))
         elif args.mode == "warmup":
             from toolkits.rlt.pi05_learning import warmup
 
-            report.update(warmup(args))
+            report.update(warmup(args, metrics))
         else:
             import torch
 
@@ -500,7 +641,7 @@ def main() -> None:
                 else nullcontext()
             )
             with context:
-                report.update(evaluate(args))
+                report.update(evaluate(args, metrics))
         report["complete"] = True
         report["exit_code"] = 0 if report["gate_passed"] else 2
     except Exception as error:
@@ -509,6 +650,15 @@ def main() -> None:
     finally:
         report["finished_at"] = time.time()
         write_json(args.output / "manifest.json", report)
+        if metrics is not None:
+            metrics.append(
+                {
+                    "run/complete": report["complete"],
+                    "run/exit_code": report.get("exit_code", 1),
+                    "run/seconds": report["finished_at"] - report["started_at"],
+                }
+            )
+            metrics.close()
     raise SystemExit(report["exit_code"])
 
 

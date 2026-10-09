@@ -19,9 +19,17 @@ from toolkits.rlt.pi05_baseline import (
     PROTOCOL,
     Pi05Reference,
     env_commands,
+    evaluation_cases,
     runtime_config,
 )
-from toolkits.rlt.pi05_campaign import campaign_plan, paired_gate, summarize_campaign
+from toolkits.rlt.pi05_campaign import (
+    acceptance_cases,
+    acceptance_plan,
+    campaign_plan,
+    paired_comparison,
+    paired_gate,
+    summarize_campaign,
+)
 from toolkits.rlt.pi05_learning import validate_checkpoint
 
 
@@ -207,3 +215,108 @@ def test_campaign_summary_keeps_missing_scores_distinct_from_zero(tmp_path):
     report = summarize_campaign(tmp_path)
     assert report["jobs"]["q_bc_eval"]["success_rate"] == 0
     assert not report["engineering_pipeline_complete"]
+
+
+def test_acceptance_case_sets_are_disjoint_and_do_not_cycle_published_states(tmp_path):
+    sets = acceptance_cases(tmp_path, 0)
+    assert {k: len(v) for k, v in sets.items()} == {
+        "collection": 64,
+        "online": 2048,
+        "development": 20,
+        "heldout": 100,
+    }
+    flattened = [c for cases in sets.values() for c in cases]
+    assert len({c["seed"] for c in flattened}) == len(flattened)
+    assert len({c["snapshot"] for c in flattened}) == len(flattened)
+    assert all(c["kind"] == "generated" for c in flattened)
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps(sets["heldout"]))
+    assert evaluation_cases(SimpleNamespace(cases=path, task=0)) == sets["heldout"]
+    with pytest.raises(ValueError, match="task"):
+        evaluation_cases(SimpleNamespace(cases=path, task=1))
+
+
+@pytest.mark.parametrize("gpu", [0, 1])
+def test_acceptance_matches_warmstart_budget_and_heldout_cases(tmp_path, gpu):
+    plan = acceptance_plan(
+        tmp_path, tmp_path, tmp_path, tmp_path, gpu, 0, 42, "online", "team"
+    )
+    validate_plan(plan)
+    jobs = {j["name"]: j for j in plan["jobs"]}
+
+    def option(name, flag):
+        args = jobs[name]["argv"]
+        return args[args.index(flag) + 1]
+
+    for name in ("q_bc", "bc_only"):
+        assert option(name, "--interaction-ticks") == "20000"
+        assert option(name, "--checkpoint").endswith("warmup/warmup.pt")
+        assert option(name, "--gpu") == str(gpu)
+        assert option(name, "--wandb") == "online"
+    assert jobs["reference_final"]["depends_on"] == ["q_bc", "bc_only"]
+    for name in ("reference_final", "warmup_final", "q_bc_eval", "bc_only_eval"):
+        assert option(name, "--cases") == str(tmp_path / "cases/heldout.json")
+        assert option(name, "--evaluation-role") == "heldout"
+        assert "--collect" not in jobs[name]["argv"]
+
+
+def test_paired_final_comparison_reports_uncertainty_and_rejects_changed_resets():
+    cases = [
+        {
+            "id": str(i),
+            "task": 0,
+            "kind": "generated",
+            "seed": i,
+            "state_sha256": str(i),
+            "success": i < 60,
+        }
+        for i in range(100)
+    ]
+    actor = copy.deepcopy(cases)
+    actor[0]["success"] = False
+    actor[70]["success"] = True
+    reports = {"reference_final": {"episodes": cases}, "q_bc_eval": {"episodes": actor}}
+    comparison = paired_comparison(reports)
+    assert comparison["q_bc_eval"]["gained"] == comparison["q_bc_eval"]["lost"] == 1
+    low, high = comparison["q_bc_eval"]["wilson95"]
+    assert 0.49 < low < 0.6 < high < 0.70
+    actor[0]["state_sha256"] = "changed"
+    with pytest.raises(ValueError, match="do not match"):
+        paired_comparison(reports)
+
+
+def test_seeded_reference_does_not_consume_learning_rng():
+    class ExternalModel:
+        def predict_action(self, **kwargs):
+            return {"normalized_actions": torch.rand(1, 10, 7).numpy()}
+
+    obs = {
+        "primary_image": np.zeros((4, 4, 3)),
+        "wrist_image": np.zeros((4, 4, 3)),
+        "state": np.zeros(8),
+    }
+    reference = Pi05Reference(ExternalModel())
+    torch.manual_seed(7)
+    before = torch.random.get_rng_state().clone()
+    first = reference.predict(obs, "test", seed=32)
+    assert torch.equal(before, torch.random.get_rng_state())
+    torch.rand(20)  # Different learner workloads do not change reference noise.
+    second = reference.predict(obs, "test", seed=32)
+    np.testing.assert_array_equal(first["ref"], second["ref"])
+    assert not np.array_equal(
+        first["ref"], reference.predict(obs, "test", seed=33)["ref"]
+    )
+
+
+def test_required_wandb_failure_is_not_silently_disabled(tmp_path, monkeypatch):
+    from toolkits.rlt.libero_acceptance import Metrics
+
+    def unavailable(**kwargs):
+        raise ConnectionError("service unavailable")
+
+    monkeypatch.setattr("wandb.init", unavailable)
+    args = SimpleNamespace(
+        output=tmp_path, wandb="online", group="test", wandb_required=True
+    )
+    with pytest.raises(RuntimeError, match="Required W&B"):
+        Metrics(args)

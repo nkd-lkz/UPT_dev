@@ -237,7 +237,8 @@ class Metrics:
 
             try:
                 self.wandb = wandb.init(
-                    project="rlt-libero-acceptance",
+                    project=getattr(args, "wandb_project", "rlt-libero-acceptance"),
+                    entity=getattr(args, "wandb_entity", None),
                     group=args.group,
                     name=args.output.name,
                     dir=str(args.output),
@@ -249,6 +250,9 @@ class Metrics:
                     settings=wandb.Settings(init_timeout=45),
                 )
             except Exception as error:
+                if getattr(args, "wandb_required", False):
+                    self.stream.close()
+                    raise RuntimeError("Required W&B run could not start") from error
                 LOG.warning(
                     "W&B unavailable (%s); continuing with local JSONL",
                     type(error).__name__,
