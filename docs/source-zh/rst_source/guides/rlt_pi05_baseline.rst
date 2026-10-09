@@ -10,9 +10,9 @@
 
 源码固定为 ``604924beb77b04b0da49326dfae6ea423a27d28a``。公开模型采用 `AlphaBrainGroup/paligemma-pi0-libero-all4suite <https://huggingface.co/AlphaBrainGroup/paligemma-pi0-libero-all4suite>`_ 的 ``482fcfea4d6a5cee97456f50b1f5aeeae539a1c8`` 版本。虽然配置保留旧类名，但设置了 ``pi05: true``。该模型联合微调过四套 LIBERO 任务，适合作为工程起点，不能称为少示范 RLT 权重，也不能据此宣称未见任务迁移。
 
-适配入口显式映射旧类名，严格加载全部权重，保留 LIBERO 原生带符号夹爪动作，并且只应用一次模型内的 MEAN_STD 变换。encoder 所需的 512 个真实图像位置特征来自 reference 自己的推理前向，避免采集与部署使用不同 prefix。固定噪声的一致性检查要求提取特征前后的 reference 动作完全相同。
+适配入口显式映射旧类名，严格加载全部权重，跳过会被 checkpoint 覆盖的随机初始化，并且只应用一次模型内的 MEAN_STD 变换。训练数据用 [0, 1] 表示夹爪开度，而 LIBERO 执行 +1 闭合、-1 张开；协议 v3 因此开启上游 ``gripper_remap``，先执行 ``1 - 2 * openness``，再将命令二值化。该约定由训练数据的 `回合统计 <https://huggingface.co/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/blob/main/meta/episodes_stats.jsonl>`_ 及状态、动作记录确认，不能只根据公开配置中的归一化常数推断夹爪范围。encoder 所需的 512 个真实图像位置特征来自 reference 自己的推理前向；固定噪声的一致性检查要求提取特征前后的 reference 动作完全相同。
 
-协议 v2 还要求每次 prefix 前向在生成动作前填满 attention KV cache。固定版本的上游 adaRMS decoder 传入 ``past_key_values``，而 Transformers 4.53.2 attention 接收 ``past_key_value``。缺少适配时，多余参数会被静默忽略，缓存保持为空，动作专家无法读取图像与指令。适配代码只转换已加载模型中旧版 attention 实例的参数名，不改动安装环境或固定的上游源码。测试检查缓存推理与 prefix、suffix 联合 attention 的结果一致，并确认改变 prefix 会改变输出。此前 v1 的结果不能作为有效 reference baseline。
+每次 prefix 前向还必须在生成动作前填满 attention KV cache。固定版本的上游 adaRMS decoder 传入 ``past_key_values``，而 Transformers 4.53.2 attention 接收 ``past_key_value``。缺少适配时，多余参数会被静默忽略，缓存保持为空，动作专家无法读取图像与指令。适配代码只转换已加载模型中旧版 attention 实例的参数名，不改动安装环境或固定的上游源码。测试检查缓存推理与 prefix、suffix 联合 attention 的结果一致，并确认改变 prefix 会改变输出。此前 v1/v2 的结果存在缓存或夹爪接口错误，不能作为有效 reference baseline。
 
 .. warning::
 
@@ -107,7 +107,7 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
    ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_campaign status \
      --root "$RLT_PI05_RUN"
 
-开发服务器通过 ``rlt_pi05_cachefix_1009`` 管理 NAS 的 ``research/rlt_pi05_20261009`` 下两条 v2 队列：GPU 0 对应 ``acceptance-cachefix-task0-seed42``，GPU 1 对应 ``acceptance-cachefix-task1-seed42``。应读取实时状态，不能根据 tmux 会话是否存在判断进度。必须等原有计算进程退出，不能只看利用率是否为零。Task 3 和额外训练 seed 留作后续工作。此前 v1 acceptance 和 CPU/pilot 输出保留为兼容性错误的诊断证据，不作为验收通过的 baseline 成绩。旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
+开发服务器通过 ``rlt_pi05_v3_gpu0_1009`` 和 ``rlt_pi05_v3_gpu1_1009`` 管理 NAS 的 ``research/rlt_pi05_20261009`` 下两条 v3 队列：GPU 0 对应 ``acceptance-v3-task0-seed42``，GPU 1 对应 ``acceptance-v3-task1-seed42``。应读取实时状态，不能根据 tmux 会话是否存在判断进度。必须等原有计算进程退出，不能只看利用率是否为零。Task 3 和额外训练 seed 留作后续工作。此前 v1/v2 acceptance 和 CPU/pilot 输出保留为兼容性错误的诊断证据，不作为验收通过的 baseline 成绩。旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
 
 没有空闲 GPU 时，可以用 ``cpu-reference`` 通过 CPU 推理和 OSMesa 软件渲染检查真实仿真闭环。若 OSMesa 解压在系统路径之外，需要设置 ``LD_LIBRARY_PATH``。该模式不会占用 CUDA 设备，必填的 ``--gpu`` 参数在此被忽略。CPU BF16 autocast 推理较慢，其结果不能替代配对 GPU 评估：
 

@@ -49,7 +49,7 @@ def test_legacy_config_is_explicit_and_does_not_mutate_release(tmp_path):
     config = runtime_config(released, tmp_path)
     assert released == before
     assert config["framework"]["name"] == "PaliGemmaPi05"
-    assert config["framework"]["gripper_remap"] is False
+    assert config["framework"]["gripper_remap"] is True
     assert config["framework"]["paligemma"]["max_token_len"] == 48
     released["framework"]["action_model"]["action_horizon"] = 8
     with pytest.raises(ValueError, match="action contract"):
@@ -70,6 +70,35 @@ def test_native_actions_are_not_unnormalized_or_inverted_twice():
         env_commands(native)
     with pytest.raises(ValueError):
         env_commands(np.zeros((8, 7)))
+
+
+def test_upstream_dataset_gripper_remap_reaches_native_commands():
+    source = Path(__file__).resolve().parents[3] / "third_party/AlphaBrain"
+    if not source.exists():
+        pytest.skip("Pinned external AlphaBrain source is not installed")
+    code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(Path(sys.argv[1]).parent / "alphabrain-deps"))
+import numpy as np
+import torch
+from types import SimpleNamespace
+from AlphaBrain.model.framework.PaliGemmaPi import PaliGemmaPi
+from toolkits.rlt.pi05_baseline import env_commands, runtime_config
+released = {"framework": {"name": "PaliGemmaPi0", "pi05": True,
+            "action_model": {"action_dim": 7, "action_horizon": 10},
+            "paligemma": {}}, "trainer": {"pretrained_checkpoint": "old"}}
+config = runtime_config(released, Path("tokenizer"))
+model = SimpleNamespace(gripper_remap=config["framework"]["gripper_remap"])
+actions = torch.ones(1, 10, 7) * .2
+actions[0, :, 6] = torch.tensor([0., 1., .1, .9, .49, .51, 0., 1., .2, .8])
+native = PaliGemmaPi._maybe_remap_gripper(model, actions)[0].numpy()
+commands = env_commands(native)
+np.testing.assert_array_equal(commands[:, 6], [1, -1] * 5)
+np.testing.assert_array_equal(commands[:, :6], np.full((10, 6), .2, dtype=np.float32))
+"""
+    subprocess.run([sys.executable, "-c", code, str(source)], check=True, timeout=60)
 
 
 def test_feature_capture_preserves_reference_and_releases_hook():
@@ -126,6 +155,7 @@ import importlib.util
 import sys
 import torch
 from transformers import GemmaConfig, GemmaModel
+from transformers.modeling_utils import no_init_weights
 from toolkits.rlt.pi05_baseline import adapt_gemma_cache_keyword
 torch.set_num_threads(2)
 torch.manual_seed(42)
@@ -138,7 +168,11 @@ cfg = GemmaConfig(vocab_size=32, hidden_size=32, intermediate_size=64,
                   num_key_value_heads=1, head_dim=16)
 cfg._attn_implementation = "eager"
 model = GemmaModel(cfg).eval()
+with no_init_weights():
+    restored = GemmaModel(cfg).eval()
+restored.load_state_dict(model.state_dict(), strict=True)
 adapt_gemma_cache_keyword(model)
+adapt_gemma_cache_keyword(restored)
 assert adapt_gemma_cache_keyword(model) == 0
 prefix = torch.randn(1, 5, 32)
 suffix = torch.randn(1, 2, 32)
@@ -146,6 +180,8 @@ with torch.no_grad():
     outputs = []
     for context in (prefix, -prefix):
         result = model(inputs_embeds=context, attention_mask=torch.zeros(1, 1, 5, 5), use_cache=True)
+        restored_result = restored(inputs_embeds=context, attention_mask=torch.zeros(1, 1, 5, 5), use_cache=True)
+        torch.testing.assert_close(result.last_hidden_state, restored_result.last_hidden_state)
         cache = result.past_key_values
         assert cache.get_seq_length() == 5
         cached = model(inputs_embeds=suffix, past_key_values=cache,

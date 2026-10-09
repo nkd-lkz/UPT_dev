@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from toolkits.rlt.libero_acceptance import Metrics
 
 PROTOCOL = {
-    "id": "alphabrain-rlt-pi05-libero-v2",
+    "id": "alphabrain-rlt-pi05-libero-v3",
     "track": "rlt",
     "backbone": "pi05",
     "suite": "libero_goal",
@@ -48,7 +48,7 @@ PROTOCOL = {
     "encoder_layers": 2,
     "decoder_layers": 2,
     "encoder_heads": 8,
-    "action_mapping": "MEAN_STD once in VLA; native signed LIBERO gripper",
+    "action_mapping": "MEAN_STD once; dataset gripper openness 0..1 to LIBERO 1-2*p",
     "assistance": False,
     "memory": False,
     "training_variant": "bounded engineering pilot; not the unmodified upstream recipe",
@@ -86,7 +86,7 @@ def runtime_config(released: dict, tokenizer: Path) -> dict:
     if framework["paligemma"].get("discrete_state_input", False):
         raise ValueError("This release uses the continuous-state-free Pi0.5 prefix")
     framework["name"] = "PaliGemmaPi05"
-    framework["gripper_remap"] = False
+    framework["gripper_remap"] = True
     framework["paligemma"]["base_vlm"] = str(tokenizer)
     framework["paligemma"]["max_token_len"] = 48
     config["trainer"]["pretrained_checkpoint"] = None
@@ -158,6 +158,7 @@ def load_model(assets: Path, device: str) -> tuple[nn.Module, dict]:
     import yaml
     from omegaconf import OmegaConf
     from safetensors.torch import load_file
+    from transformers.modeling_utils import no_init_weights
 
     verified = json.loads((assets / "verified.json").read_text())
     if verified.get("complete") is not True or verified["revision"] != REVISION:
@@ -175,14 +176,15 @@ def load_model(assets: Path, device: str) -> tuple[nn.Module, dict]:
     previous = torch.get_default_dtype()
     try:
         torch.set_default_dtype(torch.bfloat16)
-        model = PaliGemmaPi(OmegaConf.create(cfg))
+        with no_init_weights():
+            model = PaliGemmaPi(OmegaConf.create(cfg))
     finally:
         torch.set_default_dtype(previous)
     model.load_state_dict(load_file(str(assets / "model.safetensors")), strict=True)
     model = model.to(device=device, dtype=torch.bfloat16).eval().requires_grad_(False)
     adapted = adapt_gemma_cache_keyword(model)
     print(f"Gemma cache keyword adapters: {adapted}", flush=True)
-    if model.chunk_len != 10 or model.gripper_remap:
+    if model.chunk_len != 10 or not model.gripper_remap:
         raise ValueError("Unexpected runtime action contract")
     return model, cfg
 
