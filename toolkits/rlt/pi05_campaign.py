@@ -14,7 +14,7 @@ from pathlib import Path
 
 from toolkits.rlt.experiment_queue import run_plan
 from toolkits.rlt.pi05_assets import REVISION, file_hash
-from toolkits.rlt.pi05_baseline import PROTOCOL, write_json
+from toolkits.rlt.pi05_baseline import SUITE_HORIZONS, suite_protocol, write_json
 
 FINAL_ARMS = ("reference_final", "warmup_final", "q_bc_eval", "bc_only_eval")
 
@@ -27,10 +27,11 @@ def episode_outcomes(report: dict) -> dict:
     stage completed successfully and its recorded tick totals agree. Do not
     treat an unexplained early stop as either a failure or a truncation.
     """
-    if report.get("protocol") != PROTOCOL or report.get("complete") is not True:
+    protocol = suite_protocol(report.get("protocol", {}).get("suite", "libero_goal"))
+    if report.get("protocol") != protocol or report.get("complete") is not True:
         raise ValueError("Episode outcomes require a completed current-protocol stage")
     episodes = report.get("episodes", [])
-    horizon = PROTOCOL["max_control_steps"]
+    horizon = protocol["max_control_steps"]
     if not episodes or any(
         type(e.get("success")) is not bool
         or type(e.get("ticks")) is not int
@@ -88,7 +89,9 @@ def audit_acceptance(root: Path) -> dict:
         if not condition:
             errors.append(message)
 
-    sets = acceptance_cases(root, plan["task"])
+    suite = plan.get("suite", "libero_goal")
+    protocol = suite_protocol(suite)
+    sets = acceptance_cases(root, plan["task"], suite, plan.get("case_training_seed"))
     case_hashes = {}
     for split, expected in sets.items():
         path = root / "cases" / f"{split}.json"
@@ -101,6 +104,7 @@ def audit_acceptance(root: Path) -> dict:
             len(actual) == len(expected)
             and all(
                 all(a.get(k) == b[k] for k in identity)
+                and a.get("suite", "libero_goal") == suite
                 for a, b in zip(actual, expected, strict=True)
             ),
             f"{split}: declared cases differ from the fixed acceptance profile",
@@ -130,7 +134,8 @@ def audit_acceptance(root: Path) -> dict:
         report = json.loads(path.read_text())
         reports[name] = report
         args = report.get("args", {})
-        check(report.get("protocol") == PROTOCOL, f"{name}: incompatible protocol")
+        check(report.get("protocol") == protocol, f"{name}: incompatible protocol")
+        check(args.get("suite", "libero_goal") == suite, f"{name}: suite mismatch")
         check(args.get("task") == plan["task"], f"{name}: task mismatch")
         check(args.get("seed") == plan["training_seed"], f"{name}: seed mismatch")
         check(args.get("mode") == mode, f"{name}: mode mismatch")
@@ -269,6 +274,10 @@ def audit_acceptance(root: Path) -> dict:
                 all(episode.get(k) == case[k] for k in ("id", "task", "kind", "seed")),
                 f"{name}: episode identity mismatch",
             )
+            check(
+                episode.get("suite", "libero_goal") == suite,
+                f"{name}: episode suite mismatch",
+            )
             digest, case_id = episode.get("state_sha256"), episode.get("id")
             check(bool(digest), f"{name}: missing reset hash")
             check(
@@ -294,11 +303,11 @@ def audit_acceptance(root: Path) -> dict:
         )
         valid_ticks = all(
             type(e.get("ticks")) is int
-            and 0 < e["ticks"] <= PROTOCOL["max_control_steps"]
+            and 0 < e["ticks"] <= protocol["max_control_steps"]
             for e in episodes
         )
         check(valid_ticks, f"{name}: invalid episode tick count")
-        if valid_ticks and episodes and report.get("protocol") == PROTOCOL:
+        if valid_ticks and episodes and report.get("protocol") == protocol:
             try:
                 cost["episode_outcomes"] = episode_outcomes(report)
                 check(
@@ -313,14 +322,14 @@ def audit_acceptance(root: Path) -> dict:
             f"{name}: interaction accounting mismatch",
         )
         check(
-            report.get("settling_ticks") == len(episodes) * PROTOCOL["settling_steps"],
+            report.get("settling_ticks") == len(episodes) * protocol["settling_steps"],
             f"{name}: settling accounting mismatch",
         )
         if split == "online":
             check(ticks == 20000, f"{name}: executed budget mismatch")
             critic_updates = report.get("critic_updates", 0)
             expected_updates = (
-                5 * sum(math.ceil(e["ticks"] / PROTOCOL["chunk_len"]) for e in episodes)
+                5 * sum(math.ceil(e["ticks"] / protocol["chunk_len"]) for e in episodes)
                 if valid_ticks
                 else 0
             )
@@ -416,7 +425,7 @@ def paired_gate(reference: dict, actor: dict) -> dict:
     a, b = reference["episodes"], actor["episodes"]
     if len(a) != len(b) or len(a) < 5:
         raise ValueError("Need at least five matched development cases")
-    keys = ("id", "task", "kind", "state", "seed", "state_sha256")
+    keys = ("id", "suite", "task", "kind", "state", "seed", "state_sha256")
     if any(any(x.get(k) != y.get(k) for k in keys) for x, y in zip(a, b, strict=True)):
         raise ValueError("Reference and actor reset cases differ")
     ref_success = sum(x["success"] for x in a)
@@ -533,9 +542,9 @@ def paired_comparison(reports: dict) -> dict:
             "wilson95": [max(0, center - half), min(1, center + half)],
         }
         if reference and name != "reference_final":
-            keys = ("id", "task", "kind", "seed", "state_sha256")
+            keys = ("id", "suite", "task", "kind", "seed", "state_sha256")
             if len(reference) != n or any(
-                any(a[k] != b[k] for k in keys)
+                any(a.get(k) != b.get(k) for k in keys)
                 for a, b in zip(reference, episodes, strict=True)
             ):
                 raise ValueError("Final evaluation cases do not match reference")
@@ -553,8 +562,19 @@ def paired_comparison(reports: dict) -> dict:
     return result
 
 
-def acceptance_cases(root: Path, task: int) -> dict[str, list[dict]]:
+def acceptance_cases(
+    root: Path, task: int, suite: str = "libero_goal", training_seed: int | None = None
+) -> dict[str, list[dict]]:
     """Fix disjoint generated-reset seeds before inspecting any held-out outcomes."""
+    suite_protocol(suite)
+    if not 0 <= task < 10 or (
+        training_seed is not None and not 0 <= training_seed < 100
+    ):
+        raise ValueError("Require task 0..9 and training seed 0..99")
+    explicit_suite = suite != "libero_goal" or training_seed is not None
+    suite_offset = (
+        list(SUITE_HORIZONS).index(suite) * 100_000_000 if explicit_suite else 0
+    )
     sets = {}
     for split, count, offset in (
         ("collection", 64, 100000),
@@ -562,9 +582,14 @@ def acceptance_cases(root: Path, task: int) -> dict[str, list[dict]]:
         ("development", 20, 300000),
         ("heldout", 100, 400000),
     ):
+        # Share held-out physical cases across training seeds. Collection,
+        # development and online resets vary independently with training seed.
+        offset += suite_offset + (training_seed or 0) * 1_000_000 * (split != "heldout")
+        prefix = f"{suite}-" if explicit_suite else ""
         sets[split] = [
             {
-                "id": f"{split}-task{task}-seed{offset + task * 10000 + i}",
+                "id": f"{prefix}{split}-task{task}-seed{offset + task * 10000 + i}",
+                **({"suite": suite} if explicit_suite else {}),
                 "task": task,
                 "kind": "generated",
                 "seed": offset + task * 10000 + i,
@@ -585,6 +610,8 @@ def acceptance_plan(
     seed: int,
     wandb: str,
     entity: str | None,
+    suite: str = "libero_goal",
+    case_training_seed: int | None = None,
 ) -> dict:
     """Build a one-seed, four-arm acceptance with 100 paired held-out initial states."""
     base = campaign_plan(root, repo, assets, source, gpu)
@@ -598,12 +625,14 @@ def acceptance_plan(
         str(gpu),
         "--task",
         str(task),
+        "--suite",
+        suite,
         "--seed",
         str(seed),
         "--wandb",
         wandb,
         "--group",
-        f"rlt-pi05-task{task}-seed{seed}",
+        f"rlt-pi05-{suite}-task{task}-seed{seed}",
     ]
     if entity:
         common += ["--wandb-entity", entity]
@@ -729,6 +758,8 @@ def acceptance_plan(
         "gpu": gpu,
         "hours": 12,
         "task": task,
+        "suite": suite,
+        "case_training_seed": case_training_seed,
         "training_seed": seed,
         "scope": "one-task one-training-seed engineering acceptance; not full-suite or multi-seed reproduction",
         "jobs": jobs,
@@ -910,7 +941,8 @@ def main() -> None:
     parser.add_argument("--source", type=Path)
     parser.add_argument("--gpu", type=int, default=2)
     parser.add_argument("--profile", choices=["smoke", "acceptance"], default="smoke")
-    parser.add_argument("--task", type=int, choices=[0, 1, 3], default=0)
+    parser.add_argument("--task", type=int, choices=range(10), default=0)
+    parser.add_argument("--suite", choices=SUITE_HORIZONS, default="libero_goal")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--wandb", choices=["online", "offline", "disabled"], default="disabled"
@@ -967,11 +999,15 @@ def main() -> None:
     else:
         if args.root is None or args.assets is None or args.source is None:
             parser.error("run requires --root, --assets and --source")
+        if args.profile == "smoke" and args.suite != "libero_goal":
+            parser.error("Multi-suite runs require --profile acceptance")
         args.root.mkdir(parents=True, exist_ok=False)
         repo = Path(__file__).resolve().parents[2]
         if args.profile == "acceptance":
             (args.root / "cases").mkdir()
-            for split, cases in acceptance_cases(args.root, args.task).items():
+            for split, cases in acceptance_cases(
+                args.root, args.task, args.suite
+            ).items():
                 write_json(args.root / "cases" / f"{split}.json", cases)
             plan = acceptance_plan(
                 args.root,
@@ -983,6 +1019,7 @@ def main() -> None:
                 args.seed,
                 args.wandb,
                 args.wandb_entity,
+                args.suite,
             )
         else:
             plan = campaign_plan(args.root, repo, args.assets, args.source, args.gpu)

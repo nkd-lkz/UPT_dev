@@ -75,7 +75,7 @@ These small development sets detect integration failures. They are not the indep
 Expand to Matched Acceptance
 ----------------------------------------
 
-For a larger comparison, select ``--profile acceptance``. This fixes reset seeds before running and saves generated simulator snapshots for reuse across arms; it does not cycle the 50 published initial states and call them 100 independent cases. ``--task`` supports the preselected Goal tasks 0, 1 and 3. Each campaign covers one task and one training seed, so completion is not a multi-seed or full-suite claim.
+For a larger comparison, select ``--profile acceptance``. This fixes reset seeds before running and saves generated simulator snapshots for reuse across arms; it does not cycle the 50 published initial states and call them 100 independent cases. ``--suite`` selects ``libero_spatial``, ``libero_object``, ``libero_goal`` (default), or ``libero_10`` (Long); ``--task`` selects task 0–9 within that suite. Each campaign covers one task and one training seed, so completion is not a multi-seed or full-suite claim.
 
 The acceptance profile first checks the reference on 20 development initial states, requiring at least 12 successes. It then collects 64 reference rollouts, holds out the last 12 whole episodes for reconstruction and BC diagnostics, and trains the encoder for 1000 updates and the actor for 6000 BC updates. The warmed actor must succeed on at least as many development cases as the reference minus two before online training starts. These are engineering gates, not targets chosen from the final test set.
 
@@ -94,6 +94,45 @@ Start a single task with online logging as follows. Run another task in a separa
      --source "$RLT_PI05_SOURCE"
 
 Each acceptance queue retains the twelve-hour total limit, including waits; individual jobs have a four-hour limit within it. Failed gates stop their dependants, and deadline-expired work stays explicitly incomplete. Local ``metrics.jsonl`` files accompany W&B runs in project ``rlt-pi05-libero``; ``wandb_run.json`` stores each run link. Losses, success rates, control ticks and durations are logged alongside the pinned configuration. An online-authentication failure does not silently switch to disabled logging.
+
+Schedule All Four Suites
+------------------------
+
+To extend the accepted single-task pipeline, use ``toolkits.rlt.pi05_matrix`` from the separate ``research/rlt-pi05-four-suite`` branch in ``UPT_rlt_pi05_suite_dev``. Keep earlier queue worktrees unchanged while their jobs finish. The matrix freezes all 40 tasks, training seeds 42/43/44, and four evaluation arms before execution. It retains the budgets and engineering gates above; Spatial, Object, Goal and Long use the pinned upstream horizons of 220, 280, 320 and 520 control ticks, respectively.
+
+Every task/seed trains its own encoder and heads against the same frozen public VLA. Collection, development and online reset seeds differ between training seeds; the 100 held-out reset seeds per task are shared across seeds and arms. Three repetitions on those cases measure training-seed variation, not 300 independent physical initial states. The complete matrix contains 120 task/seed cells and 48,000 evaluation episodes. Final-budget checkpoints and a fixed recipe make it a matched adapted baseline, not a reproduction of the upstream few-demonstration paper setting.
+
+Create a new output directory on a large filesystem. Preparation seals runtime code hashes, case lists and job plans; it does not load a policy or start GPU work:
+
+.. code-block:: bash
+
+   export RLT_PI05_MATRIX=/path/to/large-disk/four-suite-run
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix prepare \
+     --root "$RLT_PI05_MATRIX" --assets "$RLT_PI05_ASSETS" \
+     --source "$RLT_PI05_SOURCE" --gpus 0 1 --wandb-entity your-team
+
+Launch one bounded worker per declared GPU, for example in two tmux sessions. Each worker waits for an existing research lease and then requires two idle GPU observations. Existing users' processes are neither stopped nor treated as available capacity. Work rotates through suites and tasks for seed 42 before seeds 43 and 44; a failed gate skips that cell's dependants, while unrelated cells continue:
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix run \
+     --root "$RLT_PI05_MATRIX" --gpu 0 --hours 12
+   # In the second terminal:
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix run \
+     --root "$RLT_PI05_MATRIX" --gpu 1 --hours 12
+
+The twelve-hour limit includes lease and GPU waits. It is an execution window, not a promise to finish 120 cells overnight. Each worker owns ``queue-gpu0`` or ``queue-gpu1`` and refuses to overwrite it; interrupted stages retain their artifacts and require explicit recovery before another run. The existing single-task launcher remains independent. Keep declared runtime code and plans unchanged until the workers exit.
+
+Inspect ``queue-gpu0/status.json`` and ``queue-gpu1/status.json`` for live scheduling. The following CPU-only command rechecks each cell's provenance and matched resets, including physical-state consistency across training seeds:
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix status \
+     --root "$RLT_PI05_MATRIX"
+
+The report lists completed, failed and pending cells separately. A suite mean requires all ten tasks and all three seeds; the four-suite mean requires all four complete suites. It reports per-seed means and sample standard deviation, giving tasks and suites equal weight. Failed gates are not removed to inflate the mean. Earlier exploratory Goal pilots remain outside this new matrix. Neither a high training success rate nor completion of the queue certifies a complete matrix.
+
+For a simulator-only check while GPUs are busy, ``preflight --root "$RLT_PI05_MATRIX"`` creates and restores one development reset for each of the 40 tasks using OSMesa. Configure the external dependency and OSMesa library paths first. Diagnostic snapshots live under ``reset-preflight``, independently of the GPU jobs; the check executes zero control ticks and no policy inference, and therefore produces no success-rate evidence.
 
 Inspect the Results
 -------------------
@@ -120,7 +159,7 @@ The command checks the declared case files and their digests, task and training 
 
 For completed v3 stages, ``stage_costs`` also contains ``episode_outcomes``: successes, full-horizon failures and the final episode cut short by the online budget. A budget truncation is inferred only when the final unsuccessful episode is shorter than the horizon and the recorded tick totals exactly reach the declared online budget. An unexplained early unsuccessful episode fails the audit. The original success flags and rates remain unchanged; do not convert the truncated tail to a success or report a rate with it removed as independent evaluation performance.
 
-On the development host, ``rlt_pi05_v3_gpu0_1009`` and ``rlt_pi05_v3_gpu1_1009`` manage the v3 queues under ``research/rlt_pi05_20261009``: ``acceptance-v3-task0-seed42`` on GPU 0 and ``acceptance-v3-task1-seed42`` on GPU 1. Read their live status rather than inferring progress from a tmux session. They wait for existing compute processes to exit, not merely for utilization to reach zero. Task 3 and additional training seeds remain follow-up work. Earlier v1/v2 acceptance and CPU/pilot outputs are preserved as compatibility-failure evidence, not accepted baseline scores. The old RLT_a/planner queues were paused between jobs to give this baseline priority; their completed artifacts were not removed. Failure manifests and skipped jobs remain available rather than being relabelled as completed training.
+On the development host, ``rlt_pi05_v3_gpu0_1009`` and ``rlt_pi05_v3_gpu1_1009`` manage the original v3 queues under ``research/rlt_pi05_20261009``: ``acceptance-v3-task0-seed42`` on GPU 0 and ``acceptance-v3-task1-seed42`` on GPU 1. Read their live status rather than inferring progress from a tmux session. They wait for existing compute processes to exit, not merely for utilization to reach zero. The four-suite matrix has separate queues and artifacts. Earlier v1/v2 acceptance and CPU/pilot outputs are preserved as compatibility-failure evidence, not accepted baseline scores. The old RLT_a/planner queues were paused between jobs to give this baseline priority; their completed artifacts were not removed. Failure manifests and skipped jobs remain available rather than being relabelled as completed training.
 
 When no GPU is available, ``cpu-reference`` can check the actual simulator loop with CPU inference and an installed OSMesa software renderer. Set ``LD_LIBRARY_PATH`` if OSMesa is unpacked outside the system paths. This mode never reserves a CUDA device; the required ``--gpu`` argument is ignored. It is slow and uses CPU BF16 autocast, so its results do not replace matched GPU evaluations:
 

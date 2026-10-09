@@ -119,3 +119,21 @@ def test_busy_gpu_never_starts_work_and_marks_remaining_jobs(tmp_path, monkeypat
         row["state"] == "not_started_deadline" for row in result["jobs"].values()
     )
     assert not list((tmp_path / "queue").glob("*.log"))
+
+
+def test_waiting_for_owned_lease_obeys_deadline_without_starting_job(tmp_path):
+    plan = {
+        "gpu": 0,
+        "hours": 0.00001,
+        "wait_for_lease": True,
+        "jobs": [job(tmp_path, "never", "raise AssertionError('must not run')")],
+    }
+    with (tmp_path / "rlt-research-gpu0.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run_plan(plan, tmp_path / "waiting")
+        assert result["state"] == "deadline"
+        assert result["jobs"]["never"]["state"] == "not_started_deadline"
+        with (tmp_path / "rlt-research-gpu0.lock").open("a") as second:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert not list((tmp_path / "waiting").glob("*.log"))

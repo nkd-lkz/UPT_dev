@@ -75,7 +75,7 @@
 扩大配对验收规模
 -----------------
 
-需要更大规模对比时，选择 ``--profile acceptance``。该配置在运行前固定初态 seed，生成并保存仿真快照供各组复用，不会循环使用 50 个公开初态并将其称为 100 个独立样本。``--task`` 支持预先选定的 Goal Task 0、1、3。每个队列只覆盖一个任务、一个训练 seed，完成后不能称为多 seed 或全任务集验收。
+需要更大规模对比时，选择 ``--profile acceptance``。该配置在运行前固定初态 seed，生成并保存仿真快照供各组复用，不会循环使用 50 个公开初态并将其称为 100 个独立样本。``--suite`` 可选择 ``libero_spatial``、``libero_object``、``libero_goal`` （默认）或 ``libero_10`` （Long）；``--task`` 选择该套件内的 Task 0–9。每个队列只覆盖一个任务、一个训练 seed，完成后不能称为多 seed 或全任务集验收。
 
 扩大验收先在 20 个开发初态上检查 reference，要求至少成功 12 次；通过后采集 64 回合 reference rollout，将最后 12 个完整回合留作重建和 BC 诊断，执行 1000 次 encoder 更新和 6000 次 actor BC 更新。热身 actor 在开发初态上的成功次数最多比 reference 少两次，才进入在线训练。这些阈值用于工程验收，不根据最终测试结果选择。
 
@@ -94,6 +94,45 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
      --source "$RLT_PI05_SOURCE"
 
 每条扩大验收队列仍限时十二小时，包含等待资源的时间；单任务在总预算内最多运行四小时。验收失败会停止依赖阶段，超过截止时间的工作明确保留为未完成。W&B 项目为 ``rlt-pi05-libero``，本地同时写入 ``metrics.jsonl``，每个 run 的链接保存在 ``wandb_run.json``。固定配置与损失、成功率、控制步数、耗时一起记录。在线认证失败不会静默退回关闭记录的模式。
+
+安排四套完整对照
+-----------------
+
+单任务链路验收后，通过独立目录 ``UPT_rlt_pi05_suite_dev``、分支 ``research/rlt-pi05-four-suite`` 中的 ``toolkits.rlt.pi05_matrix`` 扩展任务集。旧队列结束前，保持其代码目录不变。实验矩阵在执行前固定全部 40 个任务、训练 seed 42/43/44 以及四组评估，沿用上述预算与工程验收条件；Spatial、Object、Goal、Long 的回合上限分别为 220、280、320、520 个控制 tick，与固定版本的上游源码一致。
+
+每个任务、每个 seed 独立训练 encoder 和小头，共用同一个冻结的公开 VLA。采集、开发集及在线训练初态随训练 seed 改变；每个任务的 100 个留出初态在各组、各训练 seed 之间共用。三次训练重复用于观察训练 seed 的差异，不等于 300 个独立物理初态。完整矩阵包含 120 个任务／seed 单元和 48,000 个评估回合。固定配方与预算终点 checkpoint 构成配对的适配 baseline，不能等同于上游少示范论文设置的复现。
+
+在大容量文件系统上指定新目录。准备命令固定运行代码哈希、初态清单和任务计划，不加载 policy，也不启动 GPU 作业：
+
+.. code-block:: bash
+
+   export RLT_PI05_MATRIX=/path/to/large-disk/four-suite-run
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix prepare \
+     --root "$RLT_PI05_MATRIX" --assets "$RLT_PI05_ASSETS" \
+     --source "$RLT_PI05_SOURCE" --gpus 0 1 --wandb-entity your-team
+
+为每张已声明的 GPU 启动一个限时 worker，可分别放入两个 tmux 会话。worker 先等旧研究队列释放锁，再连续两次确认 GPU 空闲；不会停止其他用户进程，也不会将他们占用的卡当作可叠加使用的容量。任务先按 suite 和任务编号轮转 seed 42，再执行 seed 43、44；单元的前置检查失败只跳过其依赖阶段，其他单元继续：
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix run \
+     --root "$RLT_PI05_MATRIX" --gpu 0 --hours 12
+   # In the second terminal:
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix run \
+     --root "$RLT_PI05_MATRIX" --gpu 1 --hours 12
+
+十二小时包含等待队列锁和 GPU 的时间，是执行窗口，不代表承诺一晚完成 120 个单元。每个 worker 独占 ``queue-gpu0`` 或 ``queue-gpu1`` 输出目录，拒绝覆盖已有目录；中断阶段保留产物，重新运行前需要明确恢复方案。原单任务启动器保持独立。worker 退出前不要改动已声明的运行代码和计划。
+
+实时调度状态分别记录在 ``queue-gpu0/status.json``、``queue-gpu1/status.json``。以下 CPU 命令重新检查各单元的来源记录与配对初态，包括不同训练 seed 间物理初态的一致性：
+
+.. code-block:: bash
+
+   ../.venv-libero-acceptance/bin/python -m toolkits.rlt.pi05_matrix status \
+     --root "$RLT_PI05_MATRIX"
+
+报告分别列出完成、失败和未完成单元。单套均值必须等十个任务、三个 seed 全部齐全；四套总均值必须等四套都完成。按任务、套件等权汇总，并报告各训练 seed 的均值与样本标准差，不会删除前置检查失败的任务以抬高均值。此前用于开发的 Goal 试跑不并入新矩阵。训练成功率高或队列退出，都不能说明矩阵已完整验收。
+
+GPU 忙碌时，可运行 ``preflight --root "$RLT_PI05_MATRIX"``，用 OSMesa 为 40 个任务各生成并恢复一个开发初态；先配置外部依赖及 OSMesa 动态库路径。诊断快照独立保存在 ``reset-preflight``，不会与 GPU 作业争用文件；检查不执行控制 tick，也不运行 policy，因此不产生成功率证据。
 
 检查输出与状态
 ---------------
@@ -120,7 +159,7 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
 
 对于已完成的 v3 阶段，``stage_costs`` 还包含 ``episode_outcomes``，分别统计成功、完整时限内失败，以及因在线总预算耗尽而提前结束的最后一回合。只有最后一个未成功回合短于完整时限，且实际 tick 总数与声明的在线预算完全相符，才推断为预算截断；无法解释的提前结束会导致审计失败。原始成功标志和成功率保持不变，不能把截断回合改为成功，也不能剔除该回合后将比例当作独立评测成绩。
 
-开发服务器通过 ``rlt_pi05_v3_gpu0_1009`` 和 ``rlt_pi05_v3_gpu1_1009`` 管理 NAS 的 ``research/rlt_pi05_20261009`` 下两条 v3 队列：GPU 0 对应 ``acceptance-v3-task0-seed42``，GPU 1 对应 ``acceptance-v3-task1-seed42``。应读取实时状态，不能根据 tmux 会话是否存在判断进度。必须等原有计算进程退出，不能只看利用率是否为零。Task 3 和额外训练 seed 留作后续工作。此前 v1/v2 acceptance 和 CPU/pilot 输出保留为兼容性错误的诊断证据，不作为验收通过的 baseline 成绩。旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
+开发服务器通过 ``rlt_pi05_v3_gpu0_1009`` 和 ``rlt_pi05_v3_gpu1_1009`` 管理 NAS 的 ``research/rlt_pi05_20261009`` 下原有两条 v3 队列：GPU 0 对应 ``acceptance-v3-task0-seed42``，GPU 1 对应 ``acceptance-v3-task1-seed42``。应读取实时状态，不能根据 tmux 会话是否存在判断进度。必须等原有计算进程退出，不能只看利用率是否为零。四套实验矩阵使用另外的队列和输出目录。此前 v1/v2 acceptance 和 CPU/pilot 输出保留为兼容性错误的诊断证据，不作为验收通过的 baseline 成绩。旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
 
 没有空闲 GPU 时，可以用 ``cpu-reference`` 通过 CPU 推理和 OSMesa 软件渲染检查真实仿真闭环。若 OSMesa 解压在系统路径之外，需要设置 ``LD_LIBRARY_PATH``。该模式不会占用 CUDA 设备，必填的 ``--gpu`` 参数在此被忽略。CPU BF16 autocast 推理较慢，其结果不能替代配对 GPU 评估：
 

@@ -13,7 +13,7 @@ import torch
 
 from toolkits.rlt.libero_acceptance import Metrics, split_cache
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, model_state
-from toolkits.rlt.pi05_baseline import PROTOCOL, write_json
+from toolkits.rlt.pi05_baseline import suite_protocol, write_json
 
 
 def make_encoder(device: str = "cuda") -> torch.nn.Module:
@@ -39,18 +39,18 @@ def make_learner(device: str = "cuda", objective: str = "q_bc") -> AcceptanceLea
     )
 
 
-def validate_checkpoint(payload: dict) -> None:
+def validate_checkpoint(payload: dict, suite: str = "libero_goal") -> None:
     """Reject RLT_a and any release with a different observation/action contract."""
-    if payload.get("protocol") != PROTOCOL:
+    if payload.get("protocol") != suite_protocol(suite):
         raise ValueError("Checkpoint is not the pinned RLT/Pi0.5 protocol")
 
 
 def load_heads(
-    path: Path, objective: str = "q_bc"
+    path: Path, objective: str = "q_bc", suite: str = "libero_goal"
 ) -> tuple[torch.nn.Module, AcceptanceLearner]:
     """Restore frozen encoder and trainable heads from a complete warmup artifact."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    validate_checkpoint(payload)
+    validate_checkpoint(payload, suite)
     encoder = make_encoder().eval().requires_grad_(False)
     encoder.load_state_dict(payload["encoder"], strict=True)
     learner = make_learner(objective=objective)
@@ -76,13 +76,16 @@ def encode_row(
 
 
 def save_heads(
-    path: Path, encoder: torch.nn.Module, learner: AcceptanceLearner
+    path: Path,
+    encoder: torch.nn.Module,
+    learner: AcceptanceLearner,
+    suite: str = "libero_goal",
 ) -> None:
     """Persist the exact protocol and all learner optimizer/target state."""
     temp = path.with_suffix(".tmp")
     torch.save(
         {
-            "protocol": PROTOCOL,
+            "protocol": suite_protocol(suite),
             "encoder": model_state(encoder),
             "learner": learner.state_dict(),
         },
@@ -94,7 +97,7 @@ def save_heads(
 def warmup(args: Namespace, metrics: Metrics) -> dict:
     """Fit reconstruction and BC on development episodes, keeping one fifth out."""
     cache = torch.load(args.cache, map_location="cpu", weights_only=True)
-    validate_checkpoint(cache)
+    validate_checkpoint(cache, args.suite)
     train, heldout = split_cache(cache["rows"])
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -170,7 +173,7 @@ def warmup(args: Namespace, metrics: Metrics) -> dict:
             **{f"warmup/heldout_{k}": v for k, v in final.items()},
         }
     )
-    save_heads(args.output / "warmup.pt", encoder, learner)
+    save_heads(args.output / "warmup.pt", encoder, learner, args.suite)
     passed = (
         after < before
         and final["mse"] < initial["mse"]

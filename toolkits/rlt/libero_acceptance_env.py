@@ -46,7 +46,7 @@ def worker() -> None:
         from libero.libero.envs import OffScreenRenderEnv
 
         set_die_with_parent()
-        suite = benchmark.get_benchmark_dict()["libero_goal"]()
+        suites = {}
         env = None
         try:
             while True:
@@ -61,6 +61,19 @@ def worker() -> None:
                         if env is not None:
                             env.close()
                         case = message["case"]
+                        suite_name = case.get("suite", "libero_goal")
+                        if suite_name not in (
+                            "libero_spatial",
+                            "libero_object",
+                            "libero_goal",
+                            "libero_10",
+                        ):
+                            raise ValueError("Unsupported LIBERO suite")
+                        if suite_name not in suites:
+                            suites[suite_name] = benchmark.get_benchmark_dict()[
+                                suite_name
+                            ]()
+                        suite = suites[suite_name]
                         task = suite.get_task(case["task"])
                         env = OffScreenRenderEnv(
                             bddl_file_name=suite.get_task_bddl_file_path(case["task"]),
@@ -80,6 +93,7 @@ def worker() -> None:
                                 if (
                                     saved["task"] != case["task"]
                                     or saved["seed"] != case["seed"]
+                                    or saved.get("suite", "libero_goal") != suite_name
                                 ):
                                     raise ValueError("Snapshot identity mismatch")
                                 env.reset_from_xml_string(saved["xml"])
@@ -97,6 +111,7 @@ def worker() -> None:
                                         "Generated reset duplicates a published state"
                                     )
                                 saved = {
+                                    "suite": suite_name,
                                     "task": case["task"],
                                     "seed": case["seed"],
                                     "state": state.tolist(),

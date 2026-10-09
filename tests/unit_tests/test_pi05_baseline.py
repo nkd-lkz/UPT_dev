@@ -23,6 +23,7 @@ from toolkits.rlt.pi05_baseline import (
     env_commands,
     evaluation_cases,
     runtime_config,
+    suite_protocol,
 )
 from toolkits.rlt.pi05_campaign import (
     acceptance_cases,
@@ -774,3 +775,70 @@ def test_required_wandb_failure_is_not_silently_disabled(tmp_path, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="Required W&B"):
         Metrics(args)
+
+
+@pytest.mark.parametrize(
+    "suite,horizon",
+    [
+        ("libero_spatial", 220),
+        ("libero_object", 280),
+        ("libero_goal", 320),
+        ("libero_10", 520),
+    ],
+)
+def test_suite_contract_controls_checkpoint_cases_and_horizon(tmp_path, suite, horizon):
+    protocol = suite_protocol(suite)
+    assert protocol["max_control_steps"] == horizon
+    assert PROTOCOL["suite"] == "libero_goal" and PROTOCOL["max_control_steps"] == 320
+    validate_checkpoint({"protocol": protocol}, suite)
+    if suite != "libero_goal":
+        with pytest.raises(ValueError, match="protocol"):
+            validate_checkpoint({"protocol": protocol})
+    sets = acceptance_cases(tmp_path, 9, suite, 42)
+    other = acceptance_cases(tmp_path / "other", 9, suite, 43)
+    for split, cases in sets.items():
+        assert all(c["suite"] == suite for c in cases)
+        seeds = {c["seed"] for c in cases}
+        other_seeds = {c["seed"] for c in other[split]}
+        assert (seeds == other_seeds) if split == "heldout" else not seeds & other_seeds
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps(sets["heldout"]))
+    assert (
+        evaluation_cases(SimpleNamespace(cases=path, task=9, suite=suite))
+        == sets["heldout"]
+    )
+    with pytest.raises(ValueError, match="suite"):
+        evaluation_cases(SimpleNamespace(cases=path, task=9, suite="wrong"))
+    report = {
+        "protocol": protocol,
+        "complete": True,
+        "exit_code": 0,
+        "episodes": [{"id": "case", "success": False, "ticks": horizon}],
+    }
+    assert episode_outcomes(report)["horizon_failures"] == 1
+
+
+def test_four_suite_audit_uses_declared_suite_in_every_stage(completed_acceptance):
+    root = completed_acceptance
+    plan = json.loads((root / "queue/plan.json").read_text())
+    plan["suite"] = "libero_10"
+    (root / "queue/plan.json").write_text(json.dumps(plan))
+    result = audit_acceptance(root)
+    assert result["state"] == "failed"
+    assert any("suite mismatch" in e for e in result["violations"])
+
+
+def test_suite_seed_cases_are_globally_disjoint_except_paired_heldouts(tmp_path):
+    from toolkits.rlt.pi05_baseline import SUITE_HORIZONS
+
+    seen = set()
+    for suite in SUITE_HORIZONS:
+        for task in range(10):
+            for seed in (42, 43, 44):
+                sets = acceptance_cases(tmp_path, task, suite, seed)
+                for split, cases in sets.items():
+                    if split == "heldout" and seed != 42:
+                        continue
+                    current = {c["seed"] for c in cases}
+                    assert not seen & current
+                    seen.update(current)

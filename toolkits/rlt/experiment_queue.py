@@ -117,13 +117,31 @@ def run_plan(plan: dict, output: Path) -> dict:
     previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     lock = (LEASE_DIRECTORY / f"rlt-research-gpu{plan['gpu']}.lock").open("a")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as error:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                state["state"] = "running"
+                break
+            except BlockingIOError:
+                if not plan.get("wait_for_lease", False):
+                    raise RuntimeError(
+                        f"An experiment queue already owns the GPU {plan['gpu']} lease"
+                    ) from None
+                state["state"] = "waiting_lease"
+                save()
+                if time.monotonic() >= deadline:
+                    state["state"] = "deadline"
+                    for row in state["jobs"].values():
+                        row["state"] = "not_started_deadline"
+                    save()
+                    lock.close()
+                    signal.signal(signal.SIGTERM, previous_sigterm)
+                    return state
+                time.sleep(min(30, max(0, deadline - time.monotonic())))
+    except BaseException:
         lock.close()
         signal.signal(signal.SIGTERM, previous_sigterm)
-        raise RuntimeError(
-            f"An experiment queue already owns the GPU {plan['gpu']} lease"
-        ) from error
+        raise
     process = None
     try:
         save()
