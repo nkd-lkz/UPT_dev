@@ -1,6 +1,6 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""Small-head RLT_a acceptance learner with explicit TD and update accounting."""
+"""Shared AlphaBrain small-head learner with explicit TD and update accounting."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ def td_target(
     return rewards + gamma**ticks * (~terminal).float() * next_q
 
 
-def td_eligible(row: dict) -> bool:
+def td_eligible(row: dict, chunk_len: int = 8) -> bool:
     """Exclude time-budget cuts that did not execute the whole critic command."""
-    return row["ticks"] == 8 or row["terminal"]
+    return row["ticks"] == chunk_len or row["terminal"]
 
 
 def model_state(model: nn.Module) -> dict:
@@ -35,13 +35,15 @@ def model_state(model: nn.Module) -> dict:
 
 
 class AcceptanceLearner:
-    """Train official RLT_a heads; change only the actor Q term between arms.
+    """Train AlphaBrain's shared heads; change only the actor Q term between arms.
 
     Both arms train a diagnostic critic with the same update schedule. In the
     BC-only arm no critic output contributes to actor gradients. A single
     process owns inference and learning, so each chunk records the exact actor
     update count used to generate it. This adapter discounts by actual executed
     ticks and is an explicit training variant, not the unmodified public trainer.
+    Defaults retain the Qwen/RLT_a protocol; Pi0.5 callers declare token width,
+    chunk length and gripper threshold explicitly.
     """
 
     def __init__(
@@ -50,6 +52,10 @@ class AcceptanceLearner:
         objective: str = "q_bc",
         beta: float = 1.0,
         ref_dropout: float = 0.5,
+        *,
+        bottleneck_dim: int = 256,
+        chunk_len: int = 8,
+        gripper_threshold: float = 0.5,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -59,19 +65,23 @@ class AcceptanceLearner:
         if objective not in ("bc_only", "q_bc") or beta <= 0:
             raise ValueError("Require bc_only/q_bc and positive BC weight")
         self.device, self.objective, self.beta = device, objective, beta
+        if bottleneck_dim < 1 or chunk_len < 1:
+            raise ValueError("Require positive token width and chunk length")
+        self.chunk_len = chunk_len
+        self.gripper_threshold = gripper_threshold
         self.actor = ActionTokenActor(
-            bottleneck_dim=256,
+            bottleneck_dim=bottleneck_dim,
             action_dim=7,
-            chunk_len=8,
+            chunk_len=chunk_len,
             hidden_dim=512,
             ref_dropout=ref_dropout,
             fixed_std=0.1,
             prop_dim=8,
         ).to(device)
         self.critic = ActionTokenQCritic(
-            bottleneck_dim=256,
+            bottleneck_dim=bottleneck_dim,
             action_dim=7,
-            chunk_len=8,
+            chunk_len=chunk_len,
             hidden_dim=512,
             prop_dim=8,
         ).to(device)
@@ -97,7 +107,9 @@ class AcceptanceLearner:
 
     def update(self, replay: list[dict], *, warmup: bool = False) -> dict:
         """Update from pre-action reference labels; terminal tails remain in TD."""
-        eligible = replay if warmup else [r for r in replay if td_eligible(r)]
+        eligible = (
+            replay if warmup else [r for r in replay if td_eligible(r, self.chunk_len)]
+        )
         if not eligible:
             raise ValueError("No complete or terminal transitions for updating")
         rows = random.choices(eligible, k=128)
@@ -203,7 +215,10 @@ class AcceptanceLearner:
             )
             errors.append((mean - batch["ref"]).square().cpu())
             gripper_errors.append(
-                ((mean[..., 6] >= 0.5) != (batch["ref"][..., 6] >= 0.5)).cpu()
+                (
+                    (mean[..., 6] >= self.gripper_threshold)
+                    != (batch["ref"][..., 6] >= self.gripper_threshold)
+                ).cpu()
             )
             saturated.append((mean.abs() > 1).cpu())
         error = torch.cat(errors)

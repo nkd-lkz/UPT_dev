@@ -17,6 +17,8 @@
      - Checkpoint 频率与断点续训。
    * - :doc:`LIBERO RLT 公开模型验证 <../libero_rlt_reproduction>`
      - 区分配对模型复评、训练验证与原论文复现。
+   * - :doc:`Pi0.5 RLT 验收 <../rlt_pi05_baseline>`
+     - 验收新 RLT 路线，再迁移 RoboDojo。
 
 .. toctree::
    :hidden:
@@ -25,3 +27,4 @@
    Checkpoint 转换 <../convertor>
    恢复训练 <../resume>
    LIBERO RLT 公开模型验证 <../libero_rlt_reproduction>
+   Pi0.5 RLT 验收 <../rlt_pi05_baseline>

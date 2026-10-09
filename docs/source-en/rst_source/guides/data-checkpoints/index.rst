@@ -18,6 +18,8 @@ resume a stopped run.
      - Checkpoint cadence and resuming a run.
    * - :doc:`Published LIBERO RLT Evaluation <../libero_rlt_reproduction>`
      - Separate paired release evaluation, training checks and paper reproduction.
+   * - :doc:`Pi0.5 RLT Acceptance <../rlt_pi05_baseline>`
+     - Verify the new RLT route before migrating to RoboDojo.
 
 .. toctree::
    :hidden:
@@ -26,3 +28,4 @@ resume a stopped run.
    Checkpoint Conversion <../convertor>
    Resume Training <../resume>
    Published LIBERO RLT Evaluation <../libero_rlt_reproduction>
+   Pi0.5 RLT Acceptance <../rlt_pi05_baseline>
