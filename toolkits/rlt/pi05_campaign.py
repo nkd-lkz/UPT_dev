@@ -19,6 +19,56 @@ from toolkits.rlt.pi05_baseline import PROTOCOL, write_json
 FINAL_ARMS = ("reference_final", "warmup_final", "q_bc_eval", "bc_only_eval")
 
 
+def episode_outcomes(report: dict) -> dict:
+    """Classify completed v3 episodes without changing recorded success rates.
+
+    The v3 loop stops an unsuccessful episode only at the horizon or the online
+    budget. Infer a budget truncation only for the final short episode when the
+    stage completed successfully and its recorded tick totals agree. Do not
+    treat an unexplained early stop as either a failure or a truncation.
+    """
+    if report.get("protocol") != PROTOCOL or report.get("complete") is not True:
+        raise ValueError("Episode outcomes require a completed current-protocol stage")
+    episodes = report.get("episodes", [])
+    horizon = PROTOCOL["max_control_steps"]
+    if not episodes or any(
+        type(e.get("success")) is not bool
+        or type(e.get("ticks")) is not int
+        or not 0 < e["ticks"] <= horizon
+        for e in episodes
+    ):
+        raise ValueError("Episode outcomes require valid success flags and tick counts")
+    args = report.get("args", {})
+    budget = args.get("interaction_ticks")
+    budget_finished = (
+        args.get("mode") == "online"
+        and type(budget) is int
+        and budget > 0
+        and report.get("exit_code") == 0
+        and sum(e["ticks"] for e in episodes)
+        == report.get("interaction_ticks")
+        == budget
+    )
+    outcomes = {
+        "successes": 0,
+        "horizon_failures": 0,
+        "budget_truncated": 0,
+        "unresolved_non_successes": 0,
+        "budget_truncated_case_ids": [],
+    }
+    for index, episode in enumerate(episodes):
+        if episode["success"]:
+            outcomes["successes"] += 1
+        elif episode["ticks"] == horizon:
+            outcomes["horizon_failures"] += 1
+        elif budget_finished and index == len(episodes) - 1:
+            outcomes["budget_truncated"] += 1
+            outcomes["budget_truncated_case_ids"].append(episode.get("id"))
+        else:
+            outcomes["unresolved_non_successes"] += 1
+    return outcomes
+
+
 def audit_acceptance(root: Path) -> dict:
     """Check recorded acceptance provenance and costs without loading GPU models.
 
@@ -248,6 +298,15 @@ def audit_acceptance(root: Path) -> dict:
             for e in episodes
         )
         check(valid_ticks, f"{name}: invalid episode tick count")
+        if valid_ticks and episodes and report.get("protocol") == PROTOCOL:
+            try:
+                cost["episode_outcomes"] = episode_outcomes(report)
+                check(
+                    cost["episode_outcomes"]["unresolved_non_successes"] == 0,
+                    f"{name}: unexplained early unsuccessful episode",
+                )
+            except ValueError as error:
+                errors.append(f"{name}: {error}")
         ticks = sum(e["ticks"] for e in episodes) if valid_ticks else None
         check(
             report.get("interaction_ticks") == ticks,

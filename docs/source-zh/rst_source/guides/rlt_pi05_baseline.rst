@@ -118,6 +118,8 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
 
 ``stage_costs`` 包含在线训练的实时进度和已记录耗时；``completed_training_cost_by_arm`` 在相关阶段结束后，汇总 reference 采集、encoder/BC 热身以及该组在线训练的成本。每组从头执行的成本都包含一次共用准备阶段，因此不能将各组相加作为整个实验的总成本。耗时包含模型加载和 checkpoint 写入，但不包含模块导入、W&B 收尾、排队等待、评估、上游 VLA 预训练及人工调试；它不是 GPU 实际计算时间或人工工时。已有 manifest 通过路径和更新计数标识小头 checkpoint，没有记录权重文件的字节哈希，因此审计验证的是记录一致性，而非权重的密码学溯源。审计通过只说明单任务工程对比具备验收条件，不代表 RL 已有提升或完成全任务集复现。
 
+对于已完成的 v3 阶段，``stage_costs`` 还包含 ``episode_outcomes``，分别统计成功、完整时限内失败，以及因在线总预算耗尽而提前结束的最后一回合。只有最后一个未成功回合短于完整时限，且实际 tick 总数与声明的在线预算完全相符，才推断为预算截断；无法解释的提前结束会导致审计失败。原始成功标志和成功率保持不变，不能把截断回合改为成功，也不能剔除该回合后将比例当作独立评测成绩。
+
 开发服务器通过 ``rlt_pi05_v3_gpu0_1009`` 和 ``rlt_pi05_v3_gpu1_1009`` 管理 NAS 的 ``research/rlt_pi05_20261009`` 下两条 v3 队列：GPU 0 对应 ``acceptance-v3-task0-seed42``，GPU 1 对应 ``acceptance-v3-task1-seed42``。应读取实时状态，不能根据 tmux 会话是否存在判断进度。必须等原有计算进程退出，不能只看利用率是否为零。Task 3 和额外训练 seed 留作后续工作。此前 v1/v2 acceptance 和 CPU/pilot 输出保留为兼容性错误的诊断证据，不作为验收通过的 baseline 成绩。旧 RLT_a/planner 队列在两个任务之间暂停，为新 baseline 让出优先级，已完成的结果没有删除。失败 manifest 与被跳过的阶段都会保留，不能将它们标为已完成训练。
 
 没有空闲 GPU 时，可以用 ``cpu-reference`` 通过 CPU 推理和 OSMesa 软件渲染检查真实仿真闭环。若 OSMesa 解压在系统路径之外，需要设置 ``LD_LIBRARY_PATH``。该模式不会占用 CUDA 设备，必填的 ``--gpu`` 参数在此被忽略。CPU BF16 autocast 推理较慢，其结果不能替代配对 GPU 评估：

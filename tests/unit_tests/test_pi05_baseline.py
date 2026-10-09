@@ -29,6 +29,7 @@ from toolkits.rlt.pi05_campaign import (
     acceptance_plan,
     audit_acceptance,
     campaign_plan,
+    episode_outcomes,
     paired_comparison,
     paired_gate,
     summarize_campaign,
@@ -472,8 +473,10 @@ def completed_acceptance(tmp_path):
                 {
                     **c,
                     "state_sha256": f"reset-{c['seed']}",
-                    "success": i < 60,
-                    "ticks": ticks,
+                    "success": i < (99 if split == "online" else 60),
+                    "ticks": ticks
+                    if split == "online" or i < 60
+                    else PROTOCOL["max_control_steps"],
                 }
                 for i, c in enumerate(cases)
             ]
@@ -482,7 +485,7 @@ def completed_acceptance(tmp_path):
                 episodes=episodes,
                 successes=successes,
                 success_rate=successes / len(episodes),
-                interaction_ticks=ticks * len(episodes),
+                interaction_ticks=sum(e["ticks"] for e in episodes),
                 settling_ticks=10 * len(episodes),
                 case_manifest_sha256=file_hash(tmp_path / "cases" / f"{split}.json"),
             )
@@ -502,14 +505,70 @@ def test_acceptance_audit_checks_complete_artifacts_and_shared_cost(
     cost = result["completed_training_cost_by_arm"]["q_bc_eval"]
     assert cost == {
         "stage_wall_seconds": 150,
-        "interaction_ticks": 25760,
+        "interaction_ticks": 26680,
         "settling_ticks": 1640,
     }
     assert (
         result["completed_training_cost_by_arm"]["warmup_final"]["interaction_ticks"]
-        == 5760
+        == 6680
     )
     assert summarize_campaign(completed_acceptance)["engineering_pipeline_complete"]
+    outcomes = result["stage_costs"]["q_bc"]["episode_outcomes"]
+    assert outcomes["successes"] == 99
+    assert outcomes["budget_truncated"] == 1
+    assert outcomes["horizon_failures"] == outcomes["unresolved_non_successes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "budget", "total", "last_ticks", "success", "expected"),
+    [
+        ("online", 520, 520, 200, False, "budget_truncated"),
+        ("online", 520, 520, 200, True, "successes"),
+        ("online", 640, 640, 320, False, "horizon_failures"),
+        ("online", 600, 520, 200, False, "unresolved_non_successes"),
+        ("online", 520, 519, 200, False, "unresolved_non_successes"),
+        ("actor-eval", 520, 520, 200, False, "unresolved_non_successes"),
+    ],
+)
+def test_episode_outcomes_separates_budget_truncation_from_failures(
+    mode, budget, total, last_ticks, success, expected
+):
+    report = {
+        "protocol": PROTOCOL,
+        "complete": True,
+        "exit_code": 0,
+        "args": {"mode": mode, "interaction_ticks": budget},
+        "interaction_ticks": total,
+        "episodes": [
+            {"id": "first", "success": False, "ticks": 320},
+            {"id": "last", "success": success, "ticks": last_ticks},
+        ],
+        "success_rate": int(success) / 2,
+    }
+    before = copy.deepcopy(report)
+    counts = episode_outcomes(report)
+    assert counts[expected] == (2 if expected == "horizon_failures" else 1)
+    assert counts["budget_truncated_case_ids"] == (
+        ["last"] if expected == "budget_truncated" else []
+    )
+    assert report == before
+    report["complete"] = False
+    with pytest.raises(ValueError, match="completed"):
+        episode_outcomes(report)
+
+
+def test_acceptance_audit_rejects_nonfinal_early_unsuccessful_episode(
+    completed_acceptance,
+):
+    path = completed_acceptance / "q_bc/manifest.json"
+    report = json.loads(path.read_text())
+    report["episodes"][0]["success"] = False
+    report["successes"] -= 1
+    report["success_rate"] = report["successes"] / len(report["episodes"])
+    path.write_text(json.dumps(report))
+    result = audit_acceptance(completed_acceptance)
+    assert result["state"] == "failed"
+    assert any("unexplained early unsuccessful" in e for e in result["violations"])
 
 
 def test_acceptance_audit_preserves_missing_and_live_work(completed_acceptance):
