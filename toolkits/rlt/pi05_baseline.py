@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import os
 import random
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
+from functools import partial
 from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,7 +29,7 @@ if TYPE_CHECKING:
     from toolkits.rlt.libero_acceptance import Metrics
 
 PROTOCOL = {
-    "id": "alphabrain-rlt-pi05-libero-v1",
+    "id": "alphabrain-rlt-pi05-libero-v2",
     "track": "rlt",
     "backbone": "pi05",
     "suite": "libero_goal",
@@ -61,6 +63,7 @@ PROTOCOL = {
     "target_tau": 0.005,
     "exploration_std": 0.1,
     "reference_randomness": "per-case and per-control-tick; isolated from learner RNG",
+    "prefix_cache": "validate full prefix length; adapt legacy Gemma cache keyword",
 }
 
 
@@ -116,6 +119,39 @@ def configure_source(source: Path) -> None:
     )
 
 
+def _legacy_gemma_attention(original, *args, past_key_values=None, **kwargs):
+    legacy = kwargs.get("past_key_value")
+    if past_key_values is not None:
+        if legacy is not None and legacy is not past_key_values:
+            raise ValueError("Conflicting Gemma attention caches")
+        kwargs["past_key_value"] = past_key_values
+    return original(*args, **kwargs)
+
+
+def adapt_gemma_cache_keyword(model: nn.Module) -> int:
+    """Adapt the pinned decoder's plural cache key on legacy attention instances.
+
+    Transformers 4.53.2 accepts only ``past_key_value``; the upstream adaRMS
+    decoder supplies ``past_key_values``, silently bypassing the prefix cache.
+    Modern attention implementations already accept the plural key. Return the
+    number of adapted instances; repeated calls leave existing adapters intact.
+    """
+    from transformers.models.gemma.modeling_gemma import GemmaAttention
+
+    count = 0
+    for module in model.modules():
+        if not isinstance(module, GemmaAttention):
+            continue
+        parameters = inspect.signature(module.forward).parameters
+        if "past_key_values" in parameters:
+            continue
+        if "past_key_value" not in parameters:
+            raise ValueError("Unsupported Gemma attention cache interface")
+        module.forward = partial(_legacy_gemma_attention, module.forward)
+        count += 1
+    return count
+
+
 def load_model(assets: Path, device: str) -> tuple[nn.Module, dict]:
     """Load all weights strictly, retaining the exact released normalization."""
     import torch
@@ -144,6 +180,8 @@ def load_model(assets: Path, device: str) -> tuple[nn.Module, dict]:
         torch.set_default_dtype(previous)
     model.load_state_dict(load_file(str(assets / "model.safetensors")), strict=True)
     model = model.to(device=device, dtype=torch.bfloat16).eval().requires_grad_(False)
+    adapted = adapt_gemma_cache_keyword(model)
+    print(f"Gemma cache keyword adapters: {adapted}", flush=True)
     if model.chunk_len != 10 or model.gripper_remap:
         raise ValueError("Unexpected runtime action contract")
     return model, cfg
@@ -167,14 +205,21 @@ class Pi05Reference:
         import torch
 
         captured = []
+        prefix_lengths = []
 
         def record(module, inputs, result):
-            captured.append(result.last_hidden_state[:, :512].detach().float().cpu())
+            cache = result.past_key_values
+            tokens = result.last_hidden_state.shape[1]
+            if cache is None or cache.get_seq_length() != tokens:
+                raise RuntimeError("Pi0.5 prefix KV cache is missing or incomplete")
+            prefix_lengths.append(tokens)
+            if capture:
+                captured.append(
+                    result.last_hidden_state[:, :512].detach().float().cpu()
+                )
 
-        handle = (
-            self.model.vlm_interface.model.language_model.register_forward_hook(record)
-            if capture
-            else None
+        handle = self.model.vlm_interface.model.language_model.register_forward_hook(
+            record
         )
         try:
             devices = (
@@ -199,8 +244,9 @@ class Pi05Reference:
                     states=[observation["state"]],
                 )
         finally:
-            if handle is not None:
-                handle.remove()
+            handle.remove()
+        if len(prefix_lengths) != 1:
+            raise RuntimeError("Expected exactly one cached Pi0.5 prefix forward")
         native = np.asarray(result["normalized_actions"], dtype=np.float32)
         if native.shape != (1, 10, 7):
             raise ValueError("Unexpected Pi0.5 output shape")

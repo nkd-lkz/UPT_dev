@@ -5,6 +5,8 @@
 import copy
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,12 +77,18 @@ def test_feature_capture_preserves_reference_and_releases_hook():
         """Small stand-in for the external framework's public inference boundary."""
 
         def __init__(self):
+            self.cache_tokens = 816
             self.vlm_interface = SimpleNamespace(
                 model=SimpleNamespace(language_model=torch.nn.Identity())
             )
 
         def predict_action(self, **kwargs):
-            result = SimpleNamespace(last_hidden_state=torch.ones(1, 816, 2048))
+            result = SimpleNamespace(
+                last_hidden_state=torch.ones(1, 816, 2048),
+                past_key_values=SimpleNamespace(
+                    get_seq_length=lambda: self.cache_tokens
+                ),
+            )
             self.vlm_interface.model.language_model(result)
             return {"normalized_actions": np.zeros((1, 10, 7))}
 
@@ -96,6 +104,63 @@ def test_feature_capture_preserves_reference_and_releases_hook():
     assert captured["hidden"].shape == (512, 2048)
     assert not captured["hidden"].requires_grad
     assert "hidden" not in reference.predict(obs, "test")
+    reference.model.cache_tokens = 0
+    with pytest.raises(RuntimeError, match="prefix KV cache"):
+        reference.predict(obs, "test")
+    reference.model.cache_tokens = 816
+    assert "hidden" not in reference.predict(obs, "test")
+
+
+def test_gemma_prefix_cache_survives_upstream_decoder_and_conditions_suffix():
+    source = Path(__file__).resolve().parents[3] / "third_party/AlphaBrain"
+    patch = (
+        source
+        / "AlphaBrain/model/modules/action_model/pi0_flow_matching_head/adarms_patch.py"
+    )
+    if not patch.exists():
+        pytest.skip("Pinned external AlphaBrain source is not installed")
+    # The upstream patch changes global Transformers classes; isolate it from
+    # other model tests while using real attention, cache and decoder objects.
+    code = r"""
+import importlib.util
+import sys
+import torch
+from transformers import GemmaConfig, GemmaModel
+from toolkits.rlt.pi05_baseline import adapt_gemma_cache_keyword
+torch.set_num_threads(2)
+torch.manual_seed(42)
+spec = importlib.util.spec_from_file_location("adarms", sys.argv[1])
+patch = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(patch)
+patch.patch_gemma_for_adarms()
+cfg = GemmaConfig(vocab_size=32, hidden_size=32, intermediate_size=64,
+                  num_hidden_layers=2, num_attention_heads=2,
+                  num_key_value_heads=1, head_dim=16)
+cfg._attn_implementation = "eager"
+model = GemmaModel(cfg).eval()
+adapt_gemma_cache_keyword(model)
+assert adapt_gemma_cache_keyword(model) == 0
+prefix = torch.randn(1, 5, 32)
+suffix = torch.randn(1, 2, 32)
+with torch.no_grad():
+    outputs = []
+    for context in (prefix, -prefix):
+        result = model(inputs_embeds=context, attention_mask=torch.zeros(1, 1, 5, 5), use_cache=True)
+        cache = result.past_key_values
+        assert cache.get_seq_length() == 5
+        cached = model(inputs_embeds=suffix, past_key_values=cache,
+                       attention_mask=torch.zeros(1, 1, 2, 7), use_cache=False)
+        assert cache.get_seq_length() == 7
+        mask = torch.zeros(1, 1, 7, 7)
+        mask[:, :, :5, 5:] = torch.finfo(torch.float32).min
+        joint = model(inputs_embeds=torch.cat((context, suffix), dim=1),
+                      attention_mask=mask, use_cache=False)
+        torch.testing.assert_close(cached.last_hidden_state,
+                                   joint.last_hidden_state[:, -2:], atol=1e-5, rtol=1e-5)
+        outputs.append(cached.last_hidden_state)
+    assert not torch.allclose(*outputs)
+"""
+    subprocess.run([sys.executable, "-c", code, str(patch)], check=True, timeout=60)
 
 
 def test_protocol_and_file_digests_reject_cross_route_artifacts(tmp_path):
@@ -287,7 +352,18 @@ def test_paired_final_comparison_reports_uncertainty_and_rejects_changed_resets(
 
 def test_seeded_reference_does_not_consume_learning_rng():
     class ExternalModel:
+        def __init__(self):
+            self.vlm_interface = SimpleNamespace(
+                model=SimpleNamespace(language_model=torch.nn.Identity())
+            )
+
         def predict_action(self, **kwargs):
+            self.vlm_interface.model.language_model(
+                SimpleNamespace(
+                    last_hidden_state=torch.ones(1, 816, 2048),
+                    past_key_values=SimpleNamespace(get_seq_length=lambda: 816),
+                )
+            )
             return {"normalized_actions": torch.rand(1, 10, 7).numpy()}
 
     obs = {
