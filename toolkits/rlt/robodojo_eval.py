@@ -54,6 +54,10 @@ NATIVE_DEPENDENCIES = {
         "lerobot",
         "numpy",
         "websockets",
+        "pytest",
+        "chex",
+        "optax",
+        "pyarrow",
     ),
 }
 
@@ -420,7 +424,7 @@ def runtime_inventory(config: dict) -> dict:
     for field, packages in NATIVE_DEPENDENCIES.items():
         try:
             result = subprocess.run(
-                [config[field], "-I", "-c", program, *packages],
+                [config[field], "-I", "-B", "-c", program, *packages],
                 env=dict(
                     os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1"
                 ),
@@ -446,6 +450,55 @@ def runtime_inventory(config: dict) -> dict:
             report["errors"].append(f"{field}: {error}")
     if report["errors"]:
         report["status"] = "blocked"
+    return report
+
+
+def probe_reference(config: dict) -> dict:
+    """Test policy imports and native configuration in a bounded CPU subprocess.
+
+    Unlike package inventory, this detects import-time ABI and dependency errors.
+    It never creates a backend, restores weights, or starts an Isaac process.
+    """
+    validate_config(config)
+    report = {
+        "status": "blocked",
+        "runtime_verified": False,
+        "gpu_started": False,
+        "parameters_loaded": False,
+        "errors": [],
+    }
+    if config["policy"]["backend"] != "openpi_reference":
+        report["errors"].append("CPU reference probe requires openpi_reference")
+        return report
+    project = str(Path(__file__).resolve().parents[2])
+    program = (
+        "import json, sys; sys.path.insert(0, sys.argv[1]); "
+        "from toolkits.rlt.robodojo_policy import inspect_reference; "
+        "print(json.dumps(inspect_reference(json.load(sys.stdin))))"
+    )
+    try:
+        result = subprocess.run(
+            [config["policy_python"], "-I", "-B", "-c", program, project],
+            input=json.dumps(config["policy"]),
+            env=dict(
+                os.environ,
+                CUDA_VISIBLE_DEVICES="",
+                JAX_PLATFORMS="cpu",
+                PYTHONDONTWRITEBYTECODE="1",
+            ),
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode:
+            report["errors"].append(
+                f"Policy import/config exit {result.returncode}: {result.stderr[-6000:]}"
+            )
+        else:
+            report["reference"] = json.loads(result.stdout)
+            report["status"] = "reference_imports_passed"
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        report["errors"].append(f"Reference probe: {error}")
     return report
 
 
@@ -565,10 +618,10 @@ def main() -> int:
     """Expose CPU preparation, explicit plugin installation, and result auditing."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "runtime", "install-policy"):
+    for name in ("prepare", "runtime", "probe-reference", "install-policy"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
-        if name in {"prepare", "runtime"}:
+        if name != "install-policy":
             command.add_argument("--output", type=Path, required=True)
     check = commands.add_parser("audit")
     check.add_argument("--plan", type=Path, required=True)
@@ -577,8 +630,12 @@ def main() -> int:
     if args.command == "install-policy":
         print(install_policy(yaml.safe_load(args.config.read_text())))
         return 0
-    if args.command in {"prepare", "runtime"}:
-        function = prepare if args.command == "prepare" else runtime_inventory
+    if args.command in {"prepare", "runtime", "probe-reference"}:
+        function = {
+            "prepare": prepare,
+            "runtime": runtime_inventory,
+            "probe-reference": probe_reference,
+        }[args.command]
         result = function(yaml.safe_load(args.config.read_text()))
         with args.output.open("x") as stream:
             json.dump(result, stream, indent=2, allow_nan=False)
@@ -589,6 +646,7 @@ def main() -> int:
     return {
         "prepared": 0,
         "packages_present": 0,
+        "reference_imports_passed": 0,
         "passed": 0,
         "failed": 2,
         "blocked": 3,

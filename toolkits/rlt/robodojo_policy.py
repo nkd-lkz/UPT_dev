@@ -39,6 +39,47 @@ def validate_normalization(path: Path) -> None:
             raise ValueError(f"Invalid normalization ranges: {field}")
 
 
+def inspect_reference(config: dict) -> dict:
+    """Check native reference imports and config without loading model parameters.
+
+    Run this in the isolated policy interpreter with CUDA hidden and JAX set to
+    CPU. The internal padded action width is distinct from the 14-D robot output.
+    """
+    if config["backend"] != "openpi_reference":
+        raise ValueError("Reference inspection only supports openpi_reference")
+    from openpi.policies import policy_config
+    from openpi.training import config as training_config
+
+    native = training_config.get_config(config["train_config_name"])
+    if (
+        not isinstance(native.data, training_config.LeRobotAlohaDataConfig)
+        or native.data.assets.asset_id != "arx_x5_sim"
+        or config["model_contract"]["normalization_id"] != "arx_x5_sim"
+        or native.data.adapt_to_pi
+        or not native.model.pi05
+    ):
+        raise ValueError("Require the native ARX X5 Pi0.5 reference configuration")
+    if not 1 <= config["action_horizon"] <= native.model.action_horizon:
+        raise ValueError("Execution horizon exceeds the reference action chunk")
+    if native.model.action_dim < 14:
+        raise ValueError("Reference model cannot represent fourteen robot actions")
+    normalization = (
+        Path(config["checkpoint_path"]) / "assets/arx_x5_sim/norm_stats.json"
+    )
+    validate_normalization(normalization)
+    return {
+        "train_config_name": native.name,
+        "normalization_id": native.data.assets.asset_id,
+        "padded_action_dim": native.model.action_dim,
+        "robot_action_dim": 14,
+        "model_action_horizon": native.model.action_horizon,
+        "execution_horizon": config["action_horizon"],
+        "joint_delta_transform": native.data.use_delta_joint_actions,
+        "loader_module": policy_config.__name__,
+        "parameters_loaded": False,
+    }
+
+
 def load_backend(config: dict) -> InferenceBackend:
     """Load an explicit reference checkpoint or a trusted local RLT factory.
 
@@ -64,6 +105,7 @@ def load_backend(config: dict) -> InferenceBackend:
         return getattr(importlib.import_module(module), name)(dict(config))
     if backend != "openpi_reference":
         raise ValueError("Select openpi_reference or an embodiment-compatible factory")
+    inspect_reference(config)
     # Keep OpenPI and accelerator imports out of CPU contract checks.
     from openpi.policies import policy_config
     from openpi.shared import normalize

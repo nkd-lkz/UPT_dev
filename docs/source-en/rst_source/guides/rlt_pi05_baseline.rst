@@ -207,6 +207,17 @@ Use separate Python 3.11 environments for Isaac Sim 5.1.0 and the native OpenPI 
 
 ``packages_present`` only checks required package metadata and the Python/Isaac version gates. It does not certify dependency compatibility or GPU execution. The report retains ``runtime_verified: false``. Complete model loading, USD resolution, rendering, driver checks and one native reference episode before reporting an environment as verified.
 
+Check actual policy imports in its isolated interpreter before reserving a GPU:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval probe-reference \
+     --config /path/to/robodojo-eval.yaml --output /path/to/reference-import.json
+
+This bounded subprocess hides CUDA and selects the JAX CPU backend. It imports the native loader, verifies the ARX X5 Pi0.5 configuration and normalization, and checks that the execution horizon fits the model chunk. ``reference_imports_passed`` means imports and configuration passed, not that parameters were loaded or actions generated. The native model's padded width is 32, while its robot output is 14-dimensional. Model loading repeats the configuration checks so a LIBERO configuration cannot be substituted behind an ARX X5 label. Custom factories require their own preflight.
+
+The inspected native loader also imports Pytest, Chex, Optax and PyArrow. An isolated import check exposed missing packages and PyArrow 26's incompatibility with this OpenPI environment's NumPy 1.26.4. The native lockfile versions Pytest 8.3.5, Chex 0.1.89, Optax 0.2.4 and PyArrow 24.0.0 passed that check. Record these dependencies in the policy environment's installation recipe; package presence alone would miss the NumPy ABI failure.
+
 When installing with uv from an RLinf worktree, use ``uv --no-config pip install`` and explicit native version pins; project-level overrides can otherwise replace the requested PyTorch version. Keep required upstream dependency overrides in a separate recorded file. The inspected IsaacLab Starlette requirement conflicts with Isaac Sim 5.1's FastAPI dependency; RoboDojo's installer pins Starlette back to 0.45.3. Matching this recipe does not prove that every optional IsaacLab feature works. Do not repair these conflicts by upgrading the active LIBERO environment.
 
 Preparation is CPU-only: it checks source revisions, inventories and hashes the fixed native layouts, checks asset directories and executable paths, and records commands without executing them. Install NumPy and PyYAML in the preparation environment; no Isaac, OpenPI or CUDA import is needed. After editing a copy of the YAML, run:
@@ -247,3 +258,5 @@ Runtime provisioning and artifact downloads are separate from simulator acceptan
      tests/unit_tests/test_robodojo_assets.py
 
 Set ``RP_XPOLICYLAB_SOURCE`` to the pinned XPolicyLab checkout and install its WS dependencies to include the optional loopback transport test. Next validate one native reference episode before a full fixed-layout evaluation. No RoboDojo training loop is added here; human/planner assistance and memory remain outside this baseline.
+
+Set ``RP_ROBODOJO_POLICY_PYTHON`` to the isolated native OpenPI interpreter to include CPU import/configuration tests. These tests use synthetic normalization files and never restore checkpoint parameters. They check the native ARX configuration and reject mismatched LIBERO configurations, normalization IDs and execution horizons.

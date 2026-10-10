@@ -207,6 +207,17 @@ Isaac Sim 5.1.0 与原生 OpenPI server 使用两个独立的 Python 3.11 环境
 
 ``packages_present`` 仅检查所需包的信息和 Python/Isaac 版本，不保证依赖兼容或 GPU 执行成功，报告仍保留 ``runtime_verified: false``。须完成模型加载、USD 解析、渲染、驱动检查及一个原生 reference 回合，才能报告环境通过验收。
 
+预约 GPU 前，先在独立 policy 环境中检查真实导入路径：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval probe-reference \
+     --config /path/to/robodojo-eval.yaml --output /path/to/reference-import.json
+
+该子进程隐藏 CUDA、指定 JAX CPU backend，并设置超时；检查原生加载入口、ARX X5 Pi0.5 配置、归一化数据及执行长度。``reference_imports_passed`` 仅表示导入和配置通过，不代表已经加载参数或生成动作。原生模型内部补齐后的动作维度为 32，对外机器人动作仍为 14 维。实际模型加载会重复配置检查，避免将 LIBERO 配置标记成 ARX X5；自定义 factory 需另行检查。
+
+本次原生加载入口还依赖 Pytest、Chex、Optax 和 PyArrow。独立环境检查发现缺少导入依赖，以及 PyArrow 26 与该 OpenPI 环境的 NumPy 1.26.4 不兼容。采用原生 lockfile 中的 Pytest 8.3.5、Chex 0.1.89、Optax 0.2.4、PyArrow 24.0.0 后通过检查，应将这些版本记录到 policy 环境的安装配方。只检查包是否存在无法发现 NumPy ABI 问题。
+
 在 RLinf worktree 中使用 uv 安装时，采用 ``uv --no-config pip install`` 并明确固定原生版本，否则项目级 override 可能替换所请求的 PyTorch 版本。上游需要的依赖覆盖项应记录在独立文件中。本次 IsaacLab 的 Starlette 要求与 Isaac Sim 5.1 的 FastAPI 依赖冲突，而 RoboDojo 安装脚本会将 Starlette 固定回 0.45.3；遵循该配方不代表所有可选 IsaacLab 功能均可用。不要通过升级正在运行的 LIBERO 环境来解决这些冲突。
 
 准备命令只使用 CPU：检查源码版本，列出固定原生初态并计算哈希，检查资产目录和可执行文件路径，记录命令但不执行。准备环境只需 NumPy 和 PyYAML，不导入 Isaac、OpenPI 或 CUDA。编辑一份 YAML 副本后运行：
@@ -247,3 +258,5 @@ runtime 安装、资产下载与仿真验收是不同阶段。本次接入不提
      tests/unit_tests/test_robodojo_assets.py
 
 将 ``RP_XPOLICYLAB_SOURCE`` 设为固定版本的 XPolicyLab checkout，并安装其 WS 依赖，即可加入本机回环通信测试。下一步先验收一个原生 reference 回合，再执行完整固定初态评测。本次不增加 RoboDojo 训练循环，人工、planner 辅助及 memory 均不纳入该 baseline。
+
+将 ``RP_ROBODOJO_POLICY_PYTHON`` 设为独立的原生 OpenPI 解释器，可加入 CPU 导入和配置测试。这些测试使用合成归一化文件，不恢复 checkpoint 参数；验证原生 ARX 配置，并拒绝不匹配的 LIBERO 配置、归一化 ID 和执行长度。

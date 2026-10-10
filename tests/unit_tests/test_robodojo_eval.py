@@ -3,6 +3,7 @@
 """Fixed-layout plans and native-result auditing, with no policy/GPU execution."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -121,6 +122,46 @@ def test_runtime_inventory_missing_interpreter(config):
     result = evaluation.runtime_inventory(config)
     assert result["status"] == "blocked"
     assert any("sim_python" in error for error in result["errors"])
+
+
+def test_reference_probe_missing_interpreter_leaves_runtime_unverified(config):
+    config["policy_python"] = "/missing/openpi-python"
+    result = evaluation.probe_reference(config)
+    assert result["status"] == "blocked" and result["errors"]
+    assert not result["runtime_verified"] and not result["gpu_started"]
+    assert not result["parameters_loaded"]
+
+
+def test_reference_probe_does_not_import_arbitrary_factory(config):
+    config["policy"].update(backend="factory", backend_factory="unknown:load")
+    result = evaluation.probe_reference(config)
+    assert result["status"] == "blocked"
+    assert "openpi_reference" in result["errors"][0]
+
+
+@pytest.mark.parametrize("change", [None, "libero", "horizon", "normalization"])
+def test_native_reference_imports_and_config_without_weights(config, change):
+    interpreter = os.environ.get("RP_ROBODOJO_POLICY_PYTHON")
+    if not interpreter:
+        pytest.skip(
+            "Set RP_ROBODOJO_POLICY_PYTHON to the isolated native OpenPI Python"
+        )
+    config["policy_python"] = interpreter
+    if change == "libero":
+        config["policy"]["train_config_name"] = "pi05_libero"
+    elif change == "horizon":
+        config["policy"]["action_horizon"] = 1000
+    elif change == "normalization":
+        config["policy"]["model_contract"]["normalization_id"] = "wrong_robot"
+    report = evaluation.probe_reference(config)
+    if change:
+        assert report["status"] == "blocked" and report["errors"]
+    else:
+        assert report["status"] == "reference_imports_passed", report["errors"]
+        assert report["reference"]["padded_action_dim"] == 32
+        assert report["reference"]["robot_action_dim"] == 14
+    assert not report["parameters_loaded"] and not report["runtime_verified"]
+    assert not report["gpu_started"]
 
 
 def test_seven_dimensional_norm_stats_block_mislabeled_checkpoint(config):
