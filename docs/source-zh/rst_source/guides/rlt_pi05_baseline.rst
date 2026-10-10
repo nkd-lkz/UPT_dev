@@ -173,13 +173,51 @@ GPU 忙碌时，可运行 ``preflight --root "$RLT_PI05_MATRIX"``，用 OSMesa �
      --assets "$RLT_PI05_ASSETS" --output /path/to/new-cpu-smoke \
      --gpu 2 --episodes 1 --state-start 49 --seed 45000
 
-准备 RoboDojo 接口
+准备 RoboDojo 评测
 -------------------
 
 LIBERO 试跑通过后，先迁移观测和动作接口，再增加训练。`RoboDojo <https://github.com/RoboDojo-Benchmark/RoboDojo>`_ 当前公开的是 eval-only 仿真与任务框架，policy server 由 XPolicyLab 管理。本次核查版本分别为 RoboDojo ``cb2a37d58dbbeb2777b0c2b30e97ecb8ab91095c`` 和 XPolicyLab ``53c5da5a01bc720d1cf0e6ab6ed212e8cef0eda2``。
 
 首个迁移目标采用 ARX X5 关节控制接口：头部及双腕 RGB 相机、14 维状态，以及以弧度表示的机械臂绝对关节位置和 [0, 1] 夹爪开度。本次检查的实现中，夹爪状态来自命令开度，并非独立测得的真实关节响应。LIBERO 的七维末端动作模型不能通过补零或改名变成该接口的模型。
 
-``toolkits/rlt/robodojo_boundary.py`` 在不启动 Isaac Sim 的情况下测试 policy 侧接口。构造 ``RoboDojoBoundary`` 时需要兼容的推理 backend 和明确的归一化标识；每回合先调用 ``reset``，再通过 ``update_obs_batch`` 写入带环境 ID 的观测，最后用 ``get_action_batch`` 请求当前活跃环境的动作。返回值是按请求顺序排列的原生命令字典，环境批次缩小时也保持对应关系；旧观测、非法夹爪值和 LIBERO 维度的输出会被拒绝。该组件目前尚不加载 RoboDojo policy，也不包含仿真训练循环。
+评测适配器已在 ``toolkits/rlt/robodojo_policy.py`` 提供 XPolicyLab 的 ``Model`` API 和原生单环境、批量环境执行循环。WS server 先解码图像，再交给适配器；每回合先 reset，随后按明确的环境 ID 更新观测，再请求活跃环境的动作。适配器过滤仿真特权字段，拒绝旧观测和不兼容动作，并在环境于动作 chunk 中途结束时保持动作与环境 ID 对应。backend 必须无状态；当前未实现各环境独立的 memory。
 
-当前服务器的迁移快照保留了较早的源码和 bridge 原型，但缺少原机器的仿真环境与资产。后续验收顺序是固定 Isaac runtime 与单任务资产，准备适配该机器人的 Pi0.5 权重或执行监督适配，完成原生 reference 评估，再补齐包含 reset、reward、termination 和 truncation 的在线 transition contract。初始 baseline 关闭人工、planner 和 memory，后续引入时分别记录其成本。
+从 ``evaluations/robodojo/arx_x5.yaml`` 开始，默认任务为 ``stack_bowls``，采用原生初态 seed 0、25 回合和单环境。使用独立的 RoboDojo checkout 及固定版本的 XPolicyLab 子模块，填写 runtime 和 checkpoint 的绝对路径。原生 OpenPI ARX X5 reference 权重选择 ``openpi_reference``；加载器只读取明确的 checkpoint 目录及其中的 ``assets/<normalization_id>/norm_stats.json``，不会自动选择最新权重。兼容的 RLT backend 可通过 ``backend: factory`` 和可信的本地 ``backend_factory: module:function`` 接入：函数接收 policy 配置，返回的对象通过 ``infer(observation)["actions"]`` 输出反归一化后的 [H, 14] 数组。这条路径仍需提供 ARX X5 RLT 权重加载器及兼容的训练权重，不能使用现有 LIBERO RLT 动作头。
+
+准备命令只使用 CPU：检查源码版本，列出固定原生初态并计算哈希，检查资产目录和可执行文件路径，记录命令但不执行。准备环境只需 NumPy 和 PyYAML，不导入 Isaac、OpenPI 或 CUDA。编辑一份 YAML 副本后运行：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval prepare \
+     --config /path/to/robodojo-eval.yaml --output /path/to/new-plan.json
+
+命令不会覆盖已有报告。退出码 0 表示 ``prepared``，3 表示前置条件缺失。即便准备完成，manifest 仍标记 ``runtime_verified: false``，因为文件检查不能证明 Isaac Sim 和模型可以运行。模板有意保留未配置的 backend。命令遵守原生任务回合数上限；该任务只允许 25 回合，请求 50 回合会报错，不会静默缩短。初态 ID 是文件名按数字排序后的位置，不是文件名末尾的数字。
+
+runtime、资产和兼容权重齐备且已明确安排 GPU 评测后，在该独立 checkout 中安装插件：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval install-policy \
+     --config /path/to/robodojo-eval.yaml
+
+该操作只新建 ``XPolicyLab/policy/RLT_Pi05``，目录已存在则拒绝执行；不会启动 server、仿真或训练。计划中的 ``commands`` 包含工作目录、环境变量及 server/client 两组参数列表。两个进程均使用记录的环境，先启动 server，再启动原生 client；server 只监听本机回环地址，选定的物理 GPU 经屏蔽后对应 client 的 device 0。使用新的 run ID，不隐式恢复旧结果。不同冻结模型配置使用独立 checkout/plugin，审计会拒绝插件变更。
+
+真实评测完成后，对计划中明确记录的结果路径执行审计：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval audit \
+     --plan /path/to/new-plan.json --result /path/from/plan/_result.json
+
+审计重新核对源码、适配器、插件、初态顺序及归一化文件的一致性，要求初态和回合数与计划完全一致，并区分完整成功率与原生部分完成分数。缺失回合仍标为未完成；重复或替换初态，包括物理异常后换用其他初态，都会使配对比较失败。退出码分别为通过（0）、失败（2）和未完成（3），只有通过后才输出可比较的分数。这验证的是记录一致性，不证明 checkpoint 字节来源、runtime 版本或任意自定义 backend 是否暗中使用辅助信息。
+
+当前服务器仍缺少迁移前的 Isaac runtime、完整任务资产和已验证的 ARX X5 RLT checkpoint。CPU 测试及可选的原生 WS 往返测试只能验证接口行为，不代表仿真成功率。可在不占 GPU 的情况下执行接口测试：
+
+.. code-block:: bash
+
+   CUDA_VISIBLE_DEVICES= python -m pytest -q \
+     tests/unit_tests/test_robodojo_boundary.py \
+     tests/unit_tests/test_robodojo_policy.py \
+     tests/unit_tests/test_robodojo_eval.py
+
+将 ``RP_XPOLICYLAB_SOURCE`` 设为固定版本的 XPolicyLab checkout，并安装其 WS 依赖，即可加入本机回环通信测试。下一步先验收一个原生 reference 回合，再执行完整固定初态评测。本次不增加 RoboDojo 训练循环，人工、planner 辅助及 memory 均不纳入该 baseline。

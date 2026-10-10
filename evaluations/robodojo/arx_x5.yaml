@@ -1,0 +1,28 @@
+# Evaluation-only template. Replace paths and select a backend before preparation.
+robodojo_root: /path/to/RoboDojo
+sim_python: /path/to/isaac-sim-python
+policy_python: /path/to/openpi-python
+task: stack_bowls
+seed: 0
+episodes: 25
+num_envs: 1
+gpu: 0
+port: 6010
+run_id: stack-bowls-reference-seed0-v1
+group: reference
+policy:
+  policy_name: RLT_Pi05
+  env_cfg_type: arx_x5
+  action_type: joint
+  action_horizon: 10
+  backend: unconfigured
+  # openpi_reference loads a native OpenPI ARX X5 reference checkpoint.
+  # factory requires a trusted local module:function implementing ARX X5 RLT.
+  backend_factory: null
+  checkpoint_path: /path/to/exact/checkpoint/step
+  train_config_name: pi05_base_aloha_full_sim_arx-x5_seed_0
+  model_contract:
+    embodiment: arx_x5
+    action_dim: 14
+    action_semantics: absolute_joint_radians_gripper_01
+    normalization_id: arx_x5_sim

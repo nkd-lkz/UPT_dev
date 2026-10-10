@@ -173,13 +173,51 @@ When no GPU is available, ``cpu-reference`` can check the actual simulator loop 
      --assets "$RLT_PI05_ASSETS" --output /path/to/new-cpu-smoke \
      --gpu 2 --episodes 1 --state-start 49 --seed 45000
 
-Prepare the RoboDojo Boundary
------------------------------
+Prepare a RoboDojo Evaluation
+--------------------------------
 
 Once the LIBERO pilot passes, migrate the model's observation and action contract before adding more training. `RoboDojo <https://github.com/RoboDojo-Benchmark/RoboDojo>`_ currently provides an eval-only simulator/task release, while XPolicyLab owns policy servers. The inspected revisions are RoboDojo ``cb2a37d58dbbeb2777b0c2b30e97ecb8ab91095c`` and XPolicyLab ``53c5da5a01bc720d1cf0e6ab6ed212e8cef0eda2``.
 
 The initial target is the ARX X5 joint-control interface: head and two wrist RGB cameras, 14 state coordinates, and absolute arm-joint radians plus gripper openings in [0, 1]. Gripper state in the inspected implementation represents commanded openings, not independent measured joint response. A seven-dimensional LIBERO end-effector checkpoint cannot be padded or relabelled into this interface.
 
-``toolkits/rlt/robodojo_boundary.py`` tests the policy-side boundary without Isaac Sim. Construct ``RoboDojoBoundary`` with a compatible backend and identified normalization; call ``reset`` at an episode boundary, ``update_obs_batch`` with explicit environment IDs, then ``get_action_batch`` with the current active IDs. It returns native command dictionaries in the requested order, including after a batch shrinks. Stale observations, invalid grippers and LIBERO-shaped outputs are rejected. This component does not yet load a RoboDojo policy or provide a simulator training loop.
+The evaluation adapter now provides XPolicyLab's ``Model`` API and native single/batch deployment loops in ``toolkits/rlt/robodojo_policy.py``. The WS server decodes images before calling the adapter. Reset at an episode boundary, update observations with explicit environment IDs, then request actions for active IDs. The adapter filters privileged simulator fields, rejects stale observations and incompatible actions, and keeps chunks attached to their IDs when environments finish mid-chunk. The backend must be stateless; per-environment memory is not implemented here.
 
-The migration snapshot on this host contains earlier source and bridge prototypes but lacks its original simulator environment and assets. The next acceptance steps are a pinned Isaac runtime and one task's assets, an embodiment-compatible Pi0.5 checkpoint or supervised adaptation, native reference evaluation, and only then an online transition contract with explicit reset, reward, termination and truncation. Keep human/planner assistance and memory disabled for the initial baseline and record their cost separately when added.
+Start with ``evaluations/robodojo/arx_x5.yaml``. It selects ``stack_bowls``, native layout seed 0, 25 episodes and one environment. Use a dedicated RoboDojo checkout with its pinned XPolicyLab submodule. Fill in absolute runtime and checkpoint paths, and select ``openpi_reference`` for a native OpenPI ARX X5 checkpoint. This loader uses the exact checkpoint directory and its ``assets/<normalization_id>/norm_stats.json``, never an automatically selected latest checkpoint. A compatible RLT backend can be supplied through ``backend: factory`` and a trusted local ``backend_factory: module:function``; the function receives the policy configuration and returns an object whose ``infer(observation)["actions"]`` is a denormalized [H, 14] array. An ARX X5 RLT weight loader and compatible trained weights are still required for that route. The existing LIBERO RLT head is not supported.
+
+Preparation is CPU-only: it checks source revisions, inventories and hashes the fixed native layouts, checks asset directories and executable paths, and records commands without executing them. Install NumPy and PyYAML in the preparation environment; no Isaac, OpenPI or CUDA import is needed. After editing a copy of the YAML, run:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval prepare \
+     --config /path/to/robodojo-eval.yaml --output /path/to/new-plan.json
+
+The command never overwrites an existing report. Exit 0 means ``prepared``; exit 3 means missing prerequisites. Even a prepared manifest has ``runtime_verified: false``: file checks do not prove that Isaac Sim or the model can run. The supplied template intentionally leaves the backend unconfigured. Native per-task episode caps are enforced; asking for 50 when this task permits 25 is an error, not a silently shortened run. Layout IDs are positions in numerically sorted filenames, not the numeric filename suffixes.
+
+When runtime, assets and compatible weights are available and GPU evaluation is explicitly scheduled, install the plugin in that dedicated checkout:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval install-policy \
+     --config /path/to/robodojo-eval.yaml
+
+This only creates ``XPolicyLab/policy/RLT_Pi05`` and refuses an existing directory. It does not start a server, simulator or training. The plan's ``commands`` contains the working directory, environment and separate server/client argument lists. Apply the recorded environment to both processes, start the server first, then the native client. The server binds only to loopback. GPU masking maps the selected physical GPU to client device 0. Use a new run ID rather than silently resuming an earlier result. Prepare a separate checkout/plugin for a different frozen model configuration; the audit rejects plugin changes.
+
+After a real evaluation, audit the explicitly recorded result path:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval audit \
+     --plan /path/to/new-plan.json --result /path/from/plan/_result.json
+
+The audit rechecks source, adapter, plugin, layout ordering and normalization consistency. It requires exactly the planned layouts and episode count, and separates full success rate from native partial score. Missing episodes remain incomplete; duplicate or substituted layouts, including replacements after physics failures, fail the paired comparison. Exit codes are passed (0), failed (2) and incomplete (3). Scores are withheld unless the comparison passes. This checks recorded consistency, not checkpoint byte provenance, runtime versions or whether an arbitrary custom backend used hidden assistance.
+
+The current host still lacks the migrated Isaac runtime, complete task assets and a verified ARX X5 RLT checkpoint. CPU tests and an optional native WS round-trip establish interface behavior, not simulator success rates. Run the contract tests without GPUs:
+
+.. code-block:: bash
+
+   CUDA_VISIBLE_DEVICES= python -m pytest -q \
+     tests/unit_tests/test_robodojo_boundary.py \
+     tests/unit_tests/test_robodojo_policy.py \
+     tests/unit_tests/test_robodojo_eval.py
+
+Set ``RP_XPOLICYLAB_SOURCE`` to the pinned XPolicyLab checkout and install its WS dependencies to include the optional loopback transport test. Next validate one native reference episode before a full fixed-layout evaluation. No RoboDojo training loop is added here; human/planner assistance and memory remain outside this baseline.
