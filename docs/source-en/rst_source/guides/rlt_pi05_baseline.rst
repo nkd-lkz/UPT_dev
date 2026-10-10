@@ -184,6 +184,31 @@ The evaluation adapter now provides XPolicyLab's ``Model`` API and native single
 
 Start with ``evaluations/robodojo/arx_x5.yaml``. It selects ``stack_bowls``, native layout seed 0, 25 episodes and one environment. Use a dedicated RoboDojo checkout with its pinned XPolicyLab submodule. Fill in absolute runtime and checkpoint paths, and select ``openpi_reference`` for a native OpenPI ARX X5 checkpoint. This loader uses the exact checkpoint directory and its ``assets/<normalization_id>/norm_stats.json``, never an automatically selected latest checkpoint. A compatible RLT backend can be supplied through ``backend: factory`` and a trusted local ``backend_factory: module:function``; the function receives the policy configuration and returns an object whose ``infer(observation)["actions"]`` is a denormalized [H, 14] array. An ARX X5 RLT weight loader and compatible trained weights are still required for that route. The existing LIBERO RLT head is not supported.
 
+The official dataset provides a native ARX X5 Pi0.5 reference at ``ckpt/RoboDojo/Pi_05/RoboDojo-sim-arx_x5-joint-0/59999``. It is not an RLT actor/critic checkpoint. The asset downloader pins ``RoboDojo-Benchmark/RoboDojo`` to revision ``35efbc7dedfdbeeb6e95fb749bd885d73d483e41`` and selects the first 25 numerically ordered ``stack_bowls`` layouts, X5 robot, bowl and camera-stand assets, scene materials, and reference parameters and normalization. It excludes training data and optimizer state. The inspected bundle contains 372 files (13.275 GB). Inventory before downloading, using a new manifest path:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_assets inventory \
+     --manifest /path/to/assets-manifest.json --max-gib 20
+   python -m toolkits.rlt.robodojo_assets download \
+     --manifest /path/to/assets-manifest.json --root /path/to/bundle \
+     --workers 3 --max-gib 20
+
+These commands need Requests but do not import CUDA. Downloads resume owned partial files, verify upstream SHA-256 or Git blob hashes, and publish files only after verification. ``robodojo-download-report.json`` records progress and errors; only ``complete: true`` means all listed files passed. An exclusive lock rejects concurrent writers to the same bundle. An interrupted process may leave the lock: confirm its recorded PID is no longer downloading this bundle before removing that single lock file. Do not treat a partially populated checkpoint directory as usable. The manifest describes the selected files, not a proof that every USD dependency resolves at runtime.
+
+Link the completed bundle's ``Assets`` directory into a dedicated RoboDojo checkout only if its ``Assets`` path does not already exist, and set ``checkpoint_path`` to the exact checkpoint leaf inside the bundle. Set ``artifact_download_report`` to the bundle's progress report so preparation refuses incomplete or failed downloads. This is a completion gate, not a fresh hash audit. Asset files can reside on NAS, but Python environments and Git checkouts require a filesystem that supports their symlinks and permissions. RAM-backed staging is temporary: archive a completed environment or retain a reproducible installation recipe before restarting the host.
+
+Use separate Python 3.11 environments for Isaac Sim 5.1.0 and the native OpenPI server. The inspected simulator pins WebSockets 12, whereas the server imports the newer asyncio server API. Pin IsaacLab to ``afca7b09d60d8beb9c1cb28b43066499940b969b`` and CuRobo to ``d17b54ce32cba095c0b000c4c58777075d11de0e``; do not advance submodules with ``--remote``. This reference uses JAX/Orbax parameters, so a PyTorch-only LIBERO installation is not sufficient. Package metadata can be inspected without importing the simulator:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval runtime \
+     --config /path/to/robodojo-eval.yaml --output /path/to/runtime-inventory.json
+
+``packages_present`` only checks required package metadata and the Python/Isaac version gates. It does not certify dependency compatibility or GPU execution. The report retains ``runtime_verified: false``. Complete model loading, USD resolution, rendering, driver checks and one native reference episode before reporting an environment as verified.
+
+When installing with uv from an RLinf worktree, use ``uv --no-config pip install`` and explicit native version pins; project-level overrides can otherwise replace the requested PyTorch version. Keep required upstream dependency overrides in a separate recorded file. The inspected IsaacLab Starlette requirement conflicts with Isaac Sim 5.1's FastAPI dependency; RoboDojo's installer pins Starlette back to 0.45.3. Matching this recipe does not prove that every optional IsaacLab feature works. Do not repair these conflicts by upgrading the active LIBERO environment.
+
 Preparation is CPU-only: it checks source revisions, inventories and hashes the fixed native layouts, checks asset directories and executable paths, and records commands without executing them. Install NumPy and PyYAML in the preparation environment; no Isaac, OpenPI or CUDA import is needed. After editing a copy of the YAML, run:
 
 .. code-block:: bash
@@ -191,7 +216,7 @@ Preparation is CPU-only: it checks source revisions, inventories and hashes the 
    python -m toolkits.rlt.robodojo_eval prepare \
      --config /path/to/robodojo-eval.yaml --output /path/to/new-plan.json
 
-The command never overwrites an existing report. Exit 0 means ``prepared``; exit 3 means missing prerequisites. Even a prepared manifest has ``runtime_verified: false``: file checks do not prove that Isaac Sim or the model can run. The supplied template intentionally leaves the backend unconfigured. Native per-task episode caps are enforced; asking for 50 when this task permits 25 is an error, not a silently shortened run. Layout IDs are positions in numerically sorted filenames, not the numeric filename suffixes.
+The command never overwrites an existing report. Exit 0 means ``prepared``; exit 3 means missing prerequisites. Even a prepared manifest has ``runtime_verified: false``: file checks do not prove that Isaac Sim or the model can run. Preparation and model loading reject normalization files that do not contain finite 14-dimensional state/action statistics with valid ranges. The supplied template intentionally leaves the backend unconfigured. Native per-task episode caps are enforced; asking for 50 when this task permits 25 is an error, not a silently shortened run. Layout IDs are positions in numerically sorted filenames, not the numeric filename suffixes.
 
 When runtime, assets and compatible weights are available and GPU evaluation is explicitly scheduled, install the plugin in that dedicated checkout:
 
@@ -211,13 +236,14 @@ After a real evaluation, audit the explicitly recorded result path:
 
 The audit rechecks source, adapter, plugin, layout ordering and normalization consistency. It requires exactly the planned layouts and episode count, and separates full success rate from native partial score. Missing episodes remain incomplete; duplicate or substituted layouts, including replacements after physics failures, fail the paired comparison. Exit codes are passed (0), failed (2) and incomplete (3). Scores are withheld unless the comparison passes. This checks recorded consistency, not checkpoint byte provenance, runtime versions or whether an arbitrary custom backend used hidden assistance.
 
-The current host still lacks the migrated Isaac runtime, complete task assets and a verified ARX X5 RLT checkpoint. CPU tests and an optional native WS round-trip establish interface behavior, not simulator success rates. Run the contract tests without GPUs:
+Runtime provisioning and artifact downloads are separate from simulator acceptance. An ARX X5 RLT checkpoint is not supplied by this integration. CPU tests and an optional native WS round-trip establish interface behavior, not simulator success rates. Run the contract tests without GPUs:
 
 .. code-block:: bash
 
    CUDA_VISIBLE_DEVICES= python -m pytest -q \
      tests/unit_tests/test_robodojo_boundary.py \
      tests/unit_tests/test_robodojo_policy.py \
-     tests/unit_tests/test_robodojo_eval.py
+     tests/unit_tests/test_robodojo_eval.py \
+     tests/unit_tests/test_robodojo_assets.py
 
 Set ``RP_XPOLICYLAB_SOURCE`` to the pinned XPolicyLab checkout and install its WS dependencies to include the optional loopback transport test. Next validate one native reference episode before a full fixed-layout evaluation. No RoboDojo training loop is added here; human/planner assistance and memory remain outside this baseline.

@@ -3,6 +3,7 @@
 """Exercise the native evaluator/client boundary without an Isaac runtime."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -10,7 +11,39 @@ import numpy as np
 import pytest
 
 from toolkits.rlt.robodojo_boundary import ACTION_SEMANTICS, CAMERAS, FIELDS
-from toolkits.rlt.robodojo_policy import Model, eval_one_episode, eval_one_episode_batch
+from toolkits.rlt.robodojo_policy import (
+    Model,
+    eval_one_episode,
+    eval_one_episode_batch,
+    validate_normalization,
+)
+
+
+@pytest.mark.parametrize("change", ["short", "nan", "negative_std", "quantile_order"])
+def test_normalization_rejects_incompatible_statistics(tmp_path, change):
+    stats = {
+        name: {
+            "mean": [0.0] * 14,
+            "std": [1.0] * 14,
+            "q01": [-1.0] * 14,
+            "q99": [1.0] * 14,
+        }
+        for name in ("state", "actions")
+    }
+    path = tmp_path / "norm_stats.json"
+    path.write_text(json.dumps({"norm_stats": stats}))
+    validate_normalization(path)
+    if change == "short":
+        stats["actions"]["mean"] = [0.0] * 7
+    elif change == "nan":
+        stats["actions"]["mean"][0] = float("nan")
+    elif change == "negative_std":
+        stats["state"]["std"][0] = -1
+    else:
+        stats["actions"]["q01"][0] = 2
+    path.write_text(json.dumps({"norm_stats": stats}))
+    with pytest.raises(ValueError):
+        validate_normalization(path)
 
 
 def observation(index):

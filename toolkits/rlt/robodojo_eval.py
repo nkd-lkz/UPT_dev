@@ -22,9 +22,40 @@ from toolkits.rlt.robodojo_boundary import (
     XPOLICYLAB_REVISION,
     RoboDojoBoundary,
 )
+from toolkits.rlt.robodojo_policy import validate_normalization
 
 SCHEMA = "robodojo-eval-v1"
 POLICY_NAME = "RLT_Pi05"
+NATIVE_REVISIONS = {
+    "third_party/IsaacLab": "afca7b09d60d8beb9c1cb28b43066499940b969b",
+    "third_party/curobo": "d17b54ce32cba095c0b000c4c58777075d11de0e",
+}
+NATIVE_DEPENDENCIES = {
+    "sim_python": (
+        "isaacsim",
+        "isaaclab",
+        "isaaclab_assets",
+        "isaaclab_tasks",
+        "nvidia-curobo",
+        "torch",
+        "numpy",
+        "websockets",
+        "open3d",
+    ),
+    "policy_python": (
+        "openpi",
+        "openpi-client",
+        "jax",
+        "jaxlib",
+        "flax",
+        "orbax-checkpoint",
+        "torch",
+        "transformers",
+        "lerobot",
+        "numpy",
+        "websockets",
+    ),
+}
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
@@ -258,6 +289,16 @@ def prepare(config: dict) -> dict:
         if not Path(config[field]).is_file() or not os.access(config[field], os.X_OK):
             errors.append(f"Missing executable {field}: {config[field]}")
     policy = config["policy"]
+    artifact_report = None
+    if config.get("artifact_download_report"):
+        try:
+            artifact_report = read_json(Path(config["artifact_download_report"]))
+            if artifact_report.get("complete") is not True or artifact_report.get(
+                "errors"
+            ):
+                errors.append("Artifact download is incomplete or has integrity errors")
+        except (OSError, ValueError) as exc:
+            errors.append(f"Artifact download report: {exc}")
     norm_file = (
         Path(policy["checkpoint_path"])
         / "assets"
@@ -270,6 +311,11 @@ def prepare(config: dict) -> dict:
     }
     if normalization["sha256"] is None:
         errors.append(f"Missing checkpoint normalization: {norm_file}")
+    else:
+        try:
+            validate_normalization(norm_file)
+        except (ValueError, TypeError, AttributeError) as exc:
+            errors.append(f"Checkpoint normalization: {exc}")
     if policy["backend"] == "unconfigured":
         errors.append("No compatible ARX X5 backend selected")
     if policy["backend"] == "factory" and not re.fullmatch(
@@ -306,6 +352,10 @@ def prepare(config: dict) -> dict:
         "config": copy.deepcopy(config),
         "layouts": layouts,
         "normalization": normalization,
+        "artifact_download": {
+            "report_path": config.get("artifact_download_report"),
+            "complete": artifact_report.get("complete") if artifact_report else None,
+        },
         "source_revisions": {
             "robodojo": ROBO_DOJO_REVISION,
             "xpolicylab": XPOLICYLAB_REVISION,
@@ -338,6 +388,65 @@ def install_policy(config: dict) -> Path:
     for name, content in _plugin_files(config).items():
         (target / name).write_text(content)
     return target
+
+
+def runtime_inventory(config: dict) -> dict:
+    """Inspect isolated Python package metadata, never import or launch Isaac.
+
+    Package presence is a provisioning gate only. Driver, rendering, CUDA kernel,
+    model loading, and actual episode checks still require a scheduled GPU run.
+    """
+    validate_config(config)
+    report = {
+        "status": "packages_present",
+        "runtime_verified": False,
+        "interpreters": {},
+        "errors": [],
+    }
+    report["source_revisions"] = dict(NATIVE_REVISIONS)
+    for relative, revision in NATIVE_REVISIONS.items():
+        try:
+            _source_check(Path(config["robodojo_root"]) / relative, revision)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            report["errors"].append(f"{relative}: {error}")
+    program = (
+        "import json, sys; from importlib import metadata\n"
+        "versions = {}\n"
+        "for name in sys.argv[1:]:\n"
+        " try: versions[name] = metadata.version(name)\n"
+        " except metadata.PackageNotFoundError: versions[name] = None\n"
+        "print(json.dumps({'python': list(sys.version_info[:3]), 'packages': versions}))\n"
+    )
+    for field, packages in NATIVE_DEPENDENCIES.items():
+        try:
+            result = subprocess.run(
+                [config[field], "-I", "-c", program, *packages],
+                env=dict(
+                    os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1"
+                ),
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            inventory = json.loads(result.stdout)
+            report["interpreters"][field] = inventory
+            for name, version in inventory["packages"].items():
+                if version is None:
+                    report["errors"].append(f"{field}: missing {name}")
+            if inventory["python"][:2] != [3, 11]:
+                report["errors"].append(f"{field}: require Python 3.11")
+            if field == "sim_python" and inventory["packages"]["isaacsim"] not in {
+                None,
+                "5.1.0.0",
+                "5.1.0",
+            }:
+                report["errors"].append("Require benchmark-pinned Isaac Sim 5.1.0")
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            report["errors"].append(f"{field}: {error}")
+    if report["errors"]:
+        report["status"] = "blocked"
+    return report
 
 
 def audit(plan: dict, result_path: Path) -> dict:
@@ -456,10 +565,10 @@ def main() -> int:
     """Expose CPU preparation, explicit plugin installation, and result auditing."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "install-policy"):
+    for name in ("prepare", "runtime", "install-policy"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
-        if name == "prepare":
+        if name in {"prepare", "runtime"}:
             command.add_argument("--output", type=Path, required=True)
     check = commands.add_parser("audit")
     check.add_argument("--plan", type=Path, required=True)
@@ -468,17 +577,23 @@ def main() -> int:
     if args.command == "install-policy":
         print(install_policy(yaml.safe_load(args.config.read_text())))
         return 0
-    if args.command == "prepare":
-        result = prepare(yaml.safe_load(args.config.read_text()))
+    if args.command in {"prepare", "runtime"}:
+        function = prepare if args.command == "prepare" else runtime_inventory
+        result = function(yaml.safe_load(args.config.read_text()))
         with args.output.open("x") as stream:
             json.dump(result, stream, indent=2, allow_nan=False)
             stream.write("\n")
     else:
         result = audit(read_json(args.plan), args.result)
     print(json.dumps(result, indent=2, allow_nan=False))
-    return {"prepared": 0, "passed": 0, "failed": 2, "blocked": 3, "incomplete": 3}[
-        result["status"]
-    ]
+    return {
+        "prepared": 0,
+        "packages_present": 0,
+        "passed": 0,
+        "failed": 2,
+        "blocked": 3,
+        "incomplete": 3,
+    }[result["status"]]
 
 
 if __name__ == "__main__":

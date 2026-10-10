@@ -2,6 +2,8 @@
 robodojo_root: /path/to/RoboDojo
 sim_python: /path/to/isaac-sim-python
 policy_python: /path/to/openpi-python
+# Set to the bundle's robodojo-download-report.json when using the downloader.
+artifact_download_report: null
 task: stack_bowls
 seed: 0
 episodes: 25

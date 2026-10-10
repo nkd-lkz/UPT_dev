@@ -184,6 +184,31 @@ LIBERO 试跑通过后，先迁移观测和动作接口，再增加训练。`Rob
 
 从 ``evaluations/robodojo/arx_x5.yaml`` 开始，默认任务为 ``stack_bowls``，采用原生初态 seed 0、25 回合和单环境。使用独立的 RoboDojo checkout 及固定版本的 XPolicyLab 子模块，填写 runtime 和 checkpoint 的绝对路径。原生 OpenPI ARX X5 reference 权重选择 ``openpi_reference``；加载器只读取明确的 checkpoint 目录及其中的 ``assets/<normalization_id>/norm_stats.json``，不会自动选择最新权重。兼容的 RLT backend 可通过 ``backend: factory`` 和可信的本地 ``backend_factory: module:function`` 接入：函数接收 policy 配置，返回的对象通过 ``infer(observation)["actions"]`` 输出反归一化后的 [H, 14] 数组。这条路径仍需提供 ARX X5 RLT 权重加载器及兼容的训练权重，不能使用现有 LIBERO RLT 动作头。
 
+官方数据仓库提供了原生 ARX X5 Pi0.5 reference，路径为 ``ckpt/RoboDojo/Pi_05/RoboDojo-sim-arx_x5-joint-0/59999``；它不是 RLT actor/critic 权重。下载工具将 ``RoboDojo-Benchmark/RoboDojo`` 固定到版本 ``35efbc7dedfdbeeb6e95fb749bd885d73d483e41``，选取按文件名数字排序的前 25 个 ``stack_bowls`` 初态、X5 机器人、碗与相机支架、场景材质，以及 reference 参数和归一化文件，不下载训练数据和 optimizer state。本次清单包含 372 个文件，共 13.275 GB。先使用新路径生成清单，再下载：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_assets inventory \
+     --manifest /path/to/assets-manifest.json --max-gib 20
+   python -m toolkits.rlt.robodojo_assets download \
+     --manifest /path/to/assets-manifest.json --root /path/to/bundle \
+     --workers 3 --max-gib 20
+
+命令需要 Requests，不导入 CUDA。下载器支持续传本工具的临时文件，核对上游 SHA-256 或 Git blob 哈希，仅在校验通过后将文件移入最终路径。``robodojo-download-report.json`` 记录进度与错误；只有 ``complete: true`` 才表示清单中的文件全部通过。独占锁阻止多个进程同时写入同一目录；进程中断可能遗留锁文件，须确认其中记录的 PID 已不再下载该目录后，才能删除这一个锁文件。不能把尚未下载完整的 checkpoint 目录视为可用权重。清单只说明选取了哪些文件，不证明所有 USD 依赖都能在 runtime 中解析。
+
+完整下载后，仅在独立 RoboDojo checkout 尚无 ``Assets`` 路径时，将 bundle 的 ``Assets`` 目录链接到该位置，并将 ``checkpoint_path`` 指向 bundle 内明确的 checkpoint 末级目录。将 ``artifact_download_report`` 指向 bundle 的进度报告，使准备流程拒绝未完成或校验失败的下载；这是完成状态检查，不会重新计算全部文件的哈希。资产可以放在 NAS，Python 环境和 Git checkout 则需要支持软链接及文件权限的文件系统。内存盘只适合临时准备；重启机器前须归档已完成的环境，或保留可重现的安装步骤。
+
+Isaac Sim 5.1.0 与原生 OpenPI server 使用两个独立的 Python 3.11 环境。当前仿真依赖固定 WebSockets 12，而 server 使用较新的 asyncio server API。IsaacLab 固定到 ``afca7b09d60d8beb9c1cb28b43066499940b969b``，CuRobo 固定到 ``d17b54ce32cba095c0b000c4c58777075d11de0e``，不要用 ``--remote`` 推进子模块版本。该 reference 使用 JAX/Orbax 参数，仅有 PyTorch 的 LIBERO 环境不足以加载。可在不导入仿真器的情况下检查包信息：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.robodojo_eval runtime \
+     --config /path/to/robodojo-eval.yaml --output /path/to/runtime-inventory.json
+
+``packages_present`` 仅检查所需包的信息和 Python/Isaac 版本，不保证依赖兼容或 GPU 执行成功，报告仍保留 ``runtime_verified: false``。须完成模型加载、USD 解析、渲染、驱动检查及一个原生 reference 回合，才能报告环境通过验收。
+
+在 RLinf worktree 中使用 uv 安装时，采用 ``uv --no-config pip install`` 并明确固定原生版本，否则项目级 override 可能替换所请求的 PyTorch 版本。上游需要的依赖覆盖项应记录在独立文件中。本次 IsaacLab 的 Starlette 要求与 Isaac Sim 5.1 的 FastAPI 依赖冲突，而 RoboDojo 安装脚本会将 Starlette 固定回 0.45.3；遵循该配方不代表所有可选 IsaacLab 功能均可用。不要通过升级正在运行的 LIBERO 环境来解决这些冲突。
+
 准备命令只使用 CPU：检查源码版本，列出固定原生初态并计算哈希，检查资产目录和可执行文件路径，记录命令但不执行。准备环境只需 NumPy 和 PyYAML，不导入 Isaac、OpenPI 或 CUDA。编辑一份 YAML 副本后运行：
 
 .. code-block:: bash
@@ -191,7 +216,7 @@ LIBERO 试跑通过后，先迁移观测和动作接口，再增加训练。`Rob
    python -m toolkits.rlt.robodojo_eval prepare \
      --config /path/to/robodojo-eval.yaml --output /path/to/new-plan.json
 
-命令不会覆盖已有报告。退出码 0 表示 ``prepared``，3 表示前置条件缺失。即便准备完成，manifest 仍标记 ``runtime_verified: false``，因为文件检查不能证明 Isaac Sim 和模型可以运行。模板有意保留未配置的 backend。命令遵守原生任务回合数上限；该任务只允许 25 回合，请求 50 回合会报错，不会静默缩短。初态 ID 是文件名按数字排序后的位置，不是文件名末尾的数字。
+命令不会覆盖已有报告。退出码 0 表示 ``prepared``，3 表示前置条件缺失。即便准备完成，manifest 仍标记 ``runtime_verified: false``，因为文件检查不能证明 Isaac Sim 和模型可以运行。准备与模型加载均要求归一化文件包含有限的 14 维 state/action 统计量，且统计范围有效。模板有意保留未配置的 backend。命令遵守原生任务回合数上限；该任务只允许 25 回合，请求 50 回合会报错，不会静默缩短。初态 ID 是文件名按数字排序后的位置，不是文件名末尾的数字。
 
 runtime、资产和兼容权重齐备且已明确安排 GPU 评测后，在该独立 checkout 中安装插件：
 
@@ -211,13 +236,14 @@ runtime、资产和兼容权重齐备且已明确安排 GPU 评测后，在该�
 
 审计重新核对源码、适配器、插件、初态顺序及归一化文件的一致性，要求初态和回合数与计划完全一致，并区分完整成功率与原生部分完成分数。缺失回合仍标为未完成；重复或替换初态，包括物理异常后换用其他初态，都会使配对比较失败。退出码分别为通过（0）、失败（2）和未完成（3），只有通过后才输出可比较的分数。这验证的是记录一致性，不证明 checkpoint 字节来源、runtime 版本或任意自定义 backend 是否暗中使用辅助信息。
 
-当前服务器仍缺少迁移前的 Isaac runtime、完整任务资产和已验证的 ARX X5 RLT checkpoint。CPU 测试及可选的原生 WS 往返测试只能验证接口行为，不代表仿真成功率。可在不占 GPU 的情况下执行接口测试：
+runtime 安装、资产下载与仿真验收是不同阶段。本次接入不提供 ARX X5 RLT checkpoint。CPU 测试及可选的原生 WS 往返测试只能验证接口行为，不代表仿真成功率。可在不占 GPU 的情况下执行接口测试：
 
 .. code-block:: bash
 
    CUDA_VISIBLE_DEVICES= python -m pytest -q \
      tests/unit_tests/test_robodojo_boundary.py \
      tests/unit_tests/test_robodojo_policy.py \
-     tests/unit_tests/test_robodojo_eval.py
+     tests/unit_tests/test_robodojo_eval.py \
+     tests/unit_tests/test_robodojo_assets.py
 
 将 ``RP_XPOLICYLAB_SOURCE`` 设为固定版本的 XPolicyLab checkout，并安装其 WS 依赖，即可加入本机回环通信测试。下一步先验收一个原生 reference 回合，再执行完整固定初态评测。本次不增加 RoboDojo 训练循环，人工、planner 辅助及 memory 均不纳入该 baseline。

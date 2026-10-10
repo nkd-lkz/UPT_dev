@@ -45,7 +45,21 @@ def config(tmp_path, monkeypatch):
     checkpoint = Path(value["policy"]["checkpoint_path"])
     normalization = checkpoint / "assets/arx_x5_sim/norm_stats.json"
     normalization.parent.mkdir(parents=True)
-    normalization.write_text("{}")
+    normalization.write_text(
+        json.dumps(
+            {
+                "norm_stats": {
+                    name: {
+                        "mean": [0.0] * 14,
+                        "std": [1.0] * 14,
+                        "q01": [-1.0] * 14,
+                        "q99": [1.0] * 14,
+                    }
+                    for name in ("state", "actions")
+                }
+            }
+        )
+    )
     (checkpoint / "params").mkdir()
     # Git is the external source dependency; policy/simulator APIs are never mocked
     # in preparation because they must not be imported or called at all.
@@ -92,6 +106,42 @@ def test_missing_runtime_and_backend_produce_blocked_report(config):
     report = evaluation.prepare(config)
     assert report["status"] == "blocked"
     assert len(report["errors"]) == 2
+
+
+def test_runtime_inventory_never_claims_simulator_verified(config):
+    # This uses the real test Python, which need not contain Isaac or OpenPI.
+    result = evaluation.runtime_inventory(config)
+    assert not result["runtime_verified"]
+    assert set(result["interpreters"]) == {"sim_python", "policy_python"}
+    assert "isaacsim" in result["interpreters"]["sim_python"]["packages"]
+
+
+def test_runtime_inventory_missing_interpreter(config):
+    config["sim_python"] = "/missing/isaac-python"
+    result = evaluation.runtime_inventory(config)
+    assert result["status"] == "blocked"
+    assert any("sim_python" in error for error in result["errors"])
+
+
+def test_seven_dimensional_norm_stats_block_mislabeled_checkpoint(config):
+    path = (
+        Path(config["policy"]["checkpoint_path"]) / "assets/arx_x5_sim/norm_stats.json"
+    )
+    data = json.loads(path.read_text())
+    data["norm_stats"]["actions"]["mean"] = [0.0] * 7
+    path.write_text(json.dumps(data))
+    report = evaluation.prepare(config)
+    assert report["status"] == "blocked"
+    assert "14-D" in report["errors"][0]
+
+
+def test_partial_artifact_download_blocks_preparation(config, tmp_path):
+    path = tmp_path / "download-report.json"
+    config["artifact_download_report"] = str(path)
+    path.write_text(json.dumps({"complete": False, "errors": []}))
+    assert evaluation.prepare(config)["status"] == "blocked"
+    path.write_text(json.dumps({"complete": True, "errors": []}))
+    assert evaluation.prepare(config)["status"] == "prepared"
 
 
 @pytest.mark.parametrize("change", ["budget", "embodiment", "duplicate_order"])

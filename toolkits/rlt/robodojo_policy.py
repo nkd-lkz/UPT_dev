@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -19,6 +20,23 @@ class InferenceBackend(Protocol):
     def infer(self, observation: dict) -> dict[str, np.ndarray]:
         """Return an ``actions`` array of shape [H, 14]."""
         ...
+
+
+def validate_normalization(path: Path) -> None:
+    """Require finite fourteen-dimensional native ARX X5 normalization stats."""
+    data = json.loads(path.read_text())
+    stats = data.get("norm_stats", {})
+    for field in ("state", "actions"):
+        arrays = {}
+        for key in ("mean", "std", "q01", "q99"):
+            values = np.asarray(stats.get(field, {}).get(key), dtype=np.float64)
+            if values.shape != (14,) or not np.isfinite(values).all():
+                raise ValueError(
+                    f"ARX X5 requires finite 14-D {field}.{key} statistics"
+                )
+            arrays[key] = values
+        if (arrays["std"] < 0).any() or (arrays["q01"] > arrays["q99"]).any():
+            raise ValueError(f"Invalid normalization ranges: {field}")
 
 
 def load_backend(config: dict) -> InferenceBackend:
@@ -37,6 +55,7 @@ def load_backend(config: dict) -> InferenceBackend:
     )
     if not checkpoint.is_dir() or not norm_file.is_file():
         raise ValueError("Require an exact checkpoint directory and norm_stats.json")
+    validate_normalization(norm_file)
     backend = config["backend"]
     if backend == "factory":
         module, separator, name = config["backend_factory"].partition(":")
