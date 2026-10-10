@@ -98,7 +98,7 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
 安排四套完整对照
 -----------------
 
-单任务链路验收后，通过独立目录 ``UPT_rlt_pi05_suite_dev``、分支 ``research/rlt-pi05-four-suite`` 中的 ``toolkits.rlt.pi05_matrix`` 扩展任务集。旧队列结束前，保持其代码目录不变。实验矩阵在执行前固定全部 40 个任务、训练 seed 42/43/44 以及四组评估，沿用上述预算与工程验收条件；Spatial、Object、Goal、Long 的回合上限分别为 220、280、320、520 个控制 tick，与固定版本的上游源码一致。
+单任务链路验收后，通过目录 ``UPT_rlt_pi05_recovery_dev``、分支 ``research/rlt-pi05-recovery`` 中的 ``toolkits.rlt.pi05_matrix`` 扩展任务集。原 ``research/rlt-pi05-four-suite`` 工作目录保持不变，以便核查此前已固定哈希的实验。实验矩阵在执行前固定全部 40 个任务、训练 seed 42/43/44 以及四组评估，沿用上述预算与工程验收条件；Spatial、Object、Goal、Long 的回合上限分别为 220、280、320、520 个控制 tick，与固定版本的上游源码一致。
 
 每个任务、每个 seed 独立训练 encoder 和小头，共用同一个冻结的公开 VLA。采集、开发集及在线训练初态随训练 seed 改变；每个任务的 100 个留出初态在各组、各训练 seed 之间共用。三次训练重复用于观察训练 seed 的差异，不等于 300 个独立物理初态。完整矩阵包含 120 个任务／seed 单元和 48,000 个评估回合。固定配方与预算终点 checkpoint 构成配对的适配 baseline，不能等同于上游少示范论文设置的复现。
 
@@ -111,7 +111,7 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
      --root "$RLT_PI05_MATRIX" --assets "$RLT_PI05_ASSETS" \
      --source "$RLT_PI05_SOURCE" --gpus 0 1 --wandb-entity your-team
 
-为每张已声明的 GPU 启动一个限时 worker，可分别放入两个 tmux 会话。worker 先等旧研究队列释放锁，再连续两次确认 GPU 空闲；不会停止其他用户进程，也不会将他们占用的卡当作可叠加使用的容量。任务先按 suite 和任务编号轮转 seed 42，再执行 seed 43、44；单元的前置检查失败只跳过其依赖阶段，其他单元继续：
+为每张已声明的 GPU 启动一个限时 worker，可分别放入两个 tmux 会话。worker 先等旧研究队列释放锁，再连续两次确认 GPU 空闲；不会停止其他用户进程，也不会将他们占用的卡当作可叠加使用的容量。任务先按 suite 和任务编号轮转 seed 42，再执行 seed 43、44：
 
 .. code-block:: bash
 
@@ -122,6 +122,10 @@ BC-only 与 Q+BC 从相同热身 checkpoint 启动，各执行 20,000 个控制 
      --root "$RLT_PI05_MATRIX" --gpu 1 --hours 12
 
 十二小时包含等待队列锁和 GPU 的时间，是执行窗口，不代表承诺一晚完成 120 个单元。每个 worker 独占 ``queue-gpu0`` 或 ``queue-gpu1`` 输出目录，拒绝覆盖已有目录；中断阶段保留产物，重新运行前需要明确恢复方案。原单任务启动器保持独立。worker 退出前不要改动已声明的运行代码和计划。
+
+每个 worker 在加载模型前，先持有 GPU 锁执行 W&B 认证与 CUDA 运算检查，限时 90 秒，结果写入 ``runtime-gpuN/manifest.json``，不产生 policy 评估结果。新矩阵计划设置 ``stop_on_failure: true``：任一任务失败或超时，包括开发集验收未通过，都会将该 worker 标为 ``halted_failure``，后续任务保留为 ``not_started_halted_failure``，等待检查。旧计划未显式启用该选项时，仍只跳过依赖阶段。任务 manifest 明确写出错误且未完成时，即使子进程仍在运行，队列也会回收其进程组，避免日志服务的退出重试耗尽剩余预算。
+
+认证失败时，要检查实际 tmux worker 继承的代理，而不只是当前终端的环境。确认可以直连且代理已经失效后，再为该 worker 显式移除相应的大小写环境变量，仍要求在线记录。系统更新后若出现 NVIDIA 驱动与动态库版本不匹配，应协调修复服务器，不能自动重启共享训练主机。仅对当前进程覆盖动态库时，必须与已加载的内核驱动匹配，并通过 CUDA 与渲染检查。恢复实验应记录覆盖方式，保留失败记录、checkpoint 哈希及初态清单；未执行任何回合的基础设施故障不等于零成功率。
 
 实时调度状态分别记录在 ``queue-gpu0/status.json``、``queue-gpu1/status.json``。以下 CPU 命令重新检查各单元的来源记录与配对初态，包括不同训练 seed 间物理初态的一致性：
 

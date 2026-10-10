@@ -25,6 +25,8 @@ def validate_plan(plan: dict) -> None:
         raise ValueError("Require an explicit nonnegative physical GPU index")
     if not math.isfinite(plan.get("hours", 0)) or not 0 < plan.get("hours", 0) <= 12:
         raise ValueError("Require a wall-clock budget in (0, 12] hours")
+    if type(plan.get("stop_on_failure", False)) is not bool:
+        raise ValueError("stop_on_failure must be a boolean")
     known = set()
     for job in plan["jobs"]:
         name = job["name"]
@@ -72,6 +74,19 @@ def completed_manifest(job: dict) -> bool:
         return data.get("complete") is True and data.get("exit_code", 0) == 0
     except (OSError, ValueError):
         return False
+
+
+def manifest_error(job: dict) -> str | None:
+    """Read an explicit failure even when a child is stuck shutting down."""
+    if not job.get("manifest"):
+        return None
+    try:
+        data = json.loads(Path(job["manifest"]).read_text())
+        if data.get("complete") is False and data.get("error"):
+            return str(data["error"])
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def stop_group(process: subprocess.Popen) -> None:
@@ -195,18 +210,28 @@ def run_plan(plan: dict, output: Path) -> dict:
                 row["pid"] = process.pid
                 save()
                 try:
-                    code = process.wait(
-                        timeout=max(
-                            0.01,
-                            min(job["timeout_seconds"], deadline - time.monotonic()),
+                    job_deadline = min(
+                        deadline, time.monotonic() + job["timeout_seconds"]
+                    )
+                    while True:
+                        remaining = job_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(job["argv"], 0)
+                        try:
+                            code = process.wait(timeout=min(2, remaining))
+                        except subprocess.TimeoutExpired:
+                            error = manifest_error(job)
+                            if error is not None:
+                                row.update(state="failed", exit_code=None, error=error)
+                                break
+                            continue
+                        row.update(
+                            exit_code=code,
+                            state="passed"
+                            if code == 0 and completed_manifest(job)
+                            else "failed",
                         )
-                    )
-                    row.update(
-                        exit_code=code,
-                        state="passed"
-                        if code == 0 and completed_manifest(job)
-                        else "failed",
-                    )
+                        break
                 except subprocess.TimeoutExpired:
                     row.update(state="timeout", exit_code=None)
                 finally:
@@ -215,6 +240,9 @@ def run_plan(plan: dict, output: Path) -> dict:
             row["finished_at"] = time.time()
             LOG.info("Finished %s: %s", job["name"], row["state"])
             save()
+            if plan.get("stop_on_failure", False) and row["state"] != "passed":
+                state.update(state="halted_failure", failed_job=job["name"])
+                break
         if state["state"] == "running":
             state["state"] = "finished"
     except KeyboardInterrupt:

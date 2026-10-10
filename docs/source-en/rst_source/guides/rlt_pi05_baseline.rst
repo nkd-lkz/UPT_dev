@@ -98,7 +98,7 @@ Each acceptance queue retains the twelve-hour total limit, including waits; indi
 Schedule All Four Suites
 ------------------------
 
-To extend the accepted single-task pipeline, use ``toolkits.rlt.pi05_matrix`` from the separate ``research/rlt-pi05-four-suite`` branch in ``UPT_rlt_pi05_suite_dev``. Keep earlier queue worktrees unchanged while their jobs finish. The matrix freezes all 40 tasks, training seeds 42/43/44, and four evaluation arms before execution. It retains the budgets and engineering gates above; Spatial, Object, Goal and Long use the pinned upstream horizons of 220, 280, 320 and 520 control ticks, respectively.
+To extend the accepted single-task pipeline, use ``toolkits.rlt.pi05_matrix`` from ``research/rlt-pi05-recovery`` in ``UPT_rlt_pi05_recovery_dev``. The earlier ``research/rlt-pi05-four-suite`` worktree stays unchanged so its sealed run remains auditable. The matrix freezes all 40 tasks, training seeds 42/43/44, and four evaluation arms before execution. It retains the budgets and engineering gates above; Spatial, Object, Goal and Long use the pinned upstream horizons of 220, 280, 320 and 520 control ticks, respectively.
 
 Every task/seed trains its own encoder and heads against the same frozen public VLA. Collection, development and online reset seeds differ between training seeds; the 100 held-out reset seeds per task are shared across seeds and arms. Three repetitions on those cases measure training-seed variation, not 300 independent physical initial states. The complete matrix contains 120 task/seed cells and 48,000 evaluation episodes. Final-budget checkpoints and a fixed recipe make it a matched adapted baseline, not a reproduction of the upstream few-demonstration paper setting.
 
@@ -111,7 +111,7 @@ Create a new output directory on a large filesystem. Preparation seals runtime c
      --root "$RLT_PI05_MATRIX" --assets "$RLT_PI05_ASSETS" \
      --source "$RLT_PI05_SOURCE" --gpus 0 1 --wandb-entity your-team
 
-Launch one bounded worker per declared GPU, for example in two tmux sessions. Each worker waits for an existing research lease and then requires two idle GPU observations. Existing users' processes are neither stopped nor treated as available capacity. Work rotates through suites and tasks for seed 42 before seeds 43 and 44; a failed gate skips that cell's dependants, while unrelated cells continue:
+Launch one bounded worker per declared GPU, for example in two tmux sessions. Each worker waits for an existing research lease and then requires two idle GPU observations. Existing users' processes are neither stopped nor treated as available capacity. Work rotates through suites and tasks for seed 42 before seeds 43 and 44:
 
 .. code-block:: bash
 
@@ -122,6 +122,10 @@ Launch one bounded worker per declared GPU, for example in two tmux sessions. Ea
      --root "$RLT_PI05_MATRIX" --gpu 1 --hours 12
 
 The twelve-hour limit includes lease and GPU waits. It is an execution window, not a promise to finish 120 cells overnight. Each worker owns ``queue-gpu0`` or ``queue-gpu1`` and refuses to overwrite it; interrupted stages retain their artifacts and require explicit recovery before another run. The existing single-task launcher remains independent. Keep declared runtime code and plans unchanged until the workers exit.
+
+Before model loading, each worker runs a 90-second bounded W&B authentication and CUDA arithmetic check under its GPU lease. The result is saved in ``runtime-gpuN/manifest.json``; it contains no policy evaluation. New matrix plans set ``stop_on_failure: true``: any failed or timed-out job, including a development gate, halts that worker as ``halted_failure`` and leaves later jobs ``not_started_halted_failure`` for review. Legacy plans retain dependency-only skipping unless they explicitly enable this option. An explicit error in an incomplete job manifest also triggers process-group cleanup while the child is still running, so logger shutdown retries cannot consume the remaining stage budget.
+
+If authentication fails, check the proxy inherited by the actual tmux worker, not only the current shell. When direct connectivity is available and the proxy is obsolete, unset its uppercase and lowercase environment variables for that worker explicitly. Keep online logging required. If NVIDIA reports a driver/library mismatch after a system update, coordinate the host repair; do not reboot a shared training server automatically. A process-local library override must match the loaded kernel driver and pass CUDA and rendering checks before use. Record any override and preserve failed attempts, checkpoint hashes and case manifests when preparing a recovery; an infrastructure failure with zero episodes is not a zero-success result.
 
 Inspect ``queue-gpu0/status.json`` and ``queue-gpu1/status.json`` for live scheduling. The following CPU-only command rechecks each cell's provenance and matched resets, including physical-state consistency across training seeds:
 

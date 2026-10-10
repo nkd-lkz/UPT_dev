@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -78,10 +79,32 @@ def prepare_matrix(
         "selection": "Final-budget checkpoints only. Held-out outcomes are not used for hyperparameters, task selection or early stopping.",
         "cells": [],
     }
-    plans = {
-        gpu: {"gpu": gpu, "hours": 12, "wait_for_lease": True, "jobs": []}
-        for gpu in gpus
-    }
+    plans = {}
+    for gpu in gpus:
+        plans[gpu] = {
+            "gpu": gpu,
+            "hours": 12,
+            "wait_for_lease": True,
+            "stop_on_failure": True,
+            "jobs": [
+                {
+                    "name": "runtime_check",
+                    "cwd": str(repo),
+                    "argv": [
+                        sys.executable,
+                        "-m",
+                        "toolkits.rlt.pi05_matrix",
+                        "runtime-check",
+                        "--root",
+                        str(root),
+                        "--gpu",
+                        str(gpu),
+                    ],
+                    "timeout_seconds": 90,
+                    "manifest": str(root / f"runtime-gpu{gpu}" / "manifest.json"),
+                }
+            ],
+        }
     for seed in TRAINING_SEEDS:
         for task in range(10):
             for suite_index, suite in enumerate(SUITE_HORIZONS):
@@ -170,6 +193,58 @@ def validate_matrix(root: Path) -> dict:
         if file_hash(root / relative) != expected:
             raise ValueError(f"Declared plan changed: {relative}")
     return matrix
+
+
+def runtime_check(root: Path, gpu: int) -> None:
+    """Check W&B authentication and CUDA inside the queue's exclusive GPU lease."""
+    matrix = validate_matrix(root)
+    if gpu not in matrix["gpus"]:
+        raise ValueError("GPU is outside the declared authorized set")
+    output = root / f"runtime-gpu{gpu}"
+    output.mkdir(exist_ok=False)
+    report = {
+        "complete": False,
+        "gpu": gpu,
+        "policy_episodes": 0,
+        "ld_preload": os.environ.get("LD_PRELOAD", ""),
+        "proxy_variables_present": [
+            key
+            for key in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            )
+            if os.environ.get(key)
+        ],
+    }
+    try:
+        import wandb
+
+        if not wandb.Api(timeout=10).viewer:
+            raise RuntimeError("W&B authentication failed")
+        report["wandb_authenticated"] = True
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        import torch
+
+        x = torch.ones(128, 128, device="cuda")
+        result = x @ x
+        torch.cuda.synchronize()
+        if result[0, 0].item() != 128:
+            raise RuntimeError("CUDA arithmetic check failed")
+        report.update(
+            complete=True,
+            exit_code=0,
+            gpu_name=torch.cuda.get_device_name(0),
+            cuda=torch.version.cuda,
+        )
+    except Exception as error:
+        report.update(error=repr(error), exit_code=1)
+        raise
+    finally:
+        write_json(output / "manifest.json", report)
 
 
 def aggregate_cells(cells: list[dict], seeds: list[int]) -> dict:
@@ -331,7 +406,9 @@ def preflight_resets(root: Path, output: Path) -> None:
 def main() -> None:
     """Prepare, run, or inspect the fixed matrix without overwriting past runs."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "run", "status", "preflight"))
+    parser.add_argument(
+        "mode", choices=("prepare", "run", "status", "preflight", "runtime-check")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--source", type=Path)
@@ -365,6 +442,8 @@ def main() -> None:
         print(json.dumps(summarize_matrix(args.root), indent=2))
     elif args.mode == "preflight":
         preflight_resets(args.root, args.root / "reset-preflight")
+    elif args.mode == "runtime-check":
+        runtime_check(args.root, args.gpu)
     else:
         matrix = validate_matrix(args.root)
         if args.gpu not in matrix["gpus"]:

@@ -5,6 +5,7 @@
 import fcntl
 import json
 import sys
+import time
 
 import pytest
 
@@ -39,6 +40,7 @@ def test_queue_requires_explicit_gpu_and_finite_deadline(tmp_path):
         {"hours": 0},
         {"hours": 13},
         {"hours": float("nan")},
+        {"stop_on_failure": "false"},
     ):
         with pytest.raises(ValueError):
             validate_plan({**plan, **changes})
@@ -137,3 +139,47 @@ def test_waiting_for_owned_lease_obeys_deadline_without_starting_job(tmp_path):
             with pytest.raises(BlockingIOError):
                 fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert not list((tmp_path / "waiting").glob("*.log"))
+
+
+def test_queue_stops_independent_work_after_failure_when_requested(tmp_path):
+    result = run_plan(
+        {
+            "gpu": 0,
+            "hours": 0.01,
+            "stop_on_failure": True,
+            "jobs": [
+                job(tmp_path, "fails", "raise SystemExit(1)"),
+                job(tmp_path, "never", "raise AssertionError('must not run')"),
+            ],
+        },
+        tmp_path / "queue",
+    )
+    assert result["state"] == "halted_failure"
+    assert result["failed_job"] == "fails"
+    assert result["jobs"]["never"]["state"] == "not_started_halted_failure"
+    assert not (tmp_path / "queue/never.log").exists()
+
+
+def test_queue_reaps_failed_manifest_even_if_child_shutdown_hangs(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    code = (
+        "import json,time; from pathlib import Path; "
+        f"Path({str(manifest)!r}).write_text(json.dumps("
+        "{'complete': False, 'error': 'W&B unavailable'})); time.sleep(60)"
+    )
+    started = time.monotonic()
+    result = run_plan(
+        {
+            "gpu": 0,
+            "hours": 0.01,
+            "stop_on_failure": True,
+            "jobs": [
+                job(tmp_path, "fails", code, manifest=str(manifest), timeout_seconds=30)
+            ],
+        },
+        tmp_path / "queue",
+    )
+    assert time.monotonic() - started < 10
+    assert result["state"] == "halted_failure"
+    assert result["jobs"]["fails"]["error"] == "W&B unavailable"
+    assert result["jobs"]["fails"]["state"] == "failed"

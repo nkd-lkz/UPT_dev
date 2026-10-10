@@ -33,8 +33,11 @@ def test_matrix_declares_all_tasks_seeds_and_paired_budgets_before_running(tmp_p
         plan = json.loads((root / "plans" / f"gpu{gpu}.json").read_text())
         validate_plan(plan)
         assert plan["wait_for_lease"] is True
-        assert len(plan["jobs"]) == 60 * 13
-        names = {j["name"] for j in plan["jobs"]}
+        assert plan["stop_on_failure"] is True
+        assert len(plan["jobs"]) == 60 * 13 + 1
+        assert plan["jobs"][0]["name"] == "runtime_check"
+        assert plan["jobs"][0]["timeout_seconds"] == 90
+        names = {j["name"] for j in plan["jobs"][1:]}
         assert not all_names & names
         all_names.update(names)
         assert {c["suite"] for c in matrix["cells"] if c["gpu"] == gpu} == set(
