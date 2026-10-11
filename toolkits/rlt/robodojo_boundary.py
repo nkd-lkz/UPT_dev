@@ -54,7 +54,11 @@ def encode_observation(observation: Mapping) -> dict:
 
 
 def decode_actions(chunk: np.ndarray, *, semantics: str, horizon: int) -> list[dict]:
-    """Validate the whole physical action chunk, then select its execution prefix."""
+    """Validate a physical chunk and clamp grippers as the native evaluator does.
+
+    Arm joints remain absolute radians. Finite gripper predictions saturate to
+    [0, 1], matching RoboDojo's ``take_action_batch``; no arm values are clipped.
+    """
     if semantics != ACTION_SEMANTICS:
         raise ValueError("Require physical absolute joint actions, not LIBERO deltas")
     chunk = np.asarray(chunk, dtype=np.float32)
@@ -64,17 +68,16 @@ def decode_actions(chunk: np.ndarray, *, semantics: str, horizon: int) -> list[d
         )
     if type(horizon) is not int or not 1 <= horizon <= len(chunk):
         raise ValueError("Invalid action execution horizon")
-    if (
-        not np.isfinite(chunk).all()
-        or ((chunk[:, [6, 13]] < 0) | (chunk[:, [6, 13]] > 1)).any()
-    ):
-        raise ValueError("Require finite actions and gripper openings in [0, 1]")
+    if not np.isfinite(chunk).all():
+        raise ValueError("Require finite arm and gripper actions")
     result = []
     for row in chunk[:horizon]:
         offset, command = 0, {}
         for name, dim in FIELDS:
             command[name] = row[offset : offset + dim].copy()
             offset += dim
+        for name in ("left_ee_joint_state", "right_ee_joint_state"):
+            command[name] = np.clip(command[name], 0.0, 1.0)
         result.append(command)
     return result
 

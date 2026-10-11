@@ -41,19 +41,33 @@ def test_rgb_channels_state_order_and_privileged_info_filtering():
         encode_observation(obs)
 
 
-def test_native_commands_reject_libero_actions_and_never_clip_bad_units():
+def test_native_commands_preserve_joint_radians_and_clamp_only_grippers():
     kwargs = {"semantics": ACTION_SEMANTICS, "horizon": 2}
     commands = np.zeros((3, 14), dtype=np.float32)
     commands[:, 0] = 2.5  # Joint radians are not normalized [-1, 1] deltas.
+    commands[:, 6] = -0.1
+    commands[:, 7] = -2.5
+    commands[:, 13] = 1.1
+    original = commands.copy()
     result = decode_actions(commands, **kwargs)
     assert len(result) == 2 and result[0]["left_arm_joint_state"][0] == 2.5
+    assert result[0]["right_arm_joint_state"][0] == -2.5
+    assert result[0]["left_ee_joint_state"][0] == 0.0
+    assert result[0]["right_ee_joint_state"][0] == 1.0
+    np.testing.assert_array_equal(commands, original)
     with pytest.raises(ValueError, match="LIBERO"):
         decode_actions(np.zeros((10, 7)), **kwargs)
-    commands[-1, 6] = 1.1
-    with pytest.raises(ValueError, match="gripper"):
-        decode_actions(commands, **kwargs)  # Validate the unexecuted suffix too.
     with pytest.raises(ValueError, match="deltas"):
         decode_actions(np.zeros((3, 14)), horizon=2, semantics="delta_ee")
+
+
+@pytest.mark.parametrize("column", [0, 6, 7, 13])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_nonfinite_actions_rejected_even_in_unexecuted_suffix(column, value):
+    commands = np.zeros((3, 14), dtype=np.float32)
+    commands[-1, column] = value
+    with pytest.raises(ValueError, match="finite"):
+        decode_actions(commands, semantics=ACTION_SEMANTICS, horizon=2)
 
 
 def test_batch_reordering_shrinking_reset_and_checkpoint_guard():

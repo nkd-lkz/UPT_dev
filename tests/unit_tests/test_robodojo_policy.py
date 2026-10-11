@@ -123,15 +123,20 @@ class BatchEnv:
         self.ticks.append(list(indices))
 
 
-def test_native_batch_loop_reorders_shrinks_and_refreshes_observations():
+@pytest.mark.parametrize("native_keywords", [False, True])
+def test_native_batch_loop_reorders_shrinks_and_refreshes_observations(native_keywords):
     policy, env = model(), BatchEnv()
-    eval_one_episode_batch(env, Client(policy))
+    if native_keywords:
+        eval_one_episode_batch(TASK_ENV=env, model_client=Client(policy))
+    else:
+        eval_one_episode_batch(env, Client(policy))
     assert env.ticks == [[8, 2], [2], [2], [2]]
     assert [o["state"][0] for o in policy.backend.inputs] == [8, 2, 2]
     assert all(set(o) == {"state", "images", "prompt"} for o in policy.backend.inputs)
 
 
-def test_single_episode_stops_mid_chunk_and_reset_invalidates_inputs():
+@pytest.mark.parametrize("native_keywords", [False, True])
+def test_single_episode_stops_mid_chunk_and_reset_invalidates_inputs(native_keywords):
     class SingleEnv:
         count = 0
 
@@ -147,7 +152,10 @@ def test_single_episode_stops_mid_chunk_and_reset_invalidates_inputs():
             self.count += 1
 
     policy, env = model(), SingleEnv()
-    eval_one_episode(env, Client(policy))
+    if native_keywords:
+        eval_one_episode(TASK_ENV=env, model_client=Client(policy))
+    else:
+        eval_one_episode(env, Client(policy))
     assert env.count == 1
     with pytest.raises(ValueError, match="update_obs"):
         policy.get_action()
@@ -196,7 +204,8 @@ def test_invalid_model_contract_does_not_attempt_backend_loading():
     not os.environ.get("RP_XPOLICYLAB_SOURCE"),
     reason="Optional pinned XPolicyLab source and WS dependencies required",
 )
-def test_native_websocket_transport_roundtrip(monkeypatch):
+@pytest.mark.parametrize("encoded", [False, True])
+def test_native_websocket_transport_roundtrip(monkeypatch, encoded):
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     source = Path(os.environ["RP_XPOLICYLAB_SOURCE"])
@@ -204,8 +213,22 @@ def test_native_websocket_transport_roundtrip(monkeypatch):
     monkeypatch.syspath_prepend(str(source))
     from client_server.ws.model_client import WsModelClient
     from client_server.ws.model_server import PolicyServer, PolicyServerConfig
+    from XPolicyLab.utils.process_data import encode_image_bit
 
     policy = model()
+
+    class CameraEnv(BatchEnv):
+        def get_obs_batch(self, indices):
+            observations = super().get_obs_batch(indices)
+            for obs in observations:
+                for index, camera in enumerate(obs["vision"].values()):
+                    camera["color"][:] = [230, 50, 5]
+                    if encoded:
+                        payload = encode_image_bit(camera["color"])
+                        camera["color"] = (
+                            payload if index % 2 else np.frombuffer(payload, np.uint8)
+                        )
+            return observations
 
     async def run():
         server = PolicyServer(policy, PolicyServerConfig(host="127.0.0.1", port=0))
@@ -223,9 +246,12 @@ def test_native_websocket_transport_roundtrip(monkeypatch):
                 max_connect_seconds=5,
                 close_timeout_s=1,
             ) as client:
-                env = BatchEnv()
-                eval_one_episode_batch(env, client)
+                env = CameraEnv()
+                eval_one_episode_batch(TASK_ENV=env, model_client=client)
                 assert env.ticks == [[8, 2], [2], [2], [2]]
+                for obs in policy.backend.inputs:
+                    for rgb in obs["images"].values():
+                        np.testing.assert_allclose(rgb[:, 0, 0], [230, 50, 5], atol=3)
 
         try:
             await asyncio.wait_for(asyncio.to_thread(request), timeout=20)

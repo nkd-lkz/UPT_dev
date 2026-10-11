@@ -173,8 +173,9 @@ class Model:
         return self.boundary.get_action_batch(env_idx_list)
 
 
-def eval_one_episode(task_env: Any, model_client: Any) -> None:
-    """Execute chunks in the native single-environment evaluator until termination."""
+def eval_one_episode(TASK_ENV: Any, model_client: Any) -> None:
+    """Execute chunks until termination; TASK_ENV is the native keyword name."""
+    task_env = TASK_ENV
     model_client.call(func_name="reset")
     while not task_env.is_episode_end():
         model_client.call(func_name="update_obs", obs=task_env.get_obs())
@@ -187,8 +188,9 @@ def eval_one_episode(task_env: Any, model_client: Any) -> None:
                 break
 
 
-def eval_one_episode_batch(task_env: Any, model_client: Any) -> None:
-    """Keep chunks attached to their IDs as native environments finish mid-chunk."""
+def eval_one_episode_batch(TASK_ENV: Any, model_client: Any) -> None:
+    """Keep chunks aligned with active IDs; accept the native TASK_ENV keyword."""
+    task_env = TASK_ENV
     model_client.call(func_name="reset")
     while not task_env.is_episode_end():
         indices = task_env.get_running_env_idx_list()

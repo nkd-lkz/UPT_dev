@@ -182,6 +182,10 @@ LIBERO 试跑通过后，先迁移观测和动作接口，再增加训练。`Rob
 
 评测适配器已在 ``toolkits/rlt/robodojo_policy.py`` 提供 XPolicyLab 的 ``Model`` API 和原生单环境、批量环境执行循环。WS server 先解码图像，再交给适配器；每回合先 reset，随后按明确的环境 ID 更新观测，再请求活跃环境的动作。适配器过滤仿真特权字段，拒绝旧观测和不兼容动作，并在环境于动作 chunk 中途结束时保持动作与环境 ID 对应。backend 必须无状态；当前未实现各环境独立的 memory。
 
+原生评测器通过关键字调用执行循环：``eval_one_episode(TASK_ENV=env, model_client=client)`` 或 ``eval_one_episode_batch(TASK_ENV=env, model_client=client)``。替换回调时须保留这两个参数名，并同时测试关键字调用和位置参数调用；仅检查位置参数可能掩盖接口不匹配，导致仿真在执行第一个动作前失败。
+
+执行动作前，先检查完整预测 chunk 为十四维且所有数值有限，再选取要执行的前缀。仅将两个夹爪开度裁剪到 [0, 1]，与原生评测器转换执行器命令前的处理一致；机械臂关节弧度保持不变。这样既保留原生控制语义，也不会将夹爪预测越界误判为动作头不兼容。即使非有限数值只出现在未执行的后缀中，也会拒绝该 chunk。
+
 从 ``evaluations/robodojo/arx_x5.yaml`` 开始，默认任务为 ``stack_bowls``，采用原生初态 seed 0、25 回合和单环境。使用独立的 RoboDojo checkout 及固定版本的 XPolicyLab 子模块，填写 runtime 和 checkpoint 的绝对路径。原生 OpenPI ARX X5 reference 权重选择 ``openpi_reference``；加载器只读取明确的 checkpoint 目录及其中的 ``assets/<normalization_id>/norm_stats.json``，不会自动选择最新权重。兼容的 RLT backend 可通过 ``backend: factory`` 和可信的本地 ``backend_factory: module:function`` 接入：函数接收 policy 配置，返回的对象通过 ``infer(observation)["actions"]`` 输出反归一化后的 [H, 14] 数组。这条路径仍需提供 ARX X5 RLT 权重加载器及兼容的训练权重，不能使用现有 LIBERO RLT 动作头。
 
 官方数据仓库提供了原生 ARX X5 Pi0.5 reference，路径为 ``ckpt/RoboDojo/Pi_05/RoboDojo-sim-arx_x5-joint-0/59999``；它不是 RLT actor/critic 权重。下载工具将 ``RoboDojo-Benchmark/RoboDojo`` 固定到版本 ``35efbc7dedfdbeeb6e95fb749bd885d73d483e41``，选取按文件名数字排序的前 25 个 ``stack_bowls`` 初态、X5 机器人、碗与相机支架、场景材质，以及 reference 参数和归一化文件，不下载训练数据和 optimizer state。本次清单包含 372 个文件，共 13.275 GB。先使用新路径生成清单，再下载：
