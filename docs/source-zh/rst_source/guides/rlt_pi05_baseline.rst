@@ -238,6 +238,10 @@ runtime、资产和兼容权重齐备且已明确安排 GPU 评测后，在该�
 
 该操作只新建 ``XPolicyLab/policy/RLT_Pi05``，目录已存在则拒绝执行；不会启动 server、仿真或训练。计划中的 ``commands`` 包含工作目录、环境变量及 server/client 两组参数列表。两个进程均使用记录的环境，先启动 server，再启动原生 client；server 只监听本机回环地址，选定的物理 GPU 经屏蔽后对应 client 的 device 0。使用新的 run ID，不隐式恢复旧结果。不同冻结模型配置使用独立 checkout/plugin，审计会拒绝插件变更。
 
+记录的环境会清空这两个子进程的 ``LD_LIBRARY_PATH``，并关闭 JAX 显存预分配，使 policy 与仿真器共用指定 GPU。本次机器继承的 CUDA 12.1 路径曾导致原生 JAX 编译段错误；仅清除该路径后，GPU 运算即通过，无须修改系统动态库。CUDA device 0 是屏蔽后的设备，而 Isaac 的 Vulkan 渲染使用物理编号，因此 client 明确将渲染设备设为 ``gpu``，关闭多卡渲染，并将物理计算保留在 CUDA device 0。须检查仿真器的 GPU 表，才能确认实际分配正确。
+
+选择空闲的本机回环端口，并确认端口属于本次启动的 server 后，再连接 client。Isaac 首次启动可能要求接受 NVIDIA Omniverse 许可协议，须由操作者阅读并同意后才能无人值守执行。合成输入上的 policy 推理通过，只能证明权重加载及输出 shape 正确，不代表已经完成渲染回合或测得任务成功率。
+
 真实评测完成后，对计划中明确记录的结果路径执行审计：
 
 .. code-block:: bash

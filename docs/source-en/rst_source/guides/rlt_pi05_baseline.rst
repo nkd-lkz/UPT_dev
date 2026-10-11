@@ -238,6 +238,10 @@ When runtime, assets and compatible weights are available and GPU evaluation is 
 
 This only creates ``XPolicyLab/policy/RLT_Pi05`` and refuses an existing directory. It does not start a server, simulator or training. The plan's ``commands`` contains the working directory, environment and separate server/client argument lists. Apply the recorded environment to both processes, start the server first, then the native client. The server binds only to loopback. GPU masking maps the selected physical GPU to client device 0. Use a new run ID rather than silently resuming an earlier result. Prepare a separate checkout/plugin for a different frozen model configuration; the audit rejects plugin changes.
 
+The recorded environment clears ``LD_LIBRARY_PATH`` for these child processes and disables JAX memory preallocation so the policy and simulator can share their assigned GPU. An inherited CUDA 12.1 path caused native JAX compilation to segfault on the inspected host; clearing it allowed GPU arithmetic to pass without changing system libraries. CUDA device 0 is the masked device, whereas Isaac's Vulkan renderer uses the physical index. The client therefore explicitly selects ``gpu`` for rendering, disables multi-GPU rendering, and keeps physics on CUDA device 0. Check the simulator's GPU table before treating placement as verified.
+
+Choose an unused loopback port and verify that the newly started server owns it before connecting the client. Isaac may request acceptance of the NVIDIA Omniverse license at first launch; the operator must review and accept it before unattended execution. A successful synthetic policy inference establishes weight loading and output shape only. It is not a rendered episode or a task-success measurement.
+
 After a real evaluation, audit the explicitly recorded result path:
 
 .. code-block:: bash

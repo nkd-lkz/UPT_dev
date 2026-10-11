@@ -200,6 +200,9 @@ def _commands(config: dict) -> dict:
         "EVAL_NUM": str(config["episodes"]),
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
+        # Use the isolated runtime's CUDA libraries, not a login-shell toolkit.
+        "LD_LIBRARY_PATH": "",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     }
     return {
         "cwd": str(root),
@@ -241,6 +244,10 @@ def _commands(config: dict) -> dict:
             config["group"],
             "--headless",
             "--enable_cameras",
+            "--kit_args",
+            # Vulkan uses physical indices; CUDA uses the masked logical index.
+            f"--/renderer/activeGpu={config['gpu']} "
+            "--/renderer/multiGpu/enabled=false --/physics/cudaDevice=0",
         ],
     }
 

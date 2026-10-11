@@ -109,6 +109,20 @@ def test_missing_runtime_and_backend_produce_blocked_report(config):
     assert len(report["errors"]) == 2
 
 
+def test_nonzero_gpu_separates_vulkan_and_masked_cuda_devices(config):
+    config["gpu"] = 2
+    commands = evaluation.prepare(config)["commands"]
+    assert commands["env"]["CUDA_VISIBLE_DEVICES"] == "2"
+    assert commands["env"]["LD_LIBRARY_PATH"] == ""
+    assert commands["env"]["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    client = commands["client_argv"]
+    assert client[client.index("--device_id") + 1] == "0"
+    flags = client[client.index("--kit_args") + 1].split()
+    assert "--/renderer/activeGpu=2" in flags
+    assert "--/renderer/multiGpu/enabled=false" in flags
+    assert "--/physics/cudaDevice=0" in flags
+
+
 def test_runtime_inventory_never_claims_simulator_verified(config):
     # This uses the real test Python, which need not contain Isaac or OpenPI.
     result = evaluation.runtime_inventory(config)
