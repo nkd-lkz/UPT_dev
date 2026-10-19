@@ -4,13 +4,18 @@
 
 import json
 import os
+import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 import yaml
 
 from toolkits.rlt import robodojo_eval as evaluation
+from toolkits.rlt import robodojo_resume as recovery
+from toolkits.rlt import robodojo_runner as runner
 
 
 @pytest.fixture
@@ -83,6 +88,257 @@ def write_result(plan, *, outcomes=((0, True, 1.0), (1, False, 0.5))):
     }
     path.write_text(json.dumps(result))
     return path
+
+
+@pytest.fixture
+def interrupted_run(config, tmp_path):
+    config["episodes"] = 3
+    config["gpu"] = 2
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        config["port"] = reservation.getsockname()[1]
+    root = Path(config["robodojo_root"])
+    (root / "Assets/Eval_Layout/RoboDojo/arx_x5/0/stack_bowls_20.json").write_text("{}")
+    plan = evaluation.prepare(config)
+    result_path = write_result(plan)
+    result = evaluation.read_json(result_path)
+    manifest = {
+        "run_id": config["run_id"],
+        "save_dir": str(result_path.parent.relative_to(root)),
+        "task_name": config["task"],
+        "policy_name": config["policy"]["policy_name"],
+        "config_name": config["policy"]["env_cfg_type"],
+        "eval_seed": config["seed"],
+        "additional_info": config["group"],
+        "success_nums": 1,
+        "fail_nums": 1,
+        "unstable_nums": 0,
+        "total_score": 1.5,
+        "completed_layout_ids": [0, 1],
+        "abandoned_layout_ids": [],
+        "details": result["details"],
+        "restart_count": 0,
+    }
+    manifest_path = result_path.parent.parent / f"_resume_{config['run_id']}.json"
+    manifest_path.write_text(json.dumps(manifest))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+    return plan_path, result_path, manifest_path
+
+
+def save_receipt(plan_path):
+    path = plan_path.with_name("recovery.json")
+    path.write_text(json.dumps(recovery.prepare_resume(plan_path)))
+    return path
+
+
+def test_resume_keeps_completed_failures_and_leaves_artifacts_untouched(
+    interrupted_run,
+):
+    originals = {path: path.read_bytes() for path in interrupted_run}
+    receipt_path = save_receipt(interrupted_run[0])
+    report = recovery.verify_resume(receipt_path)
+    assert report["completed_layout_ids"] == [0, 1]
+    assert report["remaining_layout_ids"] == [2]
+    assert report["success_rate"] is None and not report["gpu_started"]
+    assert originals == {path: path.read_bytes() for path in interrupted_run}
+    partial = recovery.audit_continuation(receipt_path)
+    assert partial["status"] == "incomplete" and partial["success_rate"] is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("run_id", "another_run"),
+        ("eval_seed", True),
+        ("save_dir", "/tmp/unrelated-result"),
+        ("success_nums", 2),
+        ("fail_nums", True),
+        ("unstable_nums", 1),
+        ("total_score", float("nan")),
+        ("restart_count", -1),
+        ("completed_layout_ids", [0, 0]),
+        ("completed_layout_ids", [0, True]),
+        ("abandoned_layout_ids", [2]),
+        ("details", {}),
+    ],
+)
+def test_resume_rejects_inconsistent_native_manifest(interrupted_run, field, value):
+    plan_path, _, manifest_path = interrupted_run
+    data = evaluation.read_json(manifest_path)
+    data[field] = value
+    manifest_path.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        recovery.prepare_resume(plan_path)
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_resume_rechecks_all_original_bytes_after_waiting(interrupted_run, index):
+    receipt_path = save_receipt(interrupted_run[0])
+    path = interrupted_run[index]
+    path.write_text(path.read_text() + "\n")
+    with pytest.raises(ValueError, match="Changed since"):
+        recovery.verify_resume(receipt_path)
+
+
+def test_resume_rechecks_layout_hashes(interrupted_run):
+    receipt_path = save_receipt(interrupted_run[0])
+    plan = evaluation.read_json(interrupted_run[0])
+    Path(plan["layouts"][2]["path"]).write_text('{"changed": true}')
+    with pytest.raises(ValueError, match="partial evaluation"):
+        recovery.verify_resume(receipt_path)
+
+
+def test_resume_rejects_modified_commands(interrupted_run):
+    plan_path, _, _ = interrupted_run
+    plan = evaluation.read_json(plan_path)
+    plan["commands"]["env"]["ROBODOJO_RUN_ID"] = "different_run"
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="commands"):
+        recovery.prepare_resume(plan_path)
+
+
+@pytest.mark.parametrize("replace_failure", [False, True])
+def test_continuation_requires_complete_set_and_preserves_old_outcomes(
+    interrupted_run, replace_failure
+):
+    plan_path, result_path, manifest_path = interrupted_run
+    receipt_path = save_receipt(plan_path)
+    result = evaluation.read_json(result_path)
+    result["details"]["2"] = {"layout_id": 2, "success": True, "score": 1.0}
+    if replace_failure:
+        result["details"]["1"].update(success=True, score=1.0)
+    rows = result["details"].values()
+    result.update(
+        eval_time=3,
+        success_rate=sum(row["success"] for row in rows) / 3,
+        score=100 * sum(row["score"] for row in rows) / 3,
+    )
+    result_path.write_text(json.dumps(result))
+    manifest_path.unlink()  # Native evaluator removes it after normal completion.
+    report = recovery.audit_continuation(receipt_path)
+    assert report["preserved_episodes"] == 2
+    if replace_failure:
+        assert report["status"] == "failed" and report["success_rate"] is None
+        assert "outcome changed" in report["errors"][0]
+    else:
+        assert report["status"] == "passed" and report["success_rate"] == 2 / 3
+
+
+def test_receipt_cannot_relabel_remaining_layouts(interrupted_run):
+    path = save_receipt(interrupted_run[0])
+    data = evaluation.read_json(path)
+    data["remaining_layout_ids"] = [1, 2]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="partition"):
+        recovery.verify_resume(path)
+
+
+def test_runner_refuses_implicit_resume(interrupted_run):
+    with pytest.raises(ValueError, match="explicit recovery"):
+        runner.validate_launch(interrupted_run[0])
+    runner.validate_launch(interrupted_run[0], save_receipt(interrupted_run[0]))
+
+
+def test_runner_requires_completed_outcomes_not_just_exit_zero(interrupted_run):
+    plan = evaluation.read_json(interrupted_run[0])
+    with pytest.raises(RuntimeError, match="incomplete"):
+        runner.verify_result(plan)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        runner.verify_result(plan, save_receipt(interrupted_run[0]))
+
+
+def test_runner_lease_cannot_be_shared_and_is_released_on_close(tmp_path):
+    path = tmp_path / "gpu.lock"
+    with path.open("a") as first, path.open("a") as second:
+        assert runner.try_acquire_lease(first)
+        assert not runner.try_acquire_lease(second)
+        first.close()
+        assert runner.try_acquire_lease(second)
+
+
+def test_runner_listener_requires_process_ownership():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        assert runner.owns_listener(os.getpid(), listener.getsockname()[1])
+        assert not runner.owns_listener(os.getpid(), 0)
+
+
+def test_renderer_mapping_uses_unique_kit_uuid():
+    table = (
+        "| 0   | NVIDIA L40 |\n|     | 26b5 | aaaa0000.. |\n"
+        "| 2   | NVIDIA L40 |\n|     | 26b5 | cccc0000.. |\n"
+    )
+    assert runner.renderer_index(table, "GPU-cccc0000-dddd") == 2
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        runner.renderer_index(table, "GPU-bbbb0000-dddd")
+
+
+@pytest.mark.parametrize("stop_mode", ["STOP", "SIGTERM"])
+def test_busy_runner_waits_without_launching_children_and_can_stop(
+    interrupted_run, tmp_path, stop_mode
+):
+    # Use a real lock and a separate CLI process; no simulator or GPU is invoked.
+    lock_path = tmp_path / "rlt-research-gpu2.lock"
+    receipt_path = save_receipt(interrupted_run[0])
+    output = tmp_path / "run"
+    # The subprocess checks real native Git revisions; this fixture's fake Git
+    # boundary is injected only for this integration test of process ownership.
+    program = (
+        "import runpy; from toolkits.rlt import robodojo_eval; "
+        "robodojo_eval._source_check = lambda *a: None; "
+        "runpy.run_module('toolkits.rlt.robodojo_runner', run_name='__main__')"
+    )
+    with lock_path.open("a") as lease:
+        assert runner.try_acquire_lease(lease)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                program,
+                "--plan",
+                str(interrupted_run[0]),
+                "--resume-receipt",
+                str(receipt_path),
+                "--output",
+                str(output),
+                "--wait-idle",
+                "--lease-directory",
+                str(tmp_path),
+                "--vulkaninfo",
+                "/usr/bin/true",
+                "--renderer-table",
+                str(interrupted_run[0]),
+            ],
+            env=dict(os.environ, OMNI_KIT_ACCEPT_EULA="YES", CUDA_VISIBLE_DEVICES=""),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while not (output / "status.json").exists():
+                if process.poll() is not None:
+                    pytest.fail(process.communicate()[1])
+                if time.monotonic() > deadline:
+                    pytest.fail("Runner failed to record waiting state")
+                time.sleep(0.05)
+            status = evaluation.read_json(output / "status.json")
+            assert status["state"] == "waiting_lease"
+            assert status["wait_deadline"] is None
+            assert "server_pid" not in status and "client_pid" not in status
+            assert not (output / "server.log").exists()
+            if stop_mode == "STOP":
+                (output / "STOP").touch()
+            else:
+                process.terminate()
+            process.communicate(timeout=10)
+            assert evaluation.read_json(output / "status.json")["state"] == "stopped"
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
 
 def test_preparation_matches_native_numeric_layout_order_without_gpu(config):

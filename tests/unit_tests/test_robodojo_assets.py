@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned artifact selection, download integrity, and CPU-only provisioning."""
 
+import fcntl
 import hashlib
 from pathlib import Path
 
 import pytest
 
 from toolkits.rlt import robodojo_assets as assets
+from toolkits.rlt import robodojo_task_assets as task_assets
 
 
 def record(path="Assets/Robots/x5/model.usd", content=b"robot"):
@@ -236,3 +238,58 @@ def test_concurrent_download_refuses_existing_lock(tmp_path):
     (tmp_path / ".robodojo-download.lock").write_text("123")
     with pytest.raises(FileExistsError):
         assets.download(manifest(), tmp_path, max_bytes=1000)
+
+
+def selected_task_manifest():
+    files = []
+    for prefix in task_assets.OBJECT_PREFIXES:
+        files.append(record(prefix + "/fixture"))
+    for task in task_assets.TASKS:
+        for index in range(task_assets.EVAL_LAYOUTS_PER_TASK):
+            files.append(record(f"{assets.LAYOUTS}/{task}_{index}.json"))
+    return {
+        "schema": "robodojo-selected-task-assets-v1",
+        "repo": assets.REPO,
+        "revision": assets.REVISION,
+        "tasks": list(task_assets.TASKS),
+        "protected_eval_layouts_per_task": task_assets.EVAL_LAYOUTS_PER_TASK,
+        "files": files,
+    }
+
+
+def test_selected_task_bundle_requires_every_object_group_and_layout():
+    value = selected_task_manifest()
+    assert task_assets.validate_manifest(value, max_bytes=10_000) > 0
+    value["files"].pop()
+    with pytest.raises(ValueError, match="Incomplete protected layouts"):
+        task_assets.validate_manifest(value, max_bytes=10_000)
+
+
+def test_selected_task_bundle_rejects_unselected_task():
+    value = selected_task_manifest()
+    value["files"].append(record(f"{assets.LAYOUTS}/stack_bowls_0.json"))
+    with pytest.raises(ValueError, match="Unexpected"):
+        task_assets.validate_manifest(value, max_bytes=10_000)
+
+
+def test_selected_task_download_reuses_stale_lock(tmp_path, monkeypatch):
+    value = selected_task_manifest()
+    lock = tmp_path / ".robodojo-selected-task-download.lock"
+    lock.write_text("dead-pid")
+    monkeypatch.setattr(
+        task_assets,
+        "download_file",
+        lambda root, item: dict(item, sha256=item["digest"]),
+    )
+    report = task_assets.download(value, tmp_path, max_bytes=10_000, workers=1)
+    assert report["complete"] and not lock.exists()
+
+
+def test_selected_task_download_refuses_live_lock(tmp_path):
+    lock = tmp_path / ".robodojo-selected-task-download.lock"
+    with lock.open("a+") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="owns the bundle"):
+            task_assets.download(
+                selected_task_manifest(), tmp_path, max_bytes=10_000, workers=1
+            )

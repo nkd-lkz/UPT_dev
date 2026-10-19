@@ -9,14 +9,100 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from toolkits.rlt.robodojo_boundary import ACTION_SEMANTICS, CAMERAS, FIELDS
+from toolkits.rlt.robodojo_collect import (
+    select_collection_layouts,
+    select_reserved_layouts,
+)
+from toolkits.rlt.robodojo_layouts import digest, verify
+from toolkits.rlt.robodojo_learning import ArxLearner, ArxNormalizer, load_rollout_rows
+from toolkits.rlt.robodojo_online import (
+    action_deviation,
+    apply_frozen_action_adapter,
+    attach_successor,
+    checkpoint,
+    disallowed_gpu_processes,
+    load_reference_replay,
+    prediction_arrays,
+    process_details,
+    renderer_failed,
+    restore_online_checkpoint,
+    select_layout,
+)
 from toolkits.rlt.robodojo_policy import (
     Model,
     eval_one_episode,
     eval_one_episode_batch,
     validate_normalization,
 )
+
+
+def test_collection_layout_window_selects_unseen_non_evaluation_ids():
+    split = {
+        "layouts": [
+            *({"id": index, "role": "train"} for index in range(4)),
+            *({"id": index, "role": "development"} for index in range(4, 6)),
+            {"id": 6, "role": "reserved"},
+        ]
+    }
+    selected = select_collection_layouts(
+        split,
+        train_episodes=2,
+        development_episodes=1,
+        train_offset=2,
+        development_offset=1,
+    )
+    assert [row["id"] for row in selected] == [2, 3, 5]
+    with pytest.raises(ValueError, match="exceeds"):
+        select_collection_layouts(
+            split,
+            train_episodes=2,
+            development_episodes=1,
+            train_offset=3,
+        )
+
+
+def test_reserved_reference_evaluation_selects_only_protected_layouts():
+    split = {
+        "layouts": [
+            {"id": 0, "role": "train"},
+            {"id": 1, "role": "development"},
+            {"id": 2, "role": "reserved"},
+            {"id": 3, "role": "reserved"},
+        ]
+    }
+    assert [row["id"] for row in select_reserved_layouts(split, 2)] == [2, 3]
+    with pytest.raises(ValueError, match="reserved split"):
+        select_reserved_layouts(split, 3)
+
+
+def test_prediction_arrays_accept_inline_reserved_features_without_a_cache(tmp_path):
+    hidden = np.arange(6, dtype=np.float32).reshape(2, 3)
+    state = np.arange(14, dtype=np.float32)
+    reference = np.arange(140, dtype=np.float32).reshape(10, 14)
+    inline = prediction_arrays(
+        {
+            "cache_file": None,
+            "features": {
+                "hidden": hidden,
+                "state": state,
+                "reference": reference,
+            },
+        }
+    )
+    for actual, expected in zip(inline, (hidden, state, reference), strict=True):
+        np.testing.assert_array_equal(actual, expected)
+
+    cache = tmp_path / "features.npz"
+    np.savez(cache, hidden=hidden, state=state, reference=reference)
+    cached = prediction_arrays({"cache_file": str(cache)})
+    for actual, expected in zip(cached, (hidden, state, reference), strict=True):
+        np.testing.assert_array_equal(actual, expected)
+
+    with pytest.raises(ValueError, match="neither a cache file nor inline features"):
+        prediction_arrays({"cache_file": None})
 
 
 @pytest.mark.parametrize("change", ["short", "nan", "negative_std", "quantile_order"])
@@ -44,6 +130,384 @@ def test_normalization_rejects_incompatible_statistics(tmp_path, change):
     path.write_text(json.dumps({"norm_stats": stats}))
     with pytest.raises(ValueError):
         validate_normalization(path)
+
+
+def normalization(tmp_path):
+    stats = {
+        name: {
+            "mean": [0.0] * 14,
+            "std": [1.0] * 14,
+            "q01": [-1.0] * 14,
+            "q99": [1.0] * 14,
+        }
+        for name in ("state", "actions")
+    }
+    path = tmp_path / "norm_stats.json"
+    path.write_text(json.dumps({"norm_stats": stats}))
+    return ArxNormalizer(path)
+
+
+def test_learning_normalizer_uses_joint_deltas_and_absolute_grippers(tmp_path):
+    normalizer = normalization(tmp_path)
+    state = np.arange(14, dtype=np.float32) / 10
+    physical = np.tile(state, (3, 1))
+    physical[:, normalizer.joints] += 0.25
+    physical[:, [6, 13]] = [[-0.2, 1.2], [0.4, 0.7], [0.0, 1.0]]
+    encoded = normalizer.encode(physical, state)
+    decoded = normalizer.decode(encoded, state)
+    np.testing.assert_allclose(
+        decoded[:, normalizer.joints], physical[:, normalizer.joints]
+    )
+    np.testing.assert_allclose(decoded[:, [6, 13]], np.clip(physical[:, [6, 13]], 0, 1))
+
+
+def test_rollout_loader_checks_acknowledged_physical_commands(tmp_path):
+    normalizer = normalization(tmp_path)
+    root = tmp_path / "collection"
+    episode = root / "episode-3"
+    episode.mkdir(parents=True)
+    state = np.zeros(14, dtype=np.float32)
+    physical = np.zeros((10, 14), dtype=np.float32)
+    physical[:, [6, 13]] = 1.2
+    cache = episode / "chunk-0.npz"
+    np.savez(cache, hidden=np.zeros((768, 2048)), state=state, reference=physical)
+    record = {
+        "cache_file": str(cache),
+        "ticks": 2,
+        "executed_physical": np.clip(physical[:2], 0, 1).tolist(),
+        "reward": 1.0,
+        "terminated": True,
+        "truncated": False,
+    }
+    (episode / "episode.json").write_text(
+        json.dumps(
+            {
+                "layout": {"id": 3, "sha256": "digest", "role": "development"},
+                "complete": True,
+                "records": [record],
+            }
+        )
+    )
+    rows = load_rollout_rows([root], normalizer)
+    assert len(rows) == 1 and rows[0]["td_eligible"] is True
+    np.testing.assert_allclose(rows[0]["executed_action"], rows[0]["ref"][:2])
+    record["executed_physical"][0][0] = 0.5
+    (episode / "episode.json").write_text(
+        json.dumps(
+            {
+                "layout": {"id": 3, "sha256": "digest", "role": "development"},
+                "complete": True,
+                "records": [record],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="Acknowledged commands differ"):
+        load_rollout_rows([root], normalizer)
+
+
+def test_rollout_loader_rejects_timeout_as_bc_demonstration(tmp_path):
+    normalizer = normalization(tmp_path)
+    root = tmp_path / "collection"
+    episode = root / "episode-3"
+    episode.mkdir(parents=True)
+    cache = episode / "chunk-0.npz"
+    state = np.zeros(14, dtype=np.float32)
+    physical = np.zeros((10, 14), dtype=np.float32)
+    np.savez(cache, hidden=np.zeros((768, 2048)), state=state, reference=physical)
+    (episode / "episode.json").write_text(
+        json.dumps(
+            {
+                "layout": {"id": 3, "sha256": "digest", "role": "train"},
+                "complete": True,
+                "records": [
+                    {
+                        "cache_file": str(cache),
+                        "ticks": 10,
+                        "executed_physical": physical.tolist(),
+                        "reward": 0.0,
+                        "terminated": False,
+                        "truncated": True,
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="No successful complete rollout"):
+        load_rollout_rows([root], normalizer)
+
+
+def test_online_transition_attaches_next_pre_action_state():
+    current = {"z": "old-z", "ref": "old-ref", "prop": "old-prop", "reward": 0}
+    successor = {"z": "new-z", "ref": "new-ref", "prop": "new-prop"}
+    result = attach_successor(current, successor)
+    assert result == current | {
+        "next_z": "new-z",
+        "next_ref": "new-ref",
+        "next_prop": "new-prop",
+    }
+    assert "next_z" not in current
+
+
+def test_action_deviation_uses_only_acknowledged_prefix():
+    reference = np.zeros((10, 14), dtype=np.float32)
+    issued = reference.copy()
+    issued[:2] = 0.25
+    issued[2:] = 10
+    assert action_deviation(issued, reference, 2) == {
+        "reference_mean_abs": 0.25,
+        "reference_max_abs": 0.25,
+    }
+    with pytest.raises(ValueError, match="10x14"):
+        action_deviation(issued[:2], reference, 2)
+
+
+def test_frozen_reference_gripper_adapter_preserves_all_arm_actions():
+    action = np.arange(140, dtype=np.float32).reshape(10, 14)
+    reference = -action
+    result = apply_frozen_action_adapter(action, reference, "reference_grippers")
+    arm = np.ones(14, dtype=bool)
+    arm[[6, 13]] = False
+    np.testing.assert_array_equal(result[:, arm], action[:, arm])
+    np.testing.assert_array_equal(result[:, [6, 13]], reference[:, [6, 13]])
+    assert not np.shares_memory(result, action)
+    np.testing.assert_array_equal(
+        apply_frozen_action_adapter(action, reference, "none"), action
+    )
+    with pytest.raises(ValueError, match="Unknown"):
+        apply_frozen_action_adapter(action, reference, "residual")
+
+
+def test_reference_anchor_bounds_the_learned_correction():
+    learner = object.__new__(ArxLearner)
+    reference = torch.tensor([[-1.0, 0.0, 1.0]])
+    action = torch.tensor([[3.0, 2.0, -1.0]])
+    learner.configure_reference_anchor(0.25)
+    torch.testing.assert_close(
+        learner._anchored(action, reference),
+        torch.tensor([[0.0, 0.5, 0.5]]),
+    )
+    learner.configure_reference_anchor(0.0)
+    torch.testing.assert_close(learner._anchored(action, reference), reference)
+    learner.configure_reference_anchor(1.0)
+    torch.testing.assert_close(learner._anchored(action, reference), action)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        learner.configure_reference_anchor(1.01)
+
+
+def test_candidate_layout_manifest_requires_independent_provenance(tmp_path):
+    protected = tmp_path / "protected.json"
+    protected.write_text('{"protected": true}\n')
+    layout = tmp_path / "layout.json"
+    layout.write_text(
+        json.dumps(
+            {
+                "Rigid": {},
+            }
+        )
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "robodojo-candidate-layouts-v1",
+                "task": "insert_key",
+                "protected": [{"path": str(protected), "sha256": digest(protected)}],
+                "layouts": [
+                    {
+                        "id": 0,
+                        "role": "train",
+                        "path": str(layout),
+                        "sha256": digest(layout),
+                        "provenance": {
+                            "task": "insert_key",
+                            "layout_domain": "train",
+                            "layout_id": 0,
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    assert verify(manifest)["task"] == "insert_key"
+    manifest_payload = json.loads(manifest.read_text())
+    manifest_payload["layouts"][0]["provenance"]["task"] = "stack_bowls"
+    manifest.write_text(json.dumps(manifest_payload))
+    with pytest.raises(ValueError, match="provenance"):
+        verify(manifest)
+
+
+def test_frozen_evaluation_never_repeats_a_layout_after_reset_failure():
+    layouts = [{"id": value} for value in (16, 17, 18, 19)]
+    outcomes = [
+        {"layout_id": 16, "state": "complete"},
+        {"layout_id": 17, "state": "complete"},
+        {"layout_id": 18, "state": "reset_failed"},
+    ]
+    assert select_layout(layouts, {18}, outcomes, 3, frozen_evaluation=True) == {
+        "id": 19
+    }
+    assert select_layout(layouts, {18}, outcomes, 4, frozen_evaluation=False) == {
+        "id": 17
+    }
+
+
+class LearnerState:
+    def __init__(self, value):
+        self.value = value
+
+    def state_dict(self):
+        return {"value": self.value}
+
+    def load_state_dict(self, value):
+        self.value = value["value"]
+
+
+def test_online_checkpoint_restores_restart_boundary_and_weights(tmp_path):
+    encoder = torch.nn.Linear(2, 2)
+    expected = {
+        name: value.detach().clone() for name, value in encoder.state_dict().items()
+    }
+    learner = LearnerState(17)
+    state = {
+        "control_steps": 1000,
+        "updates": 4,
+        "episode_id": 2,
+        "replay": [{"reward": 1.0}],
+        "outcomes": [],
+        "invalid_layouts": [],
+        "python_rng_state": (3, (), None),
+        "torch_rng_state": torch.get_rng_state(),
+        "restart_boundary": "fresh_episode",
+    }
+    path = tmp_path / "online.pt"
+    checkpoint(
+        path,
+        encoder,
+        learner,
+        {
+            "layout_digest": "layout",
+            "reference_replay_sha256": "reference",
+            "seed": 42,
+            "exploration_std": 0.01,
+            "target_noise_std": 0.02,
+            "target_noise_clip": 0.05,
+            "reference_anchor_scale": 1.0,
+        },
+        state,
+    )
+    with torch.no_grad():
+        for parameter in encoder.parameters():
+            parameter.zero_()
+    learner.value = -1
+    restored = restore_online_checkpoint(
+        path,
+        encoder,
+        learner,
+        layout_digest="layout",
+        reference_replay_digest="reference",
+        seed=42,
+        exploration_std=0.01,
+        target_noise_std=0.02,
+        target_noise_clip=0.05,
+        reference_anchor_scale=1.0,
+    )
+    assert restored["restart_boundary"] == "fresh_episode"
+    assert learner.value == 17
+    for name, value in encoder.state_dict().items():
+        torch.testing.assert_close(value, expected[name])
+    with pytest.raises(ValueError, match="provenance"):
+        restore_online_checkpoint(
+            path,
+            encoder,
+            learner,
+            layout_digest="other",
+            reference_replay_digest="reference",
+            seed=42,
+            exploration_std=0.01,
+            target_noise_std=0.02,
+            target_noise_clip=0.05,
+            reference_anchor_scale=1.0,
+        )
+    with pytest.raises(ValueError, match="provenance"):
+        restore_online_checkpoint(
+            path,
+            encoder,
+            learner,
+            layout_digest="layout",
+            reference_replay_digest="reference",
+            seed=42,
+            exploration_std=0.01,
+            target_noise_std=0.02,
+            target_noise_clip=0.05,
+            reference_anchor_scale=0.25,
+        )
+
+
+def test_reference_replay_seeds_sparse_reward_with_train_rows_only(tmp_path):
+    accepted = {0: "a", 1: "b"}
+    base = {
+        "z": torch.zeros(2048),
+        "ref": torch.zeros(10, 14),
+        "prop": torch.zeros(14),
+        "action": torch.zeros(10, 14),
+        "executed_action": np.zeros((10, 14), dtype=np.float32),
+        "ticks": 10,
+        "terminated": False,
+        "truncated": False,
+        "next_z": torch.zeros(2048),
+        "next_ref": torch.zeros(10, 14),
+        "next_prop": torch.zeros(14),
+        "role": "train",
+        "td_eligible": True,
+    }
+    rows = []
+    for index in range(64):
+        positive = index in {0, 1}
+        rows.append(
+            base
+            | {
+                "episode": (index % 2, "a" if index % 2 == 0 else "b"),
+                "reward": float(positive),
+                "terminated": positive,
+            }
+        )
+    rows.append(base | {"role": "development", "reward": 1.0})
+    path = tmp_path / "encoded.pt"
+    torch.save(rows, path)
+    replay = load_reference_replay(path, accepted)
+    assert len(replay) == 64
+    assert sum(row["reward"] > 0 for row in replay) == 2
+    rows[0]["episode"] = (0, "changed")
+    torch.save(rows, path)
+    with pytest.raises(ValueError, match="differs from warmup"):
+        load_reference_replay(path, accepted)
+
+
+def test_online_watchdog_requires_the_fatal_renderer_error_pair(tmp_path):
+    log = tmp_path / "client.log"
+    log.write_text("Unable to allocate descriptor sets.\n")
+    assert not renderer_failed(log)
+    log.write_text(
+        "Unable to allocate descriptor sets.\n"
+        "Failed to execute RenderGraph on device 0. Error Code: 7\n"
+    )
+    assert renderer_failed(log)
+
+
+def test_process_details_preserves_missing_gpu_process_identity():
+    assert process_details([999999999]) == [
+        {
+            "pid": 999999999,
+            "user": None,
+            "elapsed_seconds": None,
+            "command": None,
+        }
+    ]
+
+
+def test_gpu_coexistence_rejects_unresolved_process_owners():
+    assert disallowed_gpu_processes([999999999], {"liym"}) == [999999999]
+    assert disallowed_gpu_processes([999999999], set()) == [999999999]
 
 
 def observation(index):
