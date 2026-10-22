@@ -13,6 +13,8 @@ import torch
 
 from toolkits.rlt.robodojo_boundary import ACTION_SEMANTICS, CAMERAS, FIELDS
 from toolkits.rlt.robodojo_collect import (
+    disallowed_processes,
+    process_owner,
     select_collection_layouts,
     select_reserved_layouts,
 )
@@ -508,6 +510,9 @@ def test_process_details_preserves_missing_gpu_process_identity():
 def test_gpu_coexistence_rejects_unresolved_process_owners():
     assert disallowed_gpu_processes([999999999], {"liym"}) == [999999999]
     assert disallowed_gpu_processes([999999999], set()) == [999999999]
+    assert process_owner(os.getpid()) == os.environ.get("USER")
+    assert disallowed_processes([999999999], {"liym"}) == [999999999]
+    assert disallowed_processes([999999999], set()) == [999999999]
 
 
 def observation(index):

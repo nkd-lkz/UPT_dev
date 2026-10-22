@@ -55,6 +55,64 @@ def native_task_name(config: dict) -> str:
     return task
 
 
+def process_owner(pid: int) -> str | None:
+    """Resolve one live process owner without trusting its command line."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("Uid:"):
+                uid = int(line.split()[1])
+                return subprocess.check_output(
+                    ["id", "-nu", str(uid)], text=True, timeout=5
+                ).strip()
+    except (
+        FileNotFoundError,
+        ProcessLookupError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ):
+        return None
+    return None
+
+
+def disallowed_processes(pids: list[int], allowed_users: set[str]) -> list[int]:
+    """Return GPU PIDs not owned by an explicitly allowed coexistence user."""
+    if not allowed_users:
+        return pids
+    return [pid for pid in pids if process_owner(pid) not in allowed_users]
+
+
+def gpu_memory_used_mib(gpu: int) -> int:
+    """Read total used memory on one physical GPU."""
+    value = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "-i",
+            str(gpu),
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+        timeout=10,
+    ).strip()
+    return int(value)
+
+
+def gpu_uuid(gpu: int) -> str:
+    """Resolve one physical GPU index to the UUID accepted by CUDA."""
+    return subprocess.check_output(
+        [
+            "nvidia-smi",
+            "-i",
+            str(gpu),
+            "--query-gpu=uuid",
+            "--format=csv,noheader",
+        ],
+        text=True,
+        timeout=10,
+    ).strip()
+
+
 def prior_outcomes(path: Path | None, manifest: Path) -> list[dict]:
     """Load completed episodes from one compatible, immutable prior attempt."""
     if path is None:
@@ -485,6 +543,12 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
                 "development_episodes": args.development_episodes,
                 "reserved_evaluation_episodes": args.reserved_evaluation_episodes,
             },
+            "coexist_users": sorted(args.coexist_user),
+            "coexist_start_memory_mib": args.coexist_start_memory_mib,
+            "coexist_runtime_memory_mib": args.coexist_runtime_memory_mib,
+            "policy_gpu": args.policy_gpu,
+            "policy_start_memory_mib": args.policy_start_memory_mib,
+            "policy_runtime_memory_mib": args.policy_runtime_memory_mib,
             "source_sha256": {
                 name: digest(Path(__file__).with_name(name))
                 for name in (
@@ -507,32 +571,53 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         idle_checks = 0
         wait_deadline = time.monotonic() + args.wait_idle_hours * 3600
+        allowed_users = set(args.coexist_user)
+        policy_gpu = args.gpu if args.policy_gpu is None else args.policy_gpu
         while True:
             idle, detail = gpu_idle(args.gpu)
             foreign = foreign_gpu_processes([], gpu=args.gpu)
-            idle_checks = idle_checks + 1 if idle and not foreign else 0
+            disallowed = disallowed_processes(foreign, allowed_users)
+            memory_used_mib = gpu_memory_used_mib(args.gpu)
+            coexist_ready = bool(allowed_users) and (
+                not disallowed and memory_used_mib <= args.coexist_start_memory_mib
+            )
+            policy_ready = True
+            if policy_gpu != args.gpu:
+                policy_foreign = foreign_gpu_processes([], gpu=policy_gpu)
+                policy_disallowed = disallowed_processes(policy_foreign, allowed_users)
+                policy_memory_mib = gpu_memory_used_mib(policy_gpu)
+                policy_ready = (
+                    not policy_disallowed
+                    and policy_memory_mib <= args.policy_start_memory_mib
+                )
+                status.update(
+                    policy_gpu=policy_gpu,
+                    policy_foreign_pids=policy_foreign,
+                    policy_disallowed_foreign_pids=policy_disallowed,
+                    policy_memory_used_mib=policy_memory_mib,
+                )
+            idle_checks = (
+                idle_checks + 1
+                if ((idle and not foreign) or coexist_ready) and policy_ready
+                else 0
+            )
             if idle_checks >= 2:
                 break
             status.update(
                 state="waiting_gpu",
                 gpu=detail,
                 foreign_pids=foreign,
+                disallowed_foreign_pids=disallowed,
+                coexist_users=sorted(allowed_users),
+                memory_used_mib=memory_used_mib,
                 idle_checks=idle_checks,
             )
             save(args.output / "status.json", status)
             if not args.wait_idle_hours or time.monotonic() >= wait_deadline:
                 raise RuntimeError(f"GPU {args.gpu} occupied: {detail}; pids={foreign}")
             time.sleep(min(30, max(0, wait_deadline - time.monotonic())))
-        uuid = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "-i",
-                str(args.gpu),
-                "--query-gpu=uuid",
-                "--format=csv,noheader",
-            ],
-            text=True,
-        ).strip()
+        uuid = gpu_uuid(args.gpu)
+        policy_uuid = gpu_uuid(policy_gpu)
         renderer = renderer_index(args.renderer_table.read_text(), uuid)
         environment = dict(os.environ)
         environment.pop("LD_PRELOAD", None)
@@ -552,6 +637,7 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
                 )
             ),
         )
+        server_environment = dict(environment, CUDA_VISIBLE_DEVICES=policy_uuid)
         common = [
             "-u",
             "-m",
@@ -588,7 +674,7 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
             server = subprocess.Popen(
                 [config["policy_python"], *common, "--server"],
                 cwd=root,
-                env=environment,
+                env=server_environment,
                 stdout=server_log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -601,11 +687,31 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
                 server_code = server.poll()
                 timed_out = time.monotonic() > deadline
                 foreign = foreign_gpu_processes(children, gpu=args.gpu)
-                if server_code is not None or timed_out or foreign:
+                disallowed = disallowed_processes(foreign, allowed_users)
+                memory_exhausted = bool(allowed_users) and (
+                    gpu_memory_used_mib(args.gpu) > args.coexist_runtime_memory_mib
+                )
+                policy_foreign = foreign_gpu_processes(children, gpu=policy_gpu)
+                policy_disallowed = disallowed_processes(policy_foreign, allowed_users)
+                policy_memory_exhausted = (
+                    policy_gpu != args.gpu
+                    and gpu_memory_used_mib(policy_gpu) > args.policy_runtime_memory_mib
+                )
+                if (
+                    server_code is not None
+                    or timed_out
+                    or disallowed
+                    or memory_exhausted
+                    or policy_disallowed
+                    or policy_memory_exhausted
+                ):
                     raise RuntimeError(
                         "Reference startup failed: "
                         f"server_returncode={server_code}, "
-                        f"timed_out={timed_out}, foreign_pids={foreign}"
+                        f"timed_out={timed_out}, foreign_pids={foreign}, "
+                        f"disallowed_pids={disallowed}, memory_exhausted={memory_exhausted}, "
+                        f"policy_disallowed_pids={policy_disallowed}, "
+                        f"policy_memory_exhausted={policy_memory_exhausted}"
                     )
                 if (args.output / "STOP").exists():
                     raise KeyboardInterrupt("Operator STOP")
@@ -637,12 +743,32 @@ def supervise(args: argparse.Namespace, config: dict) -> None:
                 server_code = server.poll()
                 timed_out = time.monotonic() > deadline
                 foreign = foreign_gpu_processes(children, gpu=args.gpu)
-                if server_code is not None or timed_out or foreign:
+                disallowed = disallowed_processes(foreign, allowed_users)
+                memory_exhausted = bool(allowed_users) and (
+                    gpu_memory_used_mib(args.gpu) > args.coexist_runtime_memory_mib
+                )
+                policy_foreign = foreign_gpu_processes(children, gpu=policy_gpu)
+                policy_disallowed = disallowed_processes(policy_foreign, allowed_users)
+                policy_memory_exhausted = (
+                    policy_gpu != args.gpu
+                    and gpu_memory_used_mib(policy_gpu) > args.policy_runtime_memory_mib
+                )
+                if (
+                    server_code is not None
+                    or timed_out
+                    or disallowed
+                    or memory_exhausted
+                    or policy_disallowed
+                    or policy_memory_exhausted
+                ):
                     raise RuntimeError(
                         "Collection stopped unexpectedly: "
                         f"server_returncode={server_code}, "
                         f"client_returncode={process.poll()}, "
-                        f"timed_out={timed_out}, foreign_pids={foreign}"
+                        f"timed_out={timed_out}, foreign_pids={foreign}, "
+                        f"disallowed_pids={disallowed}, memory_exhausted={memory_exhausted}, "
+                        f"policy_disallowed_pids={policy_disallowed}, "
+                        f"policy_memory_exhausted={policy_memory_exhausted}"
                     )
                 if (args.output / "STOP").exists():
                     raise KeyboardInterrupt("Operator STOP")
@@ -682,6 +808,12 @@ def main() -> None:
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--wait-idle-hours", type=float, default=0)
+    parser.add_argument("--coexist-user", action="append", default=[])
+    parser.add_argument("--coexist-start-memory-mib", type=int, default=0)
+    parser.add_argument("--coexist-runtime-memory-mib", type=int, default=0)
+    parser.add_argument("--policy-gpu", type=int, choices=range(3))
+    parser.add_argument("--policy-start-memory-mib", type=int, default=0)
+    parser.add_argument("--policy-runtime-memory-mib", type=int, default=0)
     parser.add_argument("--gpu", type=int, choices=range(3), default=2)
     parser.add_argument("--task")
     args = parser.parse_args()
@@ -703,6 +835,30 @@ def main() -> None:
         parser.error("Layout offsets must be non-negative")
     if not 0 <= args.wait_idle_hours <= 72:
         parser.error("wait-idle-hours must be in [0, 72]")
+    if bool(args.coexist_user) != bool(args.coexist_start_memory_mib):
+        parser.error("Coexistence requires users and a positive startup memory limit")
+    if bool(args.coexist_user) != bool(args.coexist_runtime_memory_mib):
+        parser.error("Coexistence requires users and a positive runtime memory limit")
+    if args.coexist_user and (
+        args.coexist_start_memory_mib >= args.coexist_runtime_memory_mib
+        or args.coexist_runtime_memory_mib > 45000
+        or any(
+            re.fullmatch(r"[a-z_][a-z0-9_-]*", user) is None
+            for user in args.coexist_user
+        )
+    ):
+        parser.error("Invalid bounded GPU coexistence configuration")
+    split_policy = args.policy_gpu is not None and args.policy_gpu != args.gpu
+    if split_policy != bool(args.policy_start_memory_mib):
+        parser.error("Split policy placement requires a startup memory limit")
+    if split_policy != bool(args.policy_runtime_memory_mib):
+        parser.error("Split policy placement requires a runtime memory limit")
+    if split_policy and (
+        not args.coexist_user
+        or args.policy_start_memory_mib >= args.policy_runtime_memory_mib
+        or args.policy_runtime_memory_mib > 45000
+    ):
+        parser.error("Invalid split policy GPU limits")
     config = yaml.safe_load(args.config.read_text())
     if args.task:
         if re.fullmatch(r"[a-z][a-z0-9_]*", args.task) is None:
