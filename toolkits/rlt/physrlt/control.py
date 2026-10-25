@@ -92,6 +92,12 @@ def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
     for _ in range(9):
         obs, _, _ = env.step(np.array([0, 0, 0, 0, 0, 0, -1], np.float32))
     digest = physical_reset_hash(env)
+    expected = env.pilot_reset_hashes.get(case["id"])
+    if expected is not None and digest != expected:
+        raise RuntimeError(
+            "Control reset differs from the recorded collection initial state"
+        )
+    env.pilot_reset_hashes[case["id"]] = digest
     ticks, success, rewards, inference_seconds = 0, False, 0.0, 0.0
     start = time.monotonic()
     prediction = reference.predict(obs, env.instruction, case["seed"] * 1000)
@@ -177,6 +183,9 @@ def run(args):
     validation_cases = [c for c in cases if c["split"] == "validation"]
     dev_cases = [c for c in cases if c["split"] == "development"]
     env = LiberoProEnvironment()
+    env.pilot_reset_hashes = {
+        episode["case"]["id"]: episode["reset_hash"] for episode in dataset["episodes"]
+    }
     records = []
     try:
         for case in validation_cases + dev_cases:
