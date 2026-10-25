@@ -460,14 +460,22 @@ def prepare_control_check(
 
 
 def prepare_anchor_check(
-    root: Path, base_root: Path, after_root: Path, source: Path, assets: Path
+    root: Path,
+    base_root: Path,
+    after_root: Path,
+    source: Path,
+    assets: Path,
+    *,
+    recovery: bool = False,
 ) -> None:
     """Test physical grounding alongside, rather than replacing, an action prior."""
     root.mkdir(parents=True, exist_ok=True)
     if (root / "plan.json").exists():
         raise FileExistsError("An existing plan must not be silently changed")
     jobs = []
-    for task, perturbation in ((0, "object"), (3, "lan")):
+    for task, perturbation in (
+        ((0, "object"),) if recovery else ((0, "object"), (3, "lan"))
+    ):
         name = f"task{task}-{perturbation}"
         output = root / name / "control-seed31"
         jobs.append(
@@ -496,10 +504,16 @@ def prepare_anchor_check(
                     "--online-ticks",
                     "1040",
                     "--methods",
-                    "action_recon_anchor",
-                    "geometry_anchor",
-                    "response_anchor",
-                    "joint_anchor",
+                    *(
+                        ["response_anchor", "joint_anchor"]
+                        if recovery
+                        else [
+                            "action_recon_anchor",
+                            "geometry_anchor",
+                            "response_anchor",
+                            "joint_anchor",
+                        ]
+                    ),
                 ],
             }
         )
@@ -507,7 +521,9 @@ def prepare_anchor_check(
         root / "plan.json",
         {
             "schema": 1,
-            "title": "Preserve the action prior while adding physical grounding",
+            "title": "Recover interrupted task0 anchor arms"
+            if recovery
+            else "Preserve the action prior while adding physical grounding",
             "control_protocol_version": 2,
             "no_final_test_access": True,
             "gpu_after_status": str(after_root / "status.json"),
@@ -875,6 +891,7 @@ def main() -> None:
             "prepare-control-check",
             "prepare-control-recovery",
             "prepare-anchor-check",
+            "prepare-anchor-recovery",
             "prepare-repeat",
             "prepare-paired-actions",
             "run",
@@ -895,6 +912,7 @@ def main() -> None:
         "prepare-control-check",
         "prepare-control-recovery",
         "prepare-anchor-check",
+        "prepare-anchor-recovery",
         "prepare-repeat",
         "prepare-paired-actions",
     }:
@@ -908,6 +926,7 @@ def main() -> None:
             "prepare-control-check",
             "prepare-control-recovery",
             "prepare-anchor-check",
+            "prepare-anchor-recovery",
             "prepare-repeat",
         }:
             if not args.base_root or not args.after_root:
@@ -916,6 +935,16 @@ def main() -> None:
                 )
             if args.mode == "prepare-control-recovery":
                 prepare_control_check(
+                    args.root,
+                    args.base_root,
+                    args.after_root,
+                    args.source,
+                    args.assets,
+                    recovery=True,
+                )
+                return
+            if args.mode == "prepare-anchor-recovery":
+                prepare_anchor_check(
                     args.root,
                     args.base_root,
                     args.after_root,
