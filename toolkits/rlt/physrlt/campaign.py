@@ -443,6 +443,67 @@ def prepare_control_check(
     )
 
 
+def prepare_anchor_check(
+    root: Path, base_root: Path, after_root: Path, source: Path, assets: Path
+) -> None:
+    """Test physical grounding alongside, rather than replacing, an action prior."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        output = root / name / "control-seed31"
+        jobs.append(
+            {
+                "id": f"task{task}-control-31",
+                "kind": "gpu",
+                "dependencies": [],
+                "output": str(output),
+                "timeout_seconds": 10800,
+                "module": "toolkits.rlt.physrlt.control",
+                "args": [
+                    "--source",
+                    str(source),
+                    "--assets",
+                    str(assets),
+                    "--dataset",
+                    str(base_root / name / "collection/transitions.pt"),
+                    "--probes",
+                    str(base_root / name / "probes"),
+                    "--output",
+                    str(output),
+                    "--seed",
+                    "31",
+                    "--warmup-steps",
+                    "1500",
+                    "--online-ticks",
+                    "1040",
+                    "--methods",
+                    "action_recon_anchor",
+                    "geometry_anchor",
+                    "response_anchor",
+                    "joint_anchor",
+                ],
+            }
+        )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "Preserve the action prior while adding physical grounding",
+            "control_protocol_version": 2,
+            "no_final_test_access": True,
+            "gpu_after_status": str(after_root / "status.json"),
+            "global_wall_time_limit": None,
+            "hypothesis": "Preserving a separate frozen action-reconstruction readout may prevent physical supervision from discarding control-relevant cues",
+            "matching": "All arms combine two 400-step encoders into a fixed 128D token; control combines reconstruction seeds 59 and 31, physics arms combine reconstruction seed 59 with grounded seed 31",
+            "base_root": str(base_root),
+            "jobs": jobs,
+        },
+    )
+
+
 def supervise(args: argparse.Namespace) -> None:
     """Wait for unused authorized cards; isolate per-job failures and keep logs."""
     plan_path = args.root / "plan.json"
@@ -599,6 +660,7 @@ def main() -> None:
             "prepare",
             "prepare-followup",
             "prepare-control-check",
+            "prepare-anchor-check",
             "run",
             "summarize",
         ),
@@ -611,15 +673,25 @@ def main() -> None:
     parser.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--idle-seconds", type=int, default=30)
     args = parser.parse_args()
-    if args.mode in {"prepare", "prepare-followup", "prepare-control-check"}:
+    if args.mode in {
+        "prepare",
+        "prepare-followup",
+        "prepare-control-check",
+        "prepare-anchor-check",
+    }:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
-        if args.mode == "prepare-control-check":
+        if args.mode in {"prepare-control-check", "prepare-anchor-check"}:
             if not args.base_root or not args.after_root:
                 parser.error(
                     "prepare-control-check requires --base-root and --after-root"
                 )
-            prepare_control_check(
+            operation = (
+                prepare_control_check
+                if args.mode == "prepare-control-check"
+                else prepare_anchor_check
+            )
+            operation(
                 args.root, args.base_root, args.after_root, args.source, args.assets
             )
         elif args.mode == "prepare-followup":

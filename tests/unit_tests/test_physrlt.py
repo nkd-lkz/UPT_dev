@@ -334,3 +334,38 @@ def test_delayed_online_rl_requires_state_augmentation():
 
     with pytest.raises(ValueError, match="state augmentation"):
         rollout(None, None, None, None, {}, 10, replay=[], delay_ticks=2)
+
+
+def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path):
+    from toolkits.rlt.physrlt.control import FrozenReadout
+
+    rows = synthetic_rows()
+    dataset = tmp_path / "synthetic.pt"
+    torch.save({"rows": rows}, dataset)
+    run(
+        Namespace(
+            dataset=dataset,
+            output=tmp_path / "probes",
+            methods=["action_recon", "joint"],
+            seeds=[31, 59],
+            steps=2,
+            threads=2,
+        )
+    )
+    prior = tmp_path / "probes/action_recon-seed59/readout.pt"
+    physical = tmp_path / "probes/joint-seed31/readout.pt"
+    combined = FrozenReadout(physical, anchor=prior)
+    result = combined.encode(rows[0], rows[0]["prop"])["z"]
+    assert result.shape == (128,) and torch.isfinite(result).all()
+    assert not torch.allclose(
+        result, FrozenReadout(physical).encode(rows[0], rows[0]["prop"])["z"]
+    )
+    changed = copy.deepcopy(rows[0])
+    changed["geometry"][:] = 999
+    changed["response"][:] = 999
+    torch.testing.assert_close(result, combined.encode(changed, changed["prop"])["z"])
+    payload = torch.load(prior, weights_only=True)
+    payload["dataset"] = "different-training-data"
+    torch.save(payload, tmp_path / "mismatch.pt")
+    with pytest.raises(ValueError, match="same training dataset"):
+        FrozenReadout(physical, anchor=tmp_path / "mismatch.pt")

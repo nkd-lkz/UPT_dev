@@ -17,7 +17,7 @@ import torch
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
-from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash
+from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash, projection
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import inputs
 from toolkits.rlt.pi05_baseline import (
@@ -32,11 +32,19 @@ from toolkits.rlt.pi05_baseline import (
 class FrozenReadout:
     """Own a fixed representation version throughout a control experiment."""
 
-    def __init__(self, path: Path, mode: str = "latent"):
+    def __init__(self, path: Path, mode: str = "latent", anchor: Path | None = None):
         if mode not in {"latent", "outcomes", "mixed"}:
             raise ValueError("Unknown physical token deployment mode")
         self.mode = mode
         self.payload = torch.load(path, map_location="cpu", weights_only=True)
+        self.anchor = FrozenReadout(anchor) if anchor is not None else None
+        if (
+            self.anchor is not None
+            and self.anchor.payload["dataset"] != self.payload["dataset"]
+        ):
+            raise ValueError(
+                "Anchor and physical readout must use the same training dataset"
+            )
         self.model = PhysicalReadout(
             self.payload["response_dim"],
             self.payload["geometry_dim"],
@@ -82,6 +90,9 @@ class FrozenReadout:
                     physical[:, None], 64
                 )[:, 0]
                 z = torch.cat((z[:, :64], compact), -1)
+        if self.anchor is not None:
+            prior = self.anchor.encode(prediction, prop)["z"][None]
+            z = torch.cat((prior, z), dim=-1) @ projection(256)
         return {"z": z[0], "ref": data["ref"][0].clamp(-1, 1), "prop": data["prop"][0]}
 
 
@@ -278,11 +289,18 @@ def run(args):
             write_json(args.output / "episodes.json", records)
         for method in args.methods:
             base_method, mode = method, "latent"
+            anchor = None
+            if method.endswith("_anchor"):
+                base_method = method.removesuffix("_anchor")
+                # Every arm has two 400-step encoders. The fixed prior uses a
+                # different initialization, including in the dual-reconstruction
+                # control; this avoids a rank-deficient duplicate baseline.
+                anchor = args.probes / "action_recon-seed59" / "readout.pt"
             for suffix in ("_outcomes", "_mixed"):
                 if method.endswith(suffix):
                     base_method, mode = method.removesuffix(suffix), suffix[1:]
             path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
-            readout = FrozenReadout(path, mode=mode)
+            readout = FrozenReadout(path, mode=mode, anchor=anchor)
             learner, fidelity = warmup(readout, dataset, args.seed, args.warmup_steps)
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")

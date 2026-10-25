@@ -68,3 +68,8 @@ Control protocol version 2 keeps the critic's replay, actor and target inputs in
 Use ``prepare-control-check`` with ``--base-root`` and ``--after-root`` to queue corrected matched controls after the followup campaign. In addition to the four basic readouts, ``joint_outcomes`` exposes predicted normalized joint/EE/gripper motion, pooled depth change and object motion directly to the policy; ``joint_mixed`` combines these with half the latent. Both use reference-conditioned predictions, never future measurements. They keep inference decoders, so any latency claim must count those decoders.
 
 The final reference screen changes translation-command gain or delays command execution on training layouts. This is custom software actuation stress, not an official LIBERO-Pro score or a friction/stiffness change. Delayed online RL is rejected until pending commands are included in its state. A job with no log progress for ten minutes is stopped; a launch-time GPU occupancy race receives a bounded retry.
+
+Preserving the Action Prior
+---------------------------
+
+Use ``prepare-anchor-check`` with the same ``--base-root`` and an ``--after-root`` pointing to the corrected campaign to test whether physical supervision discarded useful action cues. Four arms combine a frozen reconstruction readout with reconstruction, geometry, response or joint readouts. A fixed projection maps the concatenated latents back to 128 dimensions. Every arm uses two 400-update encoders and the same actor; the dual-reconstruction control uses different initialization seeds to avoid a duplicated, rank-deficient token. This tests complementary representations, not extra policy capacity or a guaranteed physics benefit.
