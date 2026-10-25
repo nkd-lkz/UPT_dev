@@ -45,7 +45,7 @@ def table(rows: list[dict], columns: dict[str, str]) -> str:
 
 def build(root: Path) -> dict:
     """Aggregate completed and partial artifacts while retaining invalidation."""
-    jobs, probes, controls, collections, stress = [], [], [], [], []
+    jobs, probes, controls, collections, stress, paired = [], [], [], [], [], []
     for campaign in sorted(root.glob("pilot-v*")):
         plan = read(campaign / "plan.json", {})
         status = read(campaign / "status.json", {})
@@ -150,6 +150,16 @@ def build(root: Path) -> dict:
                     },
                 }
             )
+        for path in sorted(campaign.glob("task*/paired_actions/effects.json")):
+            for row in read(path, []):
+                paired.append(
+                    {
+                        "campaign": campaign.name,
+                        "task": path.parents[1].name,
+                        "complete": (path.parent / "result.json").exists(),
+                        **row,
+                    }
+                )
     groups = defaultdict(list)
     for row in probes:
         groups[(row["campaign"], row["task"], row["method"])].append(row)
@@ -175,6 +185,7 @@ def build(root: Path) -> dict:
         "prediction_means": predictions,
         "control": controls,
         "stress": stress,
+        "paired_action_effects": paired,
         "scope": "Development screens only; repeated layouts and invalidated online runs are not paper evidence.",
     }
     output = root / "overview"
@@ -255,7 +266,23 @@ def build(root: Path) -> dict:
             "ticks": "控制步数",
         },
     )
-    content += '</div><div class="card warning"><h2>5. 作废结果与验收原则</h2><p>以下记录仅供审计，不可纳入论文或简历的在线 RL 成绩。</p>'
+    content += '</div><div class="card"><h2>5. 相同状态、不同动作的配对诊断</h2><p>直接预测器的动作效果误差应低于零效果对照。检查的是新动作在训练状态上的局部响应，不是泛化成功率；若误差更高，应作为物理解释不足的负证据。</p>'
+    content += table(
+        paired,
+        {
+            "task": "任务",
+            "case_id": "初态",
+            "start_tick": "执行前步数",
+            "method": "方法",
+            "horizon": "预测步长",
+            "response_effect_scaled_mse": "响应效果 MSE ↓",
+            "zero_effect_response_scaled_mse": "零效果 MSE",
+            "object_effect_rmse_m": "物体效果 RMSE ↓",
+            "zero_effect_object_rmse_m": "零效果 RMSE",
+            "complete": "运行结束",
+        },
+    )
+    content += '</div><div class="card warning"><h2>6. 作废结果与验收原则</h2><p>以下记录仅供审计，不可纳入论文或简历的在线 RL 成绩。</p>'
     content += table(
         invalid,
         {

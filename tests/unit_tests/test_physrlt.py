@@ -482,3 +482,34 @@ def test_paired_action_effects_require_correct_effect_not_state_prediction():
         plus, minus, predictions, predictions, {"response_scale": torch.ones(12)}
     )
     assert unchanged[0]["response_effect_scaled_mse"] == 4
+
+
+def test_quiet_stdout_with_new_episode_is_not_a_stalled_job(tmp_path):
+    import os
+
+    from toolkits.rlt.physrlt.campaign import job_stalled
+
+    log = tmp_path / "stdout.log"
+    log.write_text("old startup log")
+    os.utime(log, (100, 100))
+    assert job_stalled(tmp_path, 1000)
+    episode = tmp_path / "episodes.json"
+    episode.write_text("[]")
+    os.utime(episode, (999, 999))
+    assert not job_stalled(tmp_path, 1000)
+    assert job_stalled(tmp_path, 2000)
+
+
+def test_two_supervisors_cannot_claim_the_same_gpu(tmp_path):
+    from toolkits.rlt.physrlt.campaign import claim_gpu
+
+    first = claim_gpu(0, tmp_path)
+    assert first is not None
+    assert claim_gpu(0, tmp_path) is None
+    second = claim_gpu(1, tmp_path)
+    assert second is not None
+    second.close()
+    first.close()
+    replacement = claim_gpu(0, tmp_path)
+    assert replacement is not None
+    replacement.close()

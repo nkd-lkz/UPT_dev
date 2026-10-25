@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from toolkits.rlt.experiment_queue import gpu_idle
+from toolkits.rlt.experiment_queue import LEASE_DIRECTORY, gpu_idle
 from toolkits.rlt.pi05_baseline import write_json
 
 
@@ -356,7 +356,13 @@ def summarize(root: Path) -> None:
 
 
 def prepare_control_check(
-    root: Path, base_root: Path, after_root: Path, source: Path, assets: Path
+    root: Path,
+    base_root: Path,
+    after_root: Path,
+    source: Path,
+    assets: Path,
+    *,
+    recovery: bool = False,
 ) -> None:
     """Repeat matched controls after the Q action-domain fix and test outcome tokens."""
     root.mkdir(parents=True, exist_ok=True)
@@ -392,12 +398,18 @@ def prepare_control_check(
                     "--online-ticks",
                     "1040",
                     "--methods",
-                    "action_recon",
-                    "geometry",
-                    "response",
-                    "joint",
-                    "joint_outcomes",
-                    "joint_mixed",
+                    *(
+                        ["joint_mixed"]
+                        if recovery
+                        else [
+                            "action_recon",
+                            "geometry",
+                            "response",
+                            "joint",
+                            "joint_outcomes",
+                            "joint_mixed",
+                        ]
+                    ),
                 ],
             }
         )
@@ -406,7 +418,9 @@ def prepare_control_check(
         {
             "id": "reference-stress",
             "kind": "gpu",
-            "dependencies": ["task0-control-31", "task3-control-31"],
+            "dependencies": []
+            if recovery
+            else ["task0-control-31", "task3-control-31"],
             "output": str(stress),
             "timeout_seconds": 5400,
             "module": "toolkits.rlt.physrlt.stress",
@@ -426,7 +440,9 @@ def prepare_control_check(
         root / "plan.json",
         {
             "schema": 1,
-            "title": "Corrected matched controls, structured physical outputs and reference stress",
+            "title": "Recover only the incomplete mixed-token screen and blocked stress"
+            if recovery
+            else "Corrected matched controls, structured physical outputs and reference stress",
             "control_protocol_version": 2,
             "gpu_after_status": str(after_root / "status.json"),
             "global_wall_time_limit": None,
@@ -662,6 +678,24 @@ def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
     )
 
 
+def claim_gpu(gpu: int, directory: Path = LEASE_DIRECTORY):
+    """Acquire the shared research lease without waiting or taking another job's card."""
+    lease = (directory / f"rlt-research-gpu{gpu}.lock").open("a")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lease.close()
+        return None
+    return lease
+
+
+def job_stalled(output: Path, now: float, limit: float = 600) -> bool:
+    """Treat completed episode/effect artifacts as progress even with quiet stdout."""
+    paths = [output / name for name in ("stdout.log", "episodes.json", "effects.json")]
+    timestamps = [path.stat().st_mtime for path in paths if path.exists()]
+    return bool(timestamps) and now - max(timestamps) > limit
+
+
 def supervise(args: argparse.Namespace) -> None:
     """Wait for unused authorized cards; isolate per-job failures and keep logs."""
     plan_path = args.root / "plan.json"
@@ -697,17 +731,9 @@ def supervise(args: argparse.Namespace) -> None:
     try:
         while True:
             for name, running in list(active.items()):
-                process, job, log, start = running
+                process, job, log, start, lease = running
                 code = process.poll()
-                progress = [
-                    Path(job["output"]) / "stdout.log",
-                    Path(job["output"]) / "episodes.json",
-                ]
-                stalled = (
-                    time.time()
-                    - max(path.stat().st_mtime for path in progress if path.exists())
-                    > 600
-                )
+                stalled = job_stalled(Path(job["output"]), time.time())
                 if code is None and (
                     time.monotonic() - start > job["timeout_seconds"] or stalled
                 ):
@@ -722,6 +748,8 @@ def supervise(args: argparse.Namespace) -> None:
                     state[name]["stalled_without_log_progress"] = stalled
                 if code is not None:
                     log.close()
+                    if lease is not None:
+                        lease.close()
                     output = Path(job["output"])
                     artifact = output / (
                         "results.json" if job["kind"] == "cpu" else "result.json"
@@ -781,19 +809,35 @@ def supervise(args: argparse.Namespace) -> None:
                     state[name]["state"] = "waiting_gpu"
                     continue
                 gpu = available.pop(0) if job["kind"] == "gpu" else None
+                lease = claim_gpu(gpu) if gpu is not None else None
+                if gpu is not None and (lease is None or not gpu_idle(gpu)[0]):
+                    if lease is not None:
+                        lease.close()
+                    state[name].update(
+                        state="waiting_gpu",
+                        wait_reason="shared GPU lease or occupancy changed",
+                    )
+                    continue
                 command = [sys.executable, "-u", "-m", job["module"], *job["args"]]
                 if gpu is not None:
                     command += ["--gpu", str(gpu)]
                 output = Path(job["output"])
                 output.mkdir(parents=True, exist_ok=True)
                 log = (output / "stdout.log").open("a", buffering=1)
-                process = subprocess.Popen(
-                    command,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    start_new_session=True,
-                )
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        env=env,
+                        start_new_session=True,
+                        pass_fds=(lease.fileno(),) if lease is not None else (),
+                    )
+                except BaseException:
+                    log.close()
+                    if lease is not None:
+                        lease.close()
+                    raise
                 state[name].update(
                     state="running",
                     gpu=gpu,
@@ -802,7 +846,7 @@ def supervise(args: argparse.Namespace) -> None:
                     command=command,
                     start_unix=time.time(),
                 )
-                active[name] = (process, job, log, time.monotonic())
+                active[name] = (process, job, log, time.monotonic(), lease)
             write_json(status_path, state)
             summarize(args.root)
             if all(
@@ -812,6 +856,12 @@ def supervise(args: argparse.Namespace) -> None:
                 break
             time.sleep(10)
     finally:
+        for _, _, log, _, lease in active.values():
+            log.close()
+            if lease is not None:
+                # Children inherit the lease, so an interrupted supervisor does
+                # not expose a still-running GPU job to another campaign.
+                lease.close()
         lock.close()
 
 
@@ -823,6 +873,7 @@ def main() -> None:
             "prepare",
             "prepare-followup",
             "prepare-control-check",
+            "prepare-control-recovery",
             "prepare-anchor-check",
             "prepare-repeat",
             "prepare-paired-actions",
@@ -842,6 +893,7 @@ def main() -> None:
         "prepare",
         "prepare-followup",
         "prepare-control-check",
+        "prepare-control-recovery",
         "prepare-anchor-check",
         "prepare-repeat",
         "prepare-paired-actions",
@@ -854,6 +906,7 @@ def main() -> None:
             prepare_paired_actions(args.root, args.base_root, args.source)
         elif args.mode in {
             "prepare-control-check",
+            "prepare-control-recovery",
             "prepare-anchor-check",
             "prepare-repeat",
         }:
@@ -861,6 +914,16 @@ def main() -> None:
                 parser.error(
                     "prepare-control-check requires --base-root and --after-root"
                 )
+            if args.mode == "prepare-control-recovery":
+                prepare_control_check(
+                    args.root,
+                    args.base_root,
+                    args.after_root,
+                    args.source,
+                    args.assets,
+                    recovery=True,
+                )
+                return
             operation = {
                 "prepare-control-check": prepare_control_check,
                 "prepare-anchor-check": prepare_anchor_check,
