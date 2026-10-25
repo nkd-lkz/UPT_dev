@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import subprocess
 import time
 from pathlib import Path
 
@@ -29,7 +30,10 @@ from toolkits.rlt.pi05_baseline import (
 class FrozenReadout:
     """Own a fixed representation version throughout a control experiment."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, mode: str = "latent"):
+        if mode not in {"latent", "outcomes", "mixed"}:
+            raise ValueError("Unknown physical token deployment mode")
+        self.mode = mode
         self.payload = torch.load(path, map_location="cpu", weights_only=True)
         self.model = PhysicalReadout(
             self.payload["response_dim"],
@@ -50,6 +54,32 @@ class FrozenReadout:
         z = self.model.encode(
             *inputs(data, self.payload["stats"], self.payload["method"])
         )
+        if self.mode != "latent":
+            commands = torch.from_numpy(env_commands(data["ref"][0].numpy()))[None]
+            predictions = self.model.consequences(z, commands)
+            depth = predictions["geometry"][..., :64].reshape(2, 1, 8, 8)
+            depth = torch.nn.functional.avg_pool2d(depth, 2).flatten()
+            quantities = torch.cat(
+                (
+                    predictions["response"].flatten(),
+                    depth,
+                    predictions["geometry"][..., 64:].flatten(),
+                )
+            )
+            if quantities.numel() > 128:
+                raise ValueError("Explicit physical quantities exceed token budget")
+            physical = torch.nn.functional.pad(
+                quantities, (0, 128 - quantities.numel())
+            )[None]
+            if self.mode == "outcomes":
+                z = physical
+            else:
+                # Keep half the original readout and a fixed-budget view of
+                # normalized predicted physical consequences, without future GT.
+                compact = torch.nn.functional.adaptive_avg_pool1d(
+                    physical[:, None], 64
+                )[:, 0]
+                z = torch.cat((z[:, :64], compact), -1)
         return {"z": z[0], "ref": data["ref"][0].clamp(-1, 1), "prop": data["prop"][0]}
 
 
@@ -135,13 +165,20 @@ def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
         else:
             following, next_features = prediction, features
         if replay is not None:
+            accepted_commands = torch.from_numpy(commands.copy())
+            accepted_commands[chunk_ticks:] = 0
             replay.append(
                 features
                 | {
-                    "action": torch.from_numpy(commands.copy()),
+                    # Q uses the policy proposal domain, as do its actor/target
+                    # calls. The deterministic environment mapping belongs to
+                    # the transition. Keep the accepted commands separately for
+                    # physical supervision, not as mismatched Q input labels.
+                    "action": action,
+                    "accepted_commands": accepted_commands,
                     "next_z": next_features["z"],
                     "next_ref": next_features["ref"],
-                    "next_prop": next_features["prop"],
+                    "next_prop": torch.as_tensor(obs["state"], dtype=torch.float32),
                     "ticks": chunk_ticks,
                     "terminal": success,
                     "reward": chunk_reward * 5,
@@ -173,6 +210,21 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     if (args.output / "result.json").exists():
         raise FileExistsError("Completed control pilots are immutable")
+    write_json(
+        args.output / "run_manifest.json",
+        {
+            "revision": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True
+            ).strip(),
+            "arguments": {
+                key: str(value) if isinstance(value, Path) else value
+                for key, value in vars(args).items()
+            },
+            "critic_action_space": "policy_proposal_with_fixed_environment_mapping",
+            "physical_target_action_space": "accepted_native_commands",
+            "control_protocol_version": 2,
+        },
+    )
     configure_gpu(args.gpu, args.output)
     reservation = torch.empty(1, device="cuda")
     configure_source(args.source)
@@ -195,8 +247,12 @@ def run(args):
             records.append(row | {"method": "reference", "stage": "frozen"})
             write_json(args.output / "episodes.json", records)
         for method in args.methods:
-            path = args.probes / f"{method}-seed{args.seed}" / "readout.pt"
-            readout = FrozenReadout(path)
+            base_method, mode = method, "latent"
+            for suffix in ("_outcomes", "_mixed"):
+                if method.endswith(suffix):
+                    base_method, mode = method.removesuffix(suffix), suffix[1:]
+            path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
+            readout = FrozenReadout(path, mode=mode)
             learner, fidelity = warmup(readout, dataset, args.seed, args.warmup_steps)
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -241,6 +297,7 @@ def run(args):
                     torch.save(
                         learner.state_dict(), args.output / f"{method}-online.pt"
                     )
+                    torch.save(replay, args.output / f"{method}-replay.pt")
                 for case in validation_cases + dev_cases:
                     records.append(
                         rollout(env, reference, readout, learner, case, 520)
@@ -259,6 +316,7 @@ def run(args):
         "role": "small development pilots, not final-test success claims",
         "warmup_steps": args.warmup_steps,
         "online_tick_cap": args.online_ticks,
+        "control_protocol_version": 2,
     }
     write_json(args.output / "result.json", result)
 

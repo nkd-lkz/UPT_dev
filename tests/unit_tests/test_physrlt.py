@@ -237,3 +237,84 @@ def test_followup_methods_fit_and_restore(tmp_path, method):
     assert encoded["z"].shape == (128,)
     assert torch.isfinite(encoded["z"]).all()
     assert readout.model.factorized == (method == "factorized_joint")
+
+
+@pytest.mark.parametrize("limit", [7, 10])
+def test_control_records_proposal_and_execution_domains_and_real_successor(
+    monkeypatch, limit
+):
+    from toolkits.rlt.physrlt import control
+
+    class SimulatorEdge:
+        pilot_reset_hashes = {}
+        instruction = "synthetic integration test"
+
+        def reset(self, case):
+            self.tick = 0
+            return {"state": np.zeros(8, np.float32)}
+
+        def step(self, command):
+            self.tick += 1
+            return {"state": np.full(8, self.tick, np.float32)}, 0.0, False
+
+    class ReferenceEdge:
+        def predict(self, obs, instruction, seed):
+            return {"ref": np.full((10, 7), 0.2, np.float32)}
+
+    class Readout:
+        def encode(self, prediction, prop):
+            return {
+                "z": torch.full((128,), float(prop[0])),
+                "ref": torch.from_numpy(prediction["ref"]),
+                "prop": torch.as_tensor(prop),
+            }
+
+    class Learner:
+        def command(self, features, deterministic):
+            return features["ref"].clone()
+
+        def update(self, replay):
+            return {"updated": 1}
+
+    monkeypatch.setattr(control, "physical_reset_hash", lambda env: "synthetic-reset")
+    case = {"id": "synthetic", "split": "train", "state": 0, "seed": 3}
+    replay = []
+    result = control.rollout(
+        SimulatorEdge(), ReferenceEdge(), Readout(), Learner(), case, limit, replay
+    )
+    assert result["ticks"] == limit
+    assert len(replay) == 1
+    assert replay[0]["action"][0, 6].item() == pytest.approx(0.2)
+    assert replay[0]["accepted_commands"][0, 6].item() == 1
+    assert replay[0]["accepted_commands"][limit:].count_nonzero() == 0
+    assert replay[0]["prop"][0] == 9
+    assert replay[0]["next_prop"][0] == 9 + limit
+    assert len(result["updates"]) == int(limit == 10)
+
+
+def test_structured_physics_token_remains_causal(tmp_path):
+    from toolkits.rlt.physrlt.control import FrozenReadout
+
+    rows = synthetic_rows()
+    path = tmp_path / "synthetic.pt"
+    torch.save({"rows": rows}, path)
+    run(
+        Namespace(
+            dataset=path,
+            output=tmp_path / "probes",
+            methods=["joint"],
+            seeds=[3],
+            steps=2,
+            threads=2,
+        )
+    )
+    for mode in ("outcomes", "mixed"):
+        readout = FrozenReadout(tmp_path / "probes/joint-seed3/readout.pt", mode=mode)
+        original = readout.encode(rows[0], rows[0]["prop"])["z"]
+        altered = copy.deepcopy(rows[0])
+        altered["response"][:] = 1e9
+        altered["geometry"][:] = 1e9
+        torch.testing.assert_close(
+            readout.encode(altered, altered["prop"])["z"], original
+        )
+        assert original.shape == (128,)
