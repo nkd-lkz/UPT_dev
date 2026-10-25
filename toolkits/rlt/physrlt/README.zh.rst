@@ -43,3 +43,12 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 hybrid_recon 与 hybrid_joint 把固定特征维度各分一半给两个来源；joint_recon 保留权重 0.1 的重建损失；factorized_joint 分别监督 latent 的两半，policy 仍读取完整 latent。residual_joint 预测简单“本体＋动作”模型无法解释的执行响应，拟合先验时排除目标训练回合；这是经验响应先验，不是已知物理定律。state_action_joint 重复作为简单输入对照。第二轮仍使用 400 步表征训练、3 个离线 seed，并开展单 seed 控制筛选。
 
 诊断项 token_without_candidate 仅从探针输入中移除实际接受的命令，token 仍包含 reference 意图，因此不是完全无动作基线。要证明反事实动作效果正确，还需要匹配干预实验；观察性预测误差本身不够。
+
+修正控制协议并使用预测物理量
+--------------------------
+
+控制协议第 2 版保证 critic 的 replay、actor 和 target 使用相同的 policy 提议动作域；实际接受的原生命令另存，用于物理监督。发现这一不一致后，首轮在线结果已作废；交互数据、离线探针、reference 和 BC 评测仍可使用。解释早期在线结果前应先检查 INVALIDATION.json。
+
+使用 prepare-control-check，并指定 --base-root 和 --after-root，可在第二轮结束后接续修正的匹配对照。除四种基础表征外，joint_outcomes 直接向 policy 提供预测的归一化关节／末端／夹爪运动、降采样深度变化和物体运动；joint_mixed 将它们与一半 latent 结合。两者只用 reference 条件下的预测，不读未来实测值；部署保留解码器，因此时延统计必须计入这部分开销。
+
+最后在训练初态上筛查平移命令增益与执行延迟。它属于自定义软件执行扰动，不是官方 LIBERO-Pro 成绩，也不等于修改摩擦或刚度。未把待执行命令加入状态前，代码拒绝延迟条件下的在线 RL。任务连续 10 分钟没有日志进展会被停止，启动时的 GPU 抢占竞态仅作有限次数重试。

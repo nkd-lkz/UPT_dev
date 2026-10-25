@@ -240,8 +240,9 @@ def test_followup_methods_fit_and_restore(tmp_path, method):
 
 
 @pytest.mark.parametrize("limit", [7, 10])
+@pytest.mark.parametrize("gain", [0.7, 1.0])
 def test_control_records_proposal_and_execution_domains_and_real_successor(
-    monkeypatch, limit
+    monkeypatch, limit, gain
 ):
     from toolkits.rlt.physrlt import control
 
@@ -280,12 +281,20 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
     case = {"id": "synthetic", "split": "train", "state": 0, "seed": 3}
     replay = []
     result = control.rollout(
-        SimulatorEdge(), ReferenceEdge(), Readout(), Learner(), case, limit, replay
+        SimulatorEdge(),
+        ReferenceEdge(),
+        Readout(),
+        Learner(),
+        case,
+        limit,
+        replay,
+        execution_gain=gain,
     )
     assert result["ticks"] == limit
     assert len(replay) == 1
     assert replay[0]["action"][0, 6].item() == pytest.approx(0.2)
     assert replay[0]["accepted_commands"][0, 6].item() == 1
+    assert replay[0]["accepted_commands"][0, 0].item() == pytest.approx(0.2 * gain)
     assert replay[0]["accepted_commands"][limit:].count_nonzero() == 0
     assert replay[0]["prop"][0] == 9
     assert replay[0]["next_prop"][0] == 9 + limit
@@ -318,3 +327,10 @@ def test_structured_physics_token_remains_causal(tmp_path):
             readout.encode(altered, altered["prop"])["z"], original
         )
         assert original.shape == (128,)
+
+
+def test_delayed_online_rl_requires_state_augmentation():
+    from toolkits.rlt.physrlt.control import rollout
+
+    with pytest.raises(ValueError, match="state augmentation"):
+        rollout(None, None, None, None, {}, 10, replay=[], delay_ticks=2)

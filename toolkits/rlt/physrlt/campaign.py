@@ -320,6 +320,7 @@ def prepare_followup(root: Path, base_root: Path, source: Path, assets: Path) ->
 def summarize(root: Path) -> None:
     """Build an auditable development table without converting predictions to SR."""
     records = []
+    invalidated = (root / "INVALIDATION.json").exists()
     for path in sorted(root.glob("task*/control-seed*/episodes.json")):
         episodes = json.loads(path.read_text())
         groups = {}
@@ -340,6 +341,10 @@ def summarize(root: Path) -> None:
                     "mean_ticks_all_episodes": sum(r["ticks"] for r in group)
                     / len(group),
                     "final_test": False,
+                    "unique_layouts": len({r["state_id"] for r in group}),
+                    "scientific_status": "invalidated_action_domain"
+                    if invalidated and stage.startswith("online_")
+                    else "development_only",
                 }
             )
     write_json(root / "control_summary.json", records)
@@ -348,6 +353,94 @@ def summarize(root: Path) -> None:
             writer = csv.DictWriter(stream, fieldnames=list(records[0]))
             writer.writeheader()
             writer.writerows(records)
+
+
+def prepare_control_check(
+    root: Path, base_root: Path, after_root: Path, source: Path, assets: Path
+) -> None:
+    """Repeat matched controls after the Q action-domain fix and test outcome tokens."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        output = root / name / "control-seed31"
+        jobs.append(
+            {
+                "id": f"task{task}-control-31",
+                "kind": "gpu",
+                "dependencies": [],
+                "output": str(output),
+                "timeout_seconds": 10800,
+                "module": "toolkits.rlt.physrlt.control",
+                "args": [
+                    "--source",
+                    str(source),
+                    "--assets",
+                    str(assets),
+                    "--dataset",
+                    str(base_root / name / "collection/transitions.pt"),
+                    "--probes",
+                    str(base_root / name / "probes"),
+                    "--output",
+                    str(output),
+                    "--seed",
+                    "31",
+                    "--warmup-steps",
+                    "1500",
+                    "--online-ticks",
+                    "1040",
+                    "--methods",
+                    "action_recon",
+                    "geometry",
+                    "response",
+                    "joint",
+                    "joint_outcomes",
+                    "joint_mixed",
+                ],
+            }
+        )
+    stress = root / "reference_stress"
+    jobs.append(
+        {
+            "id": "reference-stress",
+            "kind": "gpu",
+            "dependencies": ["task0-control-31", "task3-control-31"],
+            "output": str(stress),
+            "timeout_seconds": 5400,
+            "module": "toolkits.rlt.physrlt.stress",
+            "args": [
+                "--source",
+                str(source),
+                "--assets",
+                str(assets),
+                "--base-root",
+                str(base_root),
+                "--output",
+                str(stress),
+            ],
+        }
+    )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "Corrected matched controls, structured physical outputs and reference stress",
+            "control_protocol_version": 2,
+            "gpu_after_status": str(after_root / "status.json"),
+            "global_wall_time_limit": None,
+            "base_root": str(base_root),
+            "no_final_test_access": True,
+            "hypotheses": {
+                "joint_outcomes": "Explicit predicted response and geometry may be easier for the small policy to use than a latent alone",
+                "joint_mixed": "Preserve half the latent while exposing predicted physical quantities",
+                "reference_stress": "Screen software actuation shifts on training layouts before allocating adaptation training",
+            },
+            "invalidated_prior_online_results": str(base_root / "INVALIDATION.json"),
+            "jobs": jobs,
+        },
+    )
 
 
 def supervise(args: argparse.Namespace) -> None:
@@ -387,7 +480,13 @@ def supervise(args: argparse.Namespace) -> None:
             for name, running in list(active.items()):
                 process, job, log, start = running
                 code = process.poll()
-                if code is None and time.monotonic() - start > job["timeout_seconds"]:
+                stalled = (
+                    time.time() - (Path(job["output"]) / "stdout.log").stat().st_mtime
+                    > 600
+                )
+                if code is None and (
+                    time.monotonic() - start > job["timeout_seconds"] or stalled
+                ):
                     os.killpg(process.pid, signal.SIGTERM)
                     try:
                         process.wait(timeout=10)
@@ -396,6 +495,7 @@ def supervise(args: argparse.Namespace) -> None:
                         process.wait(timeout=10)
                     code = process.returncode
                     state[name]["timeout"] = True
+                    state[name]["stalled_without_log_progress"] = stalled
                 if code is not None:
                     log.close()
                     output = Path(job["output"])
@@ -409,6 +509,18 @@ def supervise(args: argparse.Namespace) -> None:
                         exit_code=code,
                         end_unix=time.time(),
                     )
+                    failure_text = (output / "stdout.log").read_text(errors="replace")[
+                        -4000:
+                    ]
+                    if (
+                        state[name]["state"] == "failed"
+                        and "is occupied: memory=" in failure_text
+                        and state[name]["attempts"] < 5
+                    ):
+                        state[name].update(
+                            state="waiting_gpu",
+                            wait_reason="GPU became occupied during launch; bounded retry",
+                        )
                     del active[name]
             ready, blocked = ready_jobs(plan["jobs"], state)
             for name in blocked:
@@ -482,19 +594,35 @@ def supervise(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "prepare-followup", "run", "summarize")
+        "mode",
+        choices=(
+            "prepare",
+            "prepare-followup",
+            "prepare-control-check",
+            "run",
+            "summarize",
+        ),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--base-root", type=Path)
+    parser.add_argument("--after-root", type=Path)
     parser.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--idle-seconds", type=int, default=30)
     args = parser.parse_args()
-    if args.mode in {"prepare", "prepare-followup"}:
+    if args.mode in {"prepare", "prepare-followup", "prepare-control-check"}:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
-        if args.mode == "prepare-followup":
+        if args.mode == "prepare-control-check":
+            if not args.base_root or not args.after_root:
+                parser.error(
+                    "prepare-control-check requires --base-root and --after-root"
+                )
+            prepare_control_check(
+                args.root, args.base_root, args.after_root, args.source, args.assets
+            )
+        elif args.mode == "prepare-followup":
             if not args.base_root:
                 parser.error("prepare-followup requires --base-root")
             prepare_followup(args.root, args.base_root, args.source, args.assets)

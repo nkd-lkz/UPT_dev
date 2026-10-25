@@ -59,3 +59,12 @@ The first pilot motivates a second development plan: action-side features are no
 ``hybrid_recon`` and ``hybrid_joint`` allocate half the fixed feature width to each pathway. ``joint_recon`` retains a 0.1-weight reconstruction loss. ``factorized_joint`` gives geometry and response decoders separate latent halves while retaining the full latent for the policy. ``residual_joint`` predicts the response left unexplained by an empirical state/action predictor, fitted without the target training episode. Its residual prior is not a known physics law. ``state_action_joint`` is repeated as the simple-input control. Followups retain 400 representation updates, three offline seeds and a one-seed control screen.
 
 The diagnostic ``token_without_candidate`` omits the accepted command from the probe, but its token still contains reference intent. It is not a fully action-free baseline. Correct counterfactual effects require matched interventions; observational prediction errors alone cannot establish them.
+
+Corrected Control and Physical Outputs
+-------------------------------------
+
+Control protocol version 2 keeps the critic's replay, actor and target inputs in the same policy-proposal action domain. Accepted native commands are retained separately for physical supervision. The first pilot's online results were invalidated after this mismatch was found; its transition data, offline probes, reference and BC evaluations remain usable. Check INVALIDATION.json before interpreting any earlier online result.
+
+Use ``prepare-control-check`` with ``--base-root`` and ``--after-root`` to queue corrected matched controls after the followup campaign. In addition to the four basic readouts, ``joint_outcomes`` exposes predicted normalized joint/EE/gripper motion, pooled depth change and object motion directly to the policy; ``joint_mixed`` combines these with half the latent. Both use reference-conditioned predictions, never future measurements. They keep inference decoders, so any latency claim must count those decoders.
+
+The final reference screen changes translation-command gain or delays command execution on training layouts. This is custom software actuation stress, not an official LIBERO-Pro score or a friction/stiffness change. Delayed online RL is rejected until pending commands are included in its state. A job with no log progress for ten minutes is stopped; a launch-time GPU occupancy race receives a bounded retry.

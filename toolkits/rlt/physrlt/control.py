@@ -8,6 +8,8 @@ import argparse
 import random
 import subprocess
 import time
+from collections import deque
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -118,8 +120,28 @@ def warmup(readout: FrozenReadout, dataset: dict, seed: int, steps: int):
     return learner, {"before": initial, "after": final, "trace": trace}
 
 
-def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
+def rollout(
+    env,
+    reference,
+    readout,
+    learner,
+    case,
+    limit,
+    replay=None,
+    *,
+    execution_gain: float = 1.0,
+    delay_ticks: int = 0,
+) -> dict:
     """Execute an explicit control budget, optionally updating only small heads."""
+    if not 0 < execution_gain <= 1.5 or not 0 <= delay_ticks <= 5:
+        raise ValueError("Actuation stress is outside the declared development range")
+    if delay_ticks and replay is not None:
+        raise ValueError(
+            "Delayed online RL needs pending-command state augmentation first"
+        )
+    pending = deque(
+        [np.array([0, 0, 0, 0, 0, 0, -1], np.float32) for _ in range(delay_ticks)]
+    )
     obs = env.reset(case)
     for _ in range(9):
         obs, _, _ = env.step(np.array([0, 0, 0, 0, 0, 0, -1], np.float32))
@@ -143,10 +165,16 @@ def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
             else torch.from_numpy(prediction["ref"])
         )
         commands = env_commands(action.numpy())
+        commands[:, :3] = (commands[:, :3] * execution_gain).clip(-1, 1)
+        accepted = np.zeros_like(commands)
         inference_seconds += time.monotonic() - begin
         chunk_ticks, chunk_reward = 0, 0.0
         for command in commands:
+            if delay_ticks:
+                pending.append(command.copy())
+                command = pending.popleft()
             obs, reward, done = env.step(command)
+            accepted[chunk_ticks] = command
             chunk_ticks += 1
             ticks += 1
             chunk_reward += reward
@@ -165,8 +193,7 @@ def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
         else:
             following, next_features = prediction, features
         if replay is not None:
-            accepted_commands = torch.from_numpy(commands.copy())
-            accepted_commands[chunk_ticks:] = 0
+            accepted_commands = torch.from_numpy(accepted)
             replay.append(
                 features
                 | {
@@ -203,6 +230,8 @@ def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
         "updates": updates,
         "assistance": False,
         "memory": False,
+        "execution_gain": execution_gain,
+        "delay_ticks": delay_ticks,
     }
 
 
@@ -241,9 +270,10 @@ def run(args):
         episode["case"]["id"]: episode["reset_hash"] for episode in dataset["episodes"]
     }
     records = []
+    rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
     try:
         for case in validation_cases + dev_cases:
-            row = rollout(env, reference, None, None, case, 520)
+            row = rollout_case(env, reference, None, None, case, 520)
             records.append(row | {"method": "reference", "stage": "frozen"})
             write_json(args.output / "episodes.json", records)
         for method in args.methods:
@@ -258,7 +288,7 @@ def run(args):
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
             validation_results = []
             for case in validation_cases:
-                row = rollout(env, reference, readout, learner, case, 520)
+                row = rollout_case(env, reference, readout, learner, case, 520)
                 validation_results.append(row)
                 records.append(row | {"method": method, "stage": "warmup"})
                 write_json(args.output / "episodes.json", records)
@@ -278,7 +308,7 @@ def run(args):
             )
             for case in dev_cases:
                 records.append(
-                    rollout(env, reference, readout, learner, case, 520)
+                    rollout_case(env, reference, readout, learner, case, 520)
                     | {"method": method, "stage": "warmup"}
                 )
                 write_json(args.output / "episodes.json", records)
@@ -288,7 +318,7 @@ def run(args):
                     budget = min(520, args.online_ticks - count)
                     if budget <= 0:
                         break
-                    row = rollout(
+                    row = rollout_case(
                         env, reference, readout, learner, case, budget, replay
                     )
                     count += row["ticks"]
@@ -300,7 +330,7 @@ def run(args):
                     torch.save(replay, args.output / f"{method}-replay.pt")
                 for case in validation_cases + dev_cases:
                     records.append(
-                        rollout(env, reference, readout, learner, case, 520)
+                        rollout_case(env, reference, readout, learner, case, 520)
                         | {"method": method, "stage": "online_frozen_eval"}
                     )
                     write_json(args.output / "episodes.json", records)
@@ -329,6 +359,7 @@ def main():
     parser.add_argument("--seed", type=int, default=31)
     parser.add_argument("--warmup-steps", type=int, default=1500)
     parser.add_argument("--online-ticks", type=int, default=1040)
+    parser.add_argument("--execution-gain", type=float, default=1.0)
     parser.add_argument(
         "--methods",
         nargs="+",
