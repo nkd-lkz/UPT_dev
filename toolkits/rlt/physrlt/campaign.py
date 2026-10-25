@@ -218,6 +218,105 @@ def ready_jobs(jobs: list[dict], state: dict) -> tuple[list[dict], list[str]]:
     return ready, blocked
 
 
+def prepare_followup(root: Path, base_root: Path, source: Path, assets: Path) -> None:
+    """Freeze targeted followups prompted by the first development probes."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    methods = [
+        "hybrid_recon",
+        "hybrid_joint",
+        "joint_recon",
+        "factorized_joint",
+        "residual_joint",
+        "state_action_joint",
+    ]
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        task_dir = root / f"task{task}-{perturbation}"
+        dataset = base_root / task_dir.name / "collection/transitions.pt"
+        if not dataset.exists():
+            raise FileNotFoundError(dataset)
+        probes = task_dir / "probes"
+        jobs.append(
+            {
+                "id": f"task{task}-probe",
+                "kind": "cpu",
+                "dependencies": [],
+                "output": str(probes),
+                "timeout_seconds": 3600,
+                "module": "toolkits.rlt.physrlt.probe",
+                "args": [
+                    "--dataset",
+                    str(dataset),
+                    "--output",
+                    str(probes),
+                    "--steps",
+                    "400",
+                    "--seeds",
+                    "31",
+                    "47",
+                    "59",
+                    "--threads",
+                    "4",
+                    "--methods",
+                    *methods,
+                ],
+            }
+        )
+        control = task_dir / "control-seed31"
+        jobs.append(
+            {
+                "id": f"task{task}-control-31",
+                "kind": "gpu",
+                "dependencies": [f"task{task}-probe"],
+                "output": str(control),
+                "timeout_seconds": 10800,
+                "module": "toolkits.rlt.physrlt.control",
+                "args": [
+                    "--source",
+                    str(source),
+                    "--assets",
+                    str(assets),
+                    "--dataset",
+                    str(dataset),
+                    "--probes",
+                    str(probes),
+                    "--output",
+                    str(control),
+                    "--seed",
+                    "31",
+                    "--warmup-steps",
+                    "1500",
+                    "--online-ticks",
+                    "1040",
+                    "--methods",
+                    *methods,
+                ],
+            }
+        )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "PhysRLT targeted development followups",
+            "base_root": str(base_root),
+            "gpu_after_status": str(base_root / "status.json"),
+            "global_wall_time_limit": None,
+            "no_final_test_access": True,
+            "selection_provenance": "Motivated by pilot-v1 development results; these are not independent confirmatory tests",
+            "hypotheses": {
+                "hybrid_joint": "Prefix provides geometry while action features provide execution intent; compare hybrid_recon",
+                "joint_recon": "A 0.1 reconstruction term may preserve control-relevant information during grounding",
+                "factorized_joint": "Separate supervision of two latent halves may reduce response/geometry gradient interference",
+                "residual_joint": "Cross-fitted state/action response residuals may focus the token on nontrivial execution effects",
+                "state_action_joint": "Check whether action-expert features add value beyond current proprioception/reference",
+            },
+            "jobs": jobs,
+        },
+    )
+
+
 def summarize(root: Path) -> None:
     """Build an auditable development table without converting predictions to SR."""
     records = []
@@ -328,6 +427,16 @@ def supervise(args: argparse.Namespace) -> None:
                     idle_since.pop(gpu, None)
             for job in ready:
                 name = job["id"]
+                predecessor = plan.get("gpu_after_status")
+                if job["kind"] == "gpu" and predecessor:
+                    previous = json.loads(Path(predecessor).read_text())
+                    if not all(
+                        value["state"] in {"complete", "failed", "blocked"}
+                        for value in previous.values()
+                    ):
+                        state[name]["state"] = "waiting_gpu"
+                        state[name]["wait_reason"] = "prior campaign is still active"
+                        continue
                 if job["kind"] == "cpu" and any(
                     j[1]["kind"] == "cpu" for j in active.values()
                 ):
@@ -372,17 +481,25 @@ def supervise(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "run", "summarize"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare-followup", "run", "summarize")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--assets", type=Path)
+    parser.add_argument("--base-root", type=Path)
     parser.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--idle-seconds", type=int, default=30)
     args = parser.parse_args()
-    if args.mode == "prepare":
+    if args.mode in {"prepare", "prepare-followup"}:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
-        prepare(args.root, args.source, args.assets)
+        if args.mode == "prepare-followup":
+            if not args.base_root:
+                parser.error("prepare-followup requires --base-root")
+            prepare_followup(args.root, args.base_root, args.source, args.assets)
+        else:
+            prepare(args.root, args.source, args.assets)
     elif args.mode == "run":
         supervise(args)
     else:

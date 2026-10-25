@@ -50,3 +50,12 @@ The encoder receives only pre-execution features, current proprioception and ref
 No memory retrieval, external agent or language-model API is added. The implementation enforces native action bounds and measurement validity; it does not assume unknown friction laws or rigid coupling between end-effector and object displacement. Depth and object states are privileged training targets, not extra deployment sensors. The geometry head is a compact short-horizon predictor, not PrismWAM's depth diffusion model.
 
 Prediction improvements must be followed by repeated closed-loop gains. This pilot cannot establish reduced human intervention, cross-generator generality or throughput gains. Report wall time and inference overhead separately from interaction efficiency, and create a fresh split before formal paper experiments.
+
+Targeted Followups
+------------------
+
+The first pilot motivates a second development plan: action-side features are not consistently better than prefix or state/action inputs. Use ``prepare-followup`` with ``--base-root`` pointing to the first pilot and a new ``--root``. Its CPU probes run immediately; its GPU pilots wait until the first campaign finishes. All variants reuse the recorded data, so these are iterative development comparisons rather than independent confirmation.
+
+``hybrid_recon`` and ``hybrid_joint`` allocate half the fixed feature width to each pathway. ``joint_recon`` retains a 0.1-weight reconstruction loss. ``factorized_joint`` gives geometry and response decoders separate latent halves while retaining the full latent for the policy. ``residual_joint`` predicts the response left unexplained by an empirical state/action predictor, fitted without the target training episode. Its residual prior is not a known physics law. ``state_action_joint`` is repeated as the simple-input control. Followups retain 400 representation updates, three offline seeds and a one-seed control screen.
+
+The diagnostic ``token_without_candidate`` omits the accepted command from the probe, but its token still contains reference intent. It is not a fully action-free baseline. Correct counterfactual effects require matched interventions; observational prediction errors alone cannot establish them.

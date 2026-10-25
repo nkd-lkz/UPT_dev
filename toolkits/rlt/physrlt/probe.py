@@ -24,6 +24,11 @@ METHODS = (
     "shuffled_joint",
     "prefix_joint",
     "state_action_joint",
+    "hybrid_recon",
+    "hybrid_joint",
+    "joint_recon",
+    "factorized_joint",
+    "residual_joint",
 )
 
 
@@ -39,13 +44,16 @@ def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
         "geometry",
         "horizon_mask",
     )
-    return {key: torch.stack([r[key] for r in rows]) for key in keys}
+    result = {key: torch.stack([r[key] for r in rows]) for key in keys}
+    cases = sorted({r["case_id"] for r in rows})
+    result["episode_id"] = torch.tensor([cases.index(r["case_id"]) for r in rows])
+    return result
 
 
 def normalization(data: dict, train: torch.Tensor, feature_key: str) -> dict:
     """Estimate scaling exclusively on training layouts, with physical floors."""
     result = {}
-    for key in (feature_key, "prop"):
+    for key in ("action_feature", "prefix_feature", "prop"):
         values = data[key][train]
         result[key + "_mean"] = values.mean(0)
         result[key + "_scale"] = values.std(0).clamp_min(0.05)
@@ -59,6 +67,18 @@ def inputs(data: dict, stats: dict, method: str) -> tuple:
     """Apply train-only normalization identically in fitting and deployment."""
     key = "prefix_feature" if method == "prefix_joint" else "action_feature"
     feature = (data[key] - stats[key + "_mean"]) / stats[key + "_scale"]
+    if method.startswith("hybrid_"):
+        prefix = (data["prefix_feature"] - stats["prefix_feature_mean"]) / stats[
+            "prefix_feature_scale"
+        ]
+        # Preserve four bins from each pathway without increasing input width.
+        feature = torch.cat(
+            (
+                feature.reshape(-1, 4, 128)[..., :64].flatten(1),
+                prefix.reshape(-1, 4, 128)[..., :64].flatten(1),
+            ),
+            -1,
+        )
     if method == "state_action_joint":
         feature = torch.zeros_like(feature)
     prop = (data["prop"] - stats["prop_mean"]) / stats["prop_scale"]
@@ -68,9 +88,16 @@ def inputs(data: dict, stats: dict, method: str) -> tuple:
 def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: int):
     """Train fixed-budget, equal-capacity variants; future states are labels only."""
     torch.manual_seed(seed)
-    model = PhysicalReadout(data["response"].shape[-1], data["geometry"].shape[-1])
+    model = PhysicalReadout(
+        data["response"].shape[-1],
+        data["geometry"].shape[-1],
+        factorized=method == "factorized_joint",
+    )
     feature_key = "prefix_feature" if method == "prefix_joint" else "action_feature"
     stats = normalization(data, train, feature_key)
+    response_target = data["response"]
+    if method == "residual_joint":
+        response_target = crossfitted_response_residual(data, train)
     features, props, refs = inputs(data, stats, method)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     index = train.nonzero().flatten()
@@ -89,7 +116,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
         mask = data["horizon_mask"][targets]
         loss = z.sum() * 0
         terms = {}
-        if method == "action_recon":
+        if method in {"action_recon", "hybrid_recon"}:
             loss = (model.reconstruct(z) - features[selected]).square().mean()
         else:
             for key in ("response", "geometry"):
@@ -97,7 +124,9 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                     continue
                 if method == "response" and key == "geometry":
                     continue
-                target = data[key][targets] / stats[key + "_scale"]
+                target = (response_target if key == "response" else data[key])[
+                    targets
+                ] / stats[key + "_scale"]
                 if key == "geometry":
                     # Prevent 64 depth bins from overwhelming the manipulated
                     # objects' few position coordinates.
@@ -108,6 +137,11 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                 else:
                     terms[key] = masked_loss(pred[key], target, mask)
                 loss = loss + terms[key]
+            if method == "joint_recon":
+                loss = (
+                    loss
+                    + 0.1 * (model.reconstruct(z) - features[selected]).square().mean()
+                )
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite {method} objective at {step}")
         optimizer.zero_grad(set_to_none=True)
@@ -135,6 +169,32 @@ def ridge_predict(x: torch.Tensor, y: torch.Tensor, train: torch.Tensor, ridge: 
         x[train].T @ x[train] + penalty, x[train].T @ y[train].double()
     )
     return (x @ weights).float()
+
+
+def crossfitted_response_residual(data: dict, train: torch.Tensor) -> torch.Tensor:
+    """Subtract a state/action predictor fitted without the target episode.
+
+    This is an empirical local response prior, not a known physical law.
+    Only training residuals supervise the encoder. Other splits are never
+    used to fit the prior or the representation.
+    """
+    residual = torch.zeros_like(data["response"])
+    for column, horizon in enumerate(HORIZONS):
+        commands = data["commands"].clone()
+        commands[:, horizon:] = 0
+        x = torch.cat((data["prop"], commands.flatten(1)), -1)
+        target = data["response"][:, column]
+        valid = data["horizon_mask"][:, column]
+        for episode in data["episode_id"][train].unique():
+            selected = train & (data["episode_id"] == episode) & valid
+            others = train & (data["episode_id"] != episode) & valid
+            if others.sum() < 2:
+                raise ValueError(
+                    "Residual supervision requires multiple training episodes"
+                )
+            prediction = ridge_predict(x, target, others, ridge=10.0)
+            residual[selected, column] = target[selected] - prediction[selected]
+    return residual
 
 
 @torch.no_grad()
@@ -233,6 +293,10 @@ def run(args: argparse.Namespace) -> list[dict]:
                 "state": "complete",
                 "method": method,
                 "seed": seed,
+                "factorized": model.factorized,
+                "response_target": "crossfitted_state_action_residual"
+                if method == "residual_joint"
+                else "measured_delta",
                 "steps": args.steps,
                 "training_rows": int(train.sum()),
                 "all_rows": len(rows),
@@ -249,6 +313,8 @@ def run(args: argparse.Namespace) -> list[dict]:
                     "stats": stats,
                     "method": method,
                     "seed": seed,
+                    "factorized": model.factorized,
+                    "response_target": result["response_target"],
                     "response_dim": data["response"].shape[-1],
                     "geometry_dim": data["geometry"].shape[-1],
                     "dataset": str(args.dataset),
@@ -303,7 +369,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument(
+        "--methods", nargs="+", choices=METHODS, default=list(METHODS[:7])
+    )
     parser.add_argument("--seeds", nargs="+", type=int, default=[31, 47, 59])
     parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--threads", type=int, default=4)

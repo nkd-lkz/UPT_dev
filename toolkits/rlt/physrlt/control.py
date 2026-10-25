@@ -32,7 +32,9 @@ class FrozenReadout:
     def __init__(self, path: Path):
         self.payload = torch.load(path, map_location="cpu", weights_only=True)
         self.model = PhysicalReadout(
-            self.payload["response_dim"], self.payload["geometry_dim"]
+            self.payload["response_dim"],
+            self.payload["geometry_dim"],
+            factorized=self.payload.get("factorized", False),
         )
         self.model.load_state_dict(self.payload["model"], strict=True)
         self.model.eval().requires_grad_(False)

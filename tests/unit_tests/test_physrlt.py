@@ -18,7 +18,13 @@ from toolkits.rlt.physrlt.data import (
     transition_targets,
 )
 from toolkits.rlt.physrlt.model import PhysicalReadout
-from toolkits.rlt.physrlt.probe import inputs, normalization, run, tensor_data
+from toolkits.rlt.physrlt.probe import (
+    crossfitted_response_residual,
+    inputs,
+    normalization,
+    run,
+    tensor_data,
+)
 
 
 def synthetic_rows():
@@ -179,3 +185,55 @@ def test_campaign_requires_smoke_and_keeps_layout_splits(tmp_path):
     assert len({case["state"] for case in cases}) == len(cases)
     with pytest.raises(FileExistsError):
         prepare(tmp_path, tmp_path / "source", tmp_path / "assets")
+
+
+def test_factorized_decoders_have_disjoint_token_gradients():
+    model = PhysicalReadout(12, 67, factorized=True)
+    token = torch.randn(2, 128, requires_grad=True)
+    prediction = model.consequences(token, torch.randn(2, 10, 7))
+    prediction["response"].sum().backward()
+    assert token.grad[:, :64].count_nonzero() == 0
+    assert token.grad[:, 64:].abs().sum() > 0
+
+
+def test_crossfitted_response_prior_never_reads_dev_labels():
+    data = tensor_data(synthetic_rows())
+    train = data["episode_id"] < 2
+    first = crossfitted_response_residual(data, train)
+    data["response"][~train] = 1e9
+    second = crossfitted_response_residual(data, train)
+    torch.testing.assert_close(first[train], second[train])
+    assert first[~train].count_nonzero() == 0
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "hybrid_recon",
+        "hybrid_joint",
+        "joint_recon",
+        "factorized_joint",
+        "residual_joint",
+    ],
+)
+def test_followup_methods_fit_and_restore(tmp_path, method):
+    from toolkits.rlt.physrlt.control import FrozenReadout
+
+    path = tmp_path / "synthetic.pt"
+    rows = synthetic_rows()
+    torch.save({"rows": rows}, path)
+    run(
+        Namespace(
+            dataset=path,
+            output=tmp_path / "probes",
+            methods=[method],
+            seeds=[3],
+            steps=2,
+            threads=2,
+        )
+    )
+    readout = FrozenReadout(tmp_path / "probes" / f"{method}-seed3/readout.pt")
+    encoded = readout.encode(rows[0], rows[0]["prop"])
+    assert encoded["z"].shape == (128,)
+    assert torch.isfinite(encoded["z"]).all()
+    assert readout.model.factorized == (method == "factorized_joint")
