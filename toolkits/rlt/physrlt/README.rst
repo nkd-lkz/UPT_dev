@@ -73,3 +73,15 @@ Preserving the Action Prior
 ---------------------------
 
 Use ``prepare-anchor-check`` with the same ``--base-root`` and an ``--after-root`` pointing to the corrected campaign to test whether physical supervision discarded useful action cues. Four arms combine a frozen reconstruction readout with reconstruction, geometry, response or joint readouts. A fixed projection maps the concatenated latents back to 128 dimensions. Every arm uses two 400-update encoders and the same actor; the dual-reconstruction control uses different initialization seeds to avoid a duplicated, rank-deficient token. This tests complementary representations, not extra policy capacity or a guaranteed physics benefit.
+
+Repeating on New Development Layouts
+-----------------------------------
+
+``prepare-repeat`` queues two training seeds (47 and 59), six new development layouts (10 through 15), and nominal or 0.7 translation-command gain. It compares reconstruction against joint physical supervision separately for action-only and fused features. This finite plan has 16 jobs, each with two methods, 1,500 BC updates and at most 1,040 online ticks per method. Its readouts remain trained on nominal data: the gain comparison tests transfer and short RL adaptation, not a representation already trained on changed physics. Each method uses the same task, initial states, training seed and budget within its matched comparison.
+
+The new layout identities must not overlap earlier pilot layouts; reset hashes also reject physical duplicates. Validation retains the original validation split. These additional published layouts are development data, not a certified untouched paper test. Repeated seeds on the same layouts do not increase the count of unique initial states. Report all methods and conditions, including failed validation gates and regressions.
+
+Reading the Evidence Ledger
+---------------------------
+
+Run ``python -m toolkits.rlt.physrlt.report --root <campaign-parent>`` to generate ``overview/index.html``, a JSON ledger and CSV tables from raw artifacts. Add ``--watch`` in a separate tmux session to refresh every minute until the prepared campaigns are terminal. Use only one report writer for a given parent directory. The report retains partial jobs, training splits, unique-layout counts and invalidated online results. It never replaces missing runs with expected scores or combines repeated reference evaluations into independent samples.

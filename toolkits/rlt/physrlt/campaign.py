@@ -504,6 +504,103 @@ def prepare_anchor_check(
     )
 
 
+def prepare_repeat(
+    root: Path, base_root: Path, after_root: Path, source: Path, assets: Path
+) -> None:
+    """Predeclare bounded replication on new development layouts and two seeds."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    followup = base_root.parent / "pilot-v2"
+    if not (followup / "plan.json").exists():
+        raise FileNotFoundError(
+            "This local replication requires completed pilot-v2 readouts"
+        )
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        cases_path = root / name / "development_cases.json"
+        cases_path.parent.mkdir(parents=True, exist_ok=True)
+        cases = [
+            {
+                "id": f"repeat-task{task}-{perturbation}-layout{state}",
+                "suite": "libero_10",
+                "task": task,
+                "state": state,
+                "kind": "published",
+                "perturbation": perturbation,
+                "seed": 77000 + 100 * task + state,
+                "split": "development",
+            }
+            for state in range(10, 16)
+        ]
+        write_json(cases_path, cases)
+        for gain in (1.0, 0.7):
+            for seed in (47, 59):
+                for family, probes, methods in (
+                    ("action", base_root / name / "probes", ["action_recon", "joint"]),
+                    (
+                        "fusion",
+                        followup / name / "probes",
+                        ["hybrid_recon", "hybrid_joint"],
+                    ),
+                ):
+                    output = root / name / f"control-seed{seed}-gain{gain}-{family}"
+                    jobs.append(
+                        {
+                            "id": f"task{task}-seed{seed}-gain{gain}-{family}",
+                            "kind": "gpu",
+                            "dependencies": [],
+                            "output": str(output),
+                            "timeout_seconds": 10800,
+                            "module": "toolkits.rlt.physrlt.control",
+                            "args": [
+                                "--source",
+                                str(source),
+                                "--assets",
+                                str(assets),
+                                "--dataset",
+                                str(base_root / name / "collection/transitions.pt"),
+                                "--probes",
+                                str(probes),
+                                "--output",
+                                str(output),
+                                "--seed",
+                                str(seed),
+                                "--warmup-steps",
+                                "1500",
+                                "--online-ticks",
+                                "1040",
+                                "--execution-gain",
+                                str(gain),
+                                "--development-cases",
+                                str(cases_path),
+                                "--methods",
+                                *methods,
+                            ],
+                        }
+                    )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "Bounded repeated PhysRLT development with matched reconstruction controls",
+            "gpu_after_status": str(after_root / "status.json"),
+            "global_wall_time_limit": None,
+            "control_protocol_version": 2,
+            "no_final_test_access": True,
+            "bounded_work": "2 tasks x 2 gains x 2 training seeds x 4 methods, each at most 1040 online ticks; no long training",
+            "new_development_layouts": list(range(10, 16)),
+            "selection": "No selection using these outcomes; report all arms",
+            "hypothesis": "Physical supervision must beat its same-feature reconstruction control across seeds and layouts, not just an easy pilot",
+            "stress_scope": "0.7 translation command gain is custom software attenuation, not changed friction or an official benchmark; readouts remain trained on nominal data",
+            "limits": "Published layouts may have appeared in prior baseline work; this remains development. Same layouts reused across seeds are not independent episodes.",
+            "base_root": str(base_root),
+            "jobs": jobs,
+        },
+    )
+
+
 def supervise(args: argparse.Namespace) -> None:
     """Wait for unused authorized cards; isolate per-job failures and keep logs."""
     plan_path = args.root / "plan.json"
@@ -541,8 +638,13 @@ def supervise(args: argparse.Namespace) -> None:
             for name, running in list(active.items()):
                 process, job, log, start = running
                 code = process.poll()
+                progress = [
+                    Path(job["output"]) / "stdout.log",
+                    Path(job["output"]) / "episodes.json",
+                ]
                 stalled = (
-                    time.time() - (Path(job["output"]) / "stdout.log").stat().st_mtime
+                    time.time()
+                    - max(path.stat().st_mtime for path in progress if path.exists())
                     > 600
                 )
                 if code is None and (
@@ -661,6 +763,7 @@ def main() -> None:
             "prepare-followup",
             "prepare-control-check",
             "prepare-anchor-check",
+            "prepare-repeat",
             "run",
             "summarize",
         ),
@@ -678,19 +781,24 @@ def main() -> None:
         "prepare-followup",
         "prepare-control-check",
         "prepare-anchor-check",
+        "prepare-repeat",
     }:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
-        if args.mode in {"prepare-control-check", "prepare-anchor-check"}:
+        if args.mode in {
+            "prepare-control-check",
+            "prepare-anchor-check",
+            "prepare-repeat",
+        }:
             if not args.base_root or not args.after_root:
                 parser.error(
                     "prepare-control-check requires --base-root and --after-root"
                 )
-            operation = (
-                prepare_control_check
-                if args.mode == "prepare-control-check"
-                else prepare_anchor_check
-            )
+            operation = {
+                "prepare-control-check": prepare_control_check,
+                "prepare-anchor-check": prepare_anchor_check,
+                "prepare-repeat": prepare_repeat,
+            }[args.mode]
             operation(
                 args.root, args.base_root, args.after_root, args.source, args.assets
             )

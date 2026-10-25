@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import subprocess
 import time
@@ -162,6 +163,10 @@ def rollout(
         raise RuntimeError(
             "Control reset differs from the recorded collection initial state"
         )
+    if expected is None and digest in env.pilot_reset_hashes.values():
+        raise RuntimeError(
+            "New development case duplicates a previously used physical layout"
+        )
     env.pilot_reset_hashes[case["id"]] = digest
     ticks, success, rewards, inference_seconds = 0, False, 0.0, 0.0
     start = time.monotonic()
@@ -246,6 +251,31 @@ def rollout(
     }
 
 
+def development_cases(path: Path, original: list[dict]) -> list[dict]:
+    """Load new development layouts without reusing training or pilot identities."""
+    cases = json.loads(path.read_text())
+    if not cases:
+        raise ValueError("New development cases must not be empty")
+    identities = {(c["suite"], c["task"], c["state"]) for c in original}
+    tasks = {(c["suite"], c["task"], c["perturbation"]) for c in original}
+    names = {c["id"] for c in original}
+    for case in cases:
+        identity = (case["suite"], case["task"], case["state"])
+        if (
+            case["split"] != "development"
+            or identity in identities
+            or case["id"] in names
+        ):
+            raise ValueError(
+                "New development layouts must be unique and disjoint from the pilot"
+            )
+        if (case["suite"], case["task"], case["perturbation"]) not in tasks:
+            raise ValueError("Development task and perturbation must match training")
+        identities.add(identity)
+        names.add(case["id"])
+    return cases
+
+
 def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     if (args.output / "result.json").exists():
@@ -276,6 +306,8 @@ def run(args):
     train_cases = [c for c in cases if c["split"] == "train"]
     validation_cases = [c for c in cases if c["split"] == "validation"]
     dev_cases = [c for c in cases if c["split"] == "development"]
+    if getattr(args, "development_cases", None):
+        dev_cases = development_cases(args.development_cases, cases)
     env = LiberoProEnvironment()
     env.pilot_reset_hashes = {
         episode["case"]["id"]: episode["reset_hash"] for episode in dataset["episodes"]
@@ -287,6 +319,10 @@ def run(args):
             row = rollout_case(env, reference, None, None, case, 520)
             records.append(row | {"method": "reference", "stage": "frozen"})
             write_json(args.output / "episodes.json", records)
+            print(
+                f"reference {case['id']}: success={row['success']} ticks={row['ticks']}",
+                flush=True,
+            )
         for method in args.methods:
             base_method, mode = method, "latent"
             anchor = None
@@ -354,6 +390,7 @@ def run(args):
                     write_json(args.output / "episodes.json", records)
             del learner, readout
             torch.cuda.empty_cache()
+            print(f"completed method={method} seed={args.seed} gate={gate}", flush=True)
     finally:
         env.close()
         del reservation
@@ -378,6 +415,7 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=1500)
     parser.add_argument("--online-ticks", type=int, default=1040)
     parser.add_argument("--execution-gain", type=float, default=1.0)
+    parser.add_argument("--development-cases", type=Path)
     parser.add_argument(
         "--methods",
         nargs="+",

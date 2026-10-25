@@ -369,3 +369,89 @@ def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path
     torch.save(payload, tmp_path / "mismatch.pt")
     with pytest.raises(ValueError, match="same training dataset"):
         FrozenReadout(physical, anchor=tmp_path / "mismatch.pt")
+
+
+def test_new_development_cases_exclude_all_original_layouts(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.control import development_cases
+
+    original = [
+        {
+            "suite": "libero_10",
+            "task": 0,
+            "state": 0,
+            "perturbation": "object",
+            "id": "old",
+        }
+    ]
+    fresh = original[0] | {"state": 10, "id": "new", "split": "development"}
+    path = tmp_path / "new.json"
+    path.write_text(json.dumps([fresh]))
+    assert development_cases(path, original) == [fresh]
+    for change in ({"state": 0}, {"id": "old"}, {"split": "train"}, {"task": 3}):
+        path.write_text(json.dumps([fresh | change]))
+        with pytest.raises(ValueError):
+            development_cases(path, original)
+    path.write_text(json.dumps([fresh, fresh]))
+    with pytest.raises(ValueError):
+        development_cases(path, original)
+
+
+def test_repeat_plan_has_matched_families_and_small_budgets(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.campaign import prepare_repeat
+
+    base = tmp_path / "pilot-v1"
+    followup = tmp_path / "pilot-v2"
+    followup.mkdir()
+    (followup / "plan.json").write_text("{}")
+    output = tmp_path / "repeat"
+    prepare_repeat(
+        output, base, tmp_path / "after", tmp_path / "source", tmp_path / "assets"
+    )
+    plan = json.loads((output / "plan.json").read_text())
+    assert len(plan["jobs"]) == 16
+    for job in plan["jobs"]:
+        args = job["args"]
+        assert args[args.index("--online-ticks") + 1] == "1040"
+        methods = args[args.index("--methods") + 1 :]
+        assert methods in (["action_recon", "joint"], ["hybrid_recon", "hybrid_joint"])
+    assert plan["new_development_layouts"] == list(range(10, 16))
+
+
+def test_report_retains_invalidated_online_and_failure_costs(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.report import build
+
+    for version in (1, 2):
+        root = tmp_path / f"pilot-v{version}"
+        path = root / "task0-object/control-seed31"
+        path.mkdir(parents=True)
+        episodes = [
+            {
+                "method": "joint",
+                "stage": "online_frozen_eval",
+                "split": "development",
+                "success": success,
+                "ticks": ticks,
+                "seconds": 1.0,
+                "state_id": i,
+            }
+            for i, (success, ticks) in enumerate(((True, 100), (False, 200)))
+        ]
+        (path / "episodes.json").write_text(json.dumps(episodes))
+        (path / "run_manifest.json").write_text(
+            json.dumps({"control_protocol_version": version})
+        )
+    (tmp_path / "pilot-v1/INVALIDATION.json").write_text("{}")
+    result = build(tmp_path)
+    old, new = result["control"]
+    assert old["evidence"] == "INVALIDATED_online_protocol"
+    assert new["evidence"] == "development_only"
+    assert new["mean_ticks_all"] == 150 and new["successes"] == 1
+    assert new["episodes"] == new["unique_layouts"] == 2
+    assert not new["run_complete"]
+    assert (tmp_path / "overview/index.html").is_file()
