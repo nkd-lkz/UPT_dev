@@ -50,6 +50,8 @@ def run(args: argparse.Namespace) -> dict:
     configure_source(args.source)
     torch.set_num_threads(4)
     model, config = load_model(args.assets, "cuda")
+    if any(parameter.requires_grad for parameter in model.parameters()):
+        raise RuntimeError("The reference VLA must be frozen")
     reference = PhysicalReference(model)
     cases = json.loads(args.cases.read_text())
     env = LiberoProEnvironment()
@@ -66,6 +68,8 @@ def run(args: argparse.Namespace) -> dict:
         "geometry_inputs_at_inference": False,
         "training_only_targets": ["metric_depth_delta", "object_position_delta"],
         "feature_projection_seed": 25671,
+        "frozen_vla_trainable_parameters": 0,
+        "command_semantics": "native environment action after clipping and gripper mapping; not joint torque",
         "noise_std_native_translation": args.noise,
         "device": device,
         "model_config": config,
@@ -130,6 +134,12 @@ def run(args: argparse.Namespace) -> dict:
                     "start_tick": start_tick,
                     "end_tick": ticks,
                     "execution_ticks": ticks - start_tick,
+                    "start_simulation_seconds": before["simulation_time_seconds"],
+                    "observed_horizon_seconds": {
+                        str(h): following[h]["simulation_time_seconds"]
+                        - before["simulation_time_seconds"]
+                        for h in following
+                    },
                     "action_feature": prediction["action_feature"],
                     "prefix_feature": prediction["prefix_feature"],
                     "ref": torch.from_numpy(prediction["ref"].copy()),

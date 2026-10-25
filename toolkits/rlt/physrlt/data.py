@@ -114,6 +114,7 @@ def measured_snapshot(environment, object_keys: list[str] | None = None) -> dict
         "object_keys": object_keys,
         "response_fields": ["joint_pos_7", "eef_position_3", "gripper_qpos_2"],
         "camera": meta,
+        "simulation_time_seconds": float(env.env.get_sim_state()[0][0]),
     }
 
 
