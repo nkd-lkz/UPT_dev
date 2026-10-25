@@ -513,3 +513,29 @@ def test_two_supervisors_cannot_claim_the_same_gpu(tmp_path):
     replacement = claim_gpu(0, tmp_path)
     assert replacement is not None
     replacement.close()
+
+
+def test_gpu_lease_survives_parent_release_until_child_exits(tmp_path):
+    import subprocess
+    import sys
+
+    from toolkits.rlt.physrlt.campaign import claim_gpu
+
+    lease = claim_gpu(0, tmp_path)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE,
+        pass_fds=(lease.fileno(),),
+    )
+    lease.close()
+    try:
+        assert claim_gpu(0, tmp_path) is None
+        child.stdin.close()
+        child.wait(timeout=5)
+        available = claim_gpu(0, tmp_path)
+        assert available is not None
+        available.close()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
