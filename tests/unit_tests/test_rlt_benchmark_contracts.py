@@ -1,11 +1,14 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""Portable online-RLT contracts and RoboDojo task-plan audits."""
+"""Portable online-RLT contracts and benchmark task-plan audits."""
+
+import argparse
 
 import numpy as np
 import pytest
 
 from toolkits.rlt.benchmark_contracts import CONTRACTS, OnlineRLTBoundary
+from toolkits.rlt.libero_pro_reference import global_reset_id, parse_case
 from toolkits.rlt.robodojo_task_plan import CANDIDATES, audit
 
 
@@ -95,3 +98,21 @@ def test_task_plan_accepts_dual_x5_tasks_with_layouts(tmp_path):
     report = audit(tmp_path, training_layouts_root=training_layout_root)
     assert report["primary_ready"]
     assert all(row["online_rlt_ready"] for row in report["tasks"])
+
+
+def test_libero_pro_case_parser_keeps_task_state_and_seed_explicit():
+    assert parse_case("3:17:object:42") == {
+        "task_id": 3,
+        "state_id": 17,
+        "perturbation": "object",
+        "seed": 42,
+    }
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_case("3:17:standard:42")
+
+
+def test_libero_pro_global_reset_id_respects_unequal_task_bins():
+    assert global_reset_id(0, 2, [3, 5, 2]) == 2
+    assert global_reset_id(1, 4, [3, 5, 2]) == 7
+    with pytest.raises(ValueError):
+        global_reset_id(2, 2, [3, 5, 2])

@@ -18,8 +18,16 @@ from omegaconf import OmegaConf
 from toolkits.rlt.robotwin2_features import FrozenRoboTwinPi05
 
 
-def build_env_config(repo: Path, robotwin: Path, output: Path) -> Any:
-    """Create the published clean ALOHA evaluation environment."""
+def build_env_config(
+    repo: Path,
+    robotwin: Path,
+    output: Path,
+    *,
+    split: str = "eval",
+) -> Any:
+    """Create the published clean ALOHA environment on a declared seed split."""
+    if split not in {"train", "eval"}:
+        raise ValueError("RoboTwin split must be 'train' or 'eval'")
     cfg = OmegaConf.load(
         repo / "examples/embodiment/config/env/robotwin_adjust_bottle.yaml"
     )
@@ -36,9 +44,11 @@ def build_env_config(repo: Path, robotwin: Path, output: Path) -> Any:
             "use_fixed_reset_state_ids": True,
             "max_steps_per_rollout_epoch": 200,
             "max_episode_steps": 200,
-            "is_eval": True,
+            "is_eval": split == "eval",
             "assets_path": str(robotwin),
-            "seeds_path": str(repo / "rlinf/envs/sim/robotwin/seeds/eval_seeds.json"),
+            "seeds_path": str(
+                repo / f"rlinf/envs/sim/robotwin/seeds/{split}_seeds.json"
+            ),
             "video_cfg": {
                 "save_video": False,
                 "info_on_video": False,
