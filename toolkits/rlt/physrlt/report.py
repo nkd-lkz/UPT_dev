@@ -133,7 +133,7 @@ def build(root: Path) -> dict:
                         "source": str(path),
                     }
                 )
-        for row in read(campaign / "reference-stress/episodes.json", []):
+        for row in read(campaign / "reference_stress/episodes.json", []):
             stress.append(
                 {
                     "campaign": campaign.name,

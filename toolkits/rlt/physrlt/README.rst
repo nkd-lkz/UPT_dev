@@ -85,3 +85,8 @@ Reading the Evidence Ledger
 ---------------------------
 
 Run ``python -m toolkits.rlt.physrlt.report --root <campaign-parent>`` to generate ``overview/index.html``, a JSON ledger and CSV tables from raw artifacts. Add ``--watch`` in a separate tmux session to refresh every minute until the prepared campaigns are terminal. Use only one report writer for a given parent directory. The report retains partial jobs, training splits, unique-layout counts and invalidated online results. It never replaces missing runs with expected scores or combines repeated reference evaluations into independent samples.
+
+Checking Candidate-Action Effects
+--------------------------------
+
+``prepare-paired-actions`` requires completed first-pilot data and readouts, then queues a no-training diagnostic on idle authorized cards. It replays the recorded command prefix, checks proprioception and geometry parity, and executes two opposite, bounded translation changes from the same state. It compares predicted outcome differences against measured differences and a zero-effect control. Raw measurements and predictions are retained in ``measurements.pt``. Joint, shuffled-label and state/action decoders are compared; the untrained decoder of a reconstruction-only model is deliberately excluded. At most twelve training-layout states are used, so this tests local action sensitivity, not unseen-condition generalization or task success.

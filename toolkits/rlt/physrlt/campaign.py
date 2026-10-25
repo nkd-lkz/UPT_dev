@@ -601,6 +601,67 @@ def prepare_repeat(
     )
 
 
+def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
+    """Queue independent paired-action diagnostics after verifying frozen inputs."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        dataset = base_root / name / "collection/transitions.pt"
+        probes = base_root / name / "probes"
+        if not dataset.exists() or not all(
+            (probes / f"{method}-seed31/readout.pt").exists()
+            for method in ("joint", "shuffled_joint", "state_action_joint")
+        ):
+            raise FileNotFoundError("Paired-action inputs must already be complete")
+        output = root / name / "paired_actions"
+        jobs.append(
+            {
+                "id": f"task{task}-paired-actions",
+                "kind": "gpu",
+                "dependencies": [],
+                "output": str(output),
+                "timeout_seconds": 1800,
+                "module": "toolkits.rlt.physrlt.counterfactual",
+                "args": [
+                    "--source",
+                    str(source),
+                    "--dataset",
+                    str(dataset),
+                    "--probes",
+                    str(probes),
+                    "--output",
+                    str(output),
+                    "--cases",
+                    "2",
+                    "--ticks",
+                    "40",
+                    "100",
+                    "160",
+                    "--axis",
+                    str(0 if task == 0 else 1),
+                    "--offset",
+                    "0.1",
+                ],
+            }
+        )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "Paired candidate-action effect diagnostic",
+            "global_wall_time_limit": None,
+            "no_final_test_access": True,
+            "hypothesis": "A grounded consequence decoder should predict the difference between two executed candidate actions from an identical state",
+            "limits": "Training states with new paired actions; at most 12 states; not generalization or control-success evidence",
+            "base_root": str(base_root),
+            "jobs": jobs,
+        },
+    )
+
+
 def supervise(args: argparse.Namespace) -> None:
     """Wait for unused authorized cards; isolate per-job failures and keep logs."""
     plan_path = args.root / "plan.json"
@@ -764,6 +825,7 @@ def main() -> None:
             "prepare-control-check",
             "prepare-anchor-check",
             "prepare-repeat",
+            "prepare-paired-actions",
             "run",
             "summarize",
         ),
@@ -782,10 +844,15 @@ def main() -> None:
         "prepare-control-check",
         "prepare-anchor-check",
         "prepare-repeat",
+        "prepare-paired-actions",
     }:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
-        if args.mode in {
+        if args.mode == "prepare-paired-actions":
+            if not args.base_root:
+                parser.error("prepare-paired-actions requires --base-root")
+            prepare_paired_actions(args.root, args.base_root, args.source)
+        elif args.mode in {
             "prepare-control-check",
             "prepare-anchor-check",
             "prepare-repeat",

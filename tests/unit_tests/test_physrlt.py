@@ -455,3 +455,30 @@ def test_report_retains_invalidated_online_and_failure_costs(tmp_path):
     assert new["episodes"] == new["unique_layouts"] == 2
     assert not new["run_complete"]
     assert (tmp_path / "overview/index.html").is_file()
+
+
+def test_paired_action_effects_require_correct_effect_not_state_prediction():
+    from toolkits.rlt.physrlt.counterfactual import effect_errors
+
+    plus = {
+        "response": torch.ones(2, 12),
+        "geometry": torch.ones(2, 67),
+        "horizon_mask": torch.tensor([True, False]),
+    }
+    minus = {
+        key: value.clone() if key == "horizon_mask" else -value
+        for key, value in plus.items()
+    }
+    predictions = {key: plus[key][None] for key in ("response", "geometry")}
+    negative = {key: -value for key, value in predictions.items()}
+    rows = effect_errors(
+        plus, minus, predictions, negative, {"response_scale": torch.ones(12)}
+    )
+    assert len(rows) == 1 and rows[0]["horizon"] == 3
+    assert rows[0]["response_effect_scaled_mse"] == rows[0]["object_effect_rmse_m"] == 0
+    assert rows[0]["zero_effect_response_scaled_mse"] == 4
+    assert rows[0]["zero_effect_object_rmse_m"] == 2
+    unchanged = effect_errors(
+        plus, minus, predictions, predictions, {"response_scale": torch.ones(12)}
+    )
+    assert unchanged[0]["response_effect_scaled_mse"] == 4
