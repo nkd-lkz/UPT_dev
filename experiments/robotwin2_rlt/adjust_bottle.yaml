@@ -1,0 +1,32 @@
+schema_version: 1
+benchmark: robotwin2
+task: adjust_bottle
+embodiment: aloha_agilex
+algorithm:
+  track: alphabrain_rlt
+  backbone: pi0.5_flow_matching
+  reference_frozen: true
+  memory: false
+  intervention: false
+  feature_shape: [768, 2048]
+  token_dim: 2048
+  action_dim: 14
+  reference_horizon: 50
+  learning_horizon: 10
+  execution_horizon: 1
+  stage1_steps: 1000
+  actor_bc_steps: 6000
+  online_control_steps: 20000
+artifacts:
+  active_root: /mnt/hdd_toshiba_1/luokz/robotwin2_rlt_20261025
+  archive_root: /mnt/nas_ailab_434/Personal_File/luokz/robotwin2_rlt_20261025
+  model_repo: RLinf/RLinf-Pi05-RoboTwin-SFT-adjust_bottle
+  model_revision: fa8df6ed103db0f5549c122f3a17c00ba6426c98
+  demo_repo: RLinf/RoboTwin-adjust_bottle-official-demo_clean50-Pi0_processed-data
+  demo_revision: c9944782f5473feef33d98af6cc033e23acfd875
+  robotwin_revision: 0008ae6800df9f75fc8de7098bacb01735fd8fd2
+evaluation:
+  fixed_seeds: true
+  development_episodes: 10
+  final_episodes: 50
+  arms: [reference, warmup, bc_only, q_bc]

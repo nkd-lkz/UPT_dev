@@ -1272,3 +1272,112 @@ def test_apxinf_a_missing_apxinf_robo_names_what_to_install(monkeypatch):
         OpenPIApxInfAdapter(
             _apxinf_model_cfg(), "cpu", processor=_FakeApxInfProcessor()
         )
+
+
+def test_robotwin2_alphabrain_reference_config_is_task_specific(tmp_path):
+    from toolkits.rlt.robotwin2_features import model_config
+
+    checkpoint = tmp_path / "pi05-robotwin-adjust-bottle"
+    stats = checkpoint / "physical-intelligence/robotwin/norm_stats.json"
+    stats.parent.mkdir(parents=True)
+    stats.write_text("{}")
+    (checkpoint / "model.safetensors").touch()
+
+    cfg = model_config(checkpoint)
+
+    assert cfg.openpi.config_name == "pi05_aloha_robotwin"
+    assert cfg.openpi.task == "rl"
+    assert cfg.action_dim == 14
+    assert cfg.num_action_chunks == 50
+    assert cfg.add_value_head is True
+    assert cfg.openpi.action_horizon == 50
+    assert cfg.openpi.action_chunk == 50
+    assert cfg.precision == "bf16"
+    assert cfg.openpi_data.norm_stats_path == str(stats)
+    assert cfg.openpi.torch_compile is False
+
+
+def test_robotwin2_alphabrain_requires_three_views_and_aloha_state():
+    from toolkits.rlt.robotwin2_features import validate_env_observation
+
+    valid = {
+        "main_images": np.zeros((2, 64, 64, 3), dtype=np.uint8),
+        "wrist_images": np.zeros((2, 2, 64, 64, 3), dtype=np.uint8),
+        "states": np.zeros((2, 14), dtype=np.float32),
+        "task_descriptions": ["Adjust the bottle.", "Adjust the bottle."],
+    }
+    validate_env_observation(valid)
+
+    invalid = dict(valid)
+    invalid["states"] = np.zeros((2, 7), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"\[B, 14\]"):
+        validate_env_observation(invalid)
+
+
+def test_robotwin2_alphabrain_feature_contract_rejects_missing_view_tokens():
+    from toolkits.rlt.robotwin2_learning import validate_feature_batch
+
+    hidden = np.zeros((2, 768, 2048), dtype=np.float32)
+    mask = np.ones((2, 768), dtype=np.bool_)
+    validate_feature_batch(hidden, mask)
+
+    with pytest.raises(ValueError, match="shape"):
+        validate_feature_batch(hidden[:, :-1], mask[:, :-1])
+    mask[:, -1] = False
+    with pytest.raises(ValueError, match="all three"):
+        validate_feature_batch(hidden, mask)
+
+
+def test_robotwin2_checkpoint_shards_merge_only_when_index_matches(tmp_path):
+    from safetensors.torch import save_file
+
+    from toolkits.rlt.merge_safetensor_shards import merge_shards
+
+    save_file({"left": torch.ones(2)}, str(tmp_path / "one.safetensors"))
+    save_file({"right": torch.zeros(3)}, str(tmp_path / "two.safetensors"))
+    index = tmp_path / "model.safetensors.index.json"
+    index.write_text(
+        '{"weight_map":{"left":"one.safetensors","right":"two.safetensors"}}'
+    )
+
+    output = tmp_path / "model.safetensors"
+    report = merge_shards(index, output)
+
+    assert report["shards"] == 2
+    assert report["tensors"] == 2
+    assert output.is_file()
+    with pytest.raises(FileExistsError):
+        merge_shards(index, output)
+
+
+def test_robotwin2_failure_stage_uses_task_geometry():
+    from toolkits.rlt.robotwin2_reference_rollout import classify_failure
+
+    initial = {
+        "arm": "right",
+        "bottle_xyz": [0.1, -0.1, 0.75],
+        "tcp_bottle_distance": 0.3,
+    }
+
+    def record(distance, x, z):
+        return {
+            "diagnostics": {
+                "arm": "right",
+                "bottle_xyz": [x, -0.1, z],
+                "tcp_bottle_distance": distance,
+            }
+        }
+
+    assert classify_failure(initial, [record(0.2, 0.1, 0.75)], False) == "reach"
+    assert (
+        classify_failure(initial, [record(0.05, 0.1, 0.78)], False)
+        == "grasp_or_lift"
+    )
+    assert (
+        classify_failure(initial, [record(0.05, 0.12, 0.9)], False) == "transport"
+    )
+    assert (
+        classify_failure(initial, [record(0.05, 0.16, 0.86)], False)
+        == "place_height_or_stability"
+    )
+    assert classify_failure(initial, [], True) == "success"

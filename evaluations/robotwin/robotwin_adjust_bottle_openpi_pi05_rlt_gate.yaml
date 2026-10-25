@@ -1,0 +1,106 @@
+defaults:
+  - env/robotwin_adjust_bottle@env.eval
+  - model/pi0_5@rollout.model
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env, rollout: 0
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: ${oc.env:ROBOTWIN2_RLT_ROOT,/mnt/hdd_toshiba_1/luokz/robotwin2_rlt_20261025}/runs/reference_gate
+    project_name: rlt-robotwin2
+    experiment_name: adjust_bottle_pi05_reference_gate
+    logger_backends: [tensorboard]
+  max_epochs: 1
+  max_steps: -1
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: EnvGroup
+  enable_offload: true
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    auto_reset: false
+    ignore_terminations: false
+    # Match the published RLinf RoboTwin Pi0.5 evaluation budget exactly.
+    max_episode_steps: 200
+    max_steps_per_rollout_epoch: 200
+    group_size: 1
+    use_fixed_reset_state_ids: true
+    is_eval: true
+    assets_path: ${oc.env:ROBOTWIN2_RLT_ROOT,/mnt/hdd_toshiba_1/luokz/robotwin2_rlt_20261025}/repos/RoboTwin
+    seeds_path: ${oc.env:REPO_PATH}/rlinf/envs/sim/robotwin/seeds/eval_seeds.json
+    video_cfg:
+      save_video: true
+      video_base_dir: ${runner.logger.log_path}/video
+    center_crop: false
+    task_config:
+      embodiment: [aloha-agilex]
+      planner_backend: mplib
+      camera:
+        collect_wrist_camera: true
+      domain_randomization:
+        random_background: false
+        cluttered_table: false
+        clean_background_rate: 1
+        random_head_camera_dis: 0
+        random_table_height: 0
+        random_light: false
+        crazy_random_light_rate: 0
+
+rollout:
+  group_name: RolloutGroup
+  backend: huggingface
+  recompute_logprobs: false
+  enable_offload: true
+  pipeline_stage_num: 1
+  model:
+    model_path: ${oc.env:ROBOTWIN2_RLT_ROOT,/mnt/hdd_toshiba_1/luokz/robotwin2_rlt_20261025}/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle
+    precision: bf16
+    num_action_chunks: 50
+    action_dim: 14
+    # Required for strict loading of the published checkpoint. Evaluation still
+    # samples only the frozen action path and does not consume the value output.
+    add_value_head: true
+    num_steps: 5
+    openpi_data:
+      norm_stats_path: ${rollout.model.model_path}/physical-intelligence/robotwin/norm_stats.json
+    openpi:
+      # Match the released checkpoint's RL wrapper and value-head state dict.
+      # only_eval keeps this inference-only.
+      task: rl
+      config_name: pi05_aloha_robotwin
+      action_horizon: 50
+      action_chunk: 50
+      action_env_dim: 14
+      num_images_in_input: 3
+      model_action_dim: 32
+      paligemma_variant: gemma_2b
+      action_expert_variant: gemma_300m
+      max_token_len: 200
+      noise_level: 0.3
+      detach_critic_input: true
+      torch_compile: false
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false
