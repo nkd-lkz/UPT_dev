@@ -255,7 +255,10 @@ with torch.no_grad():
         assert cache.get_seq_length() == 5
         cached = model(inputs_embeds=suffix, past_key_values=cache,
                        attention_mask=torch.zeros(1, 1, 2, 7), use_cache=False)
-        assert cache.get_seq_length() == 7
+        # Stock HF appends suffix KV even with use_cache=False; the installed
+        # OpenPI-compatible Gemma reads the prefix without mutating it. Both
+        # must agree with a joint forward and remain prefix-conditioned below.
+        assert cache.get_seq_length() in (5, 7)
         mask = torch.zeros(1, 1, 7, 7)
         mask[:, :, :5, 5:] = torch.finfo(torch.float32).min
         joint = model(inputs_embeds=torch.cat((context, suffix), dim=1),

@@ -1,0 +1,273 @@
+# Copyright 2026 The RLinf Authors.
+# SPDX-License-Identifier: Apache-2.0
+"""Small matched BC/Q+BC closed-loop pilots with frozen physical readouts."""
+
+from __future__ import annotations
+
+import argparse
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
+from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
+from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash
+from toolkits.rlt.physrlt.model import PhysicalReadout
+from toolkits.rlt.physrlt.probe import inputs
+from toolkits.rlt.pi05_baseline import (
+    configure_gpu,
+    configure_source,
+    env_commands,
+    load_model,
+    write_json,
+)
+
+
+class FrozenReadout:
+    """Own a fixed representation version throughout a control experiment."""
+
+    def __init__(self, path: Path):
+        self.payload = torch.load(path, map_location="cpu", weights_only=True)
+        self.model = PhysicalReadout(
+            self.payload["response_dim"], self.payload["geometry_dim"]
+        )
+        self.model.load_state_dict(self.payload["model"], strict=True)
+        self.model.eval().requires_grad_(False)
+
+    @torch.no_grad()
+    def encode(self, prediction: dict, prop) -> dict:
+        data = {
+            "action_feature": prediction["action_feature"][None].float(),
+            "prefix_feature": prediction["prefix_feature"][None].float(),
+            "ref": torch.as_tensor(prediction["ref"])[None].float(),
+            "prop": torch.as_tensor(prop)[None].float(),
+        }
+        z = self.model.encode(
+            *inputs(data, self.payload["stats"], self.payload["method"])
+        )
+        return {"z": z[0], "ref": data["ref"][0].clamp(-1, 1), "prop": data["prop"][0]}
+
+
+def warmup(readout: FrozenReadout, dataset: dict, seed: int, steps: int):
+    """Fit the same upstream AlphaBrain actor on each frozen representation."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    learner = AcceptanceLearner(
+        "cuda",
+        "q_bc",
+        ref_dropout=0,
+        bottleneck_dim=128,
+        chunk_len=10,
+        gripper_threshold=0,
+    )
+    train, validation = [], []
+    for row in dataset["rows"]:
+        if row["split"] not in {"train", "validation"}:
+            continue
+        features = readout.encode(row, row["prop"])
+        replay_row = features | {
+            "action": features["ref"].clone(),
+            "next_z": features["z"].clone(),
+            "next_ref": features["ref"].clone(),
+            "next_prop": features["prop"].clone(),
+        }
+        (train if row["split"] == "train" else validation).append(replay_row)
+    initial = learner.following(validation)
+    trace = []
+    for step in range(steps):
+        result = learner.update(train, warmup=True)
+        if step % 100 == 0 or step == steps - 1:
+            trace.append({"step": step + 1, **result})
+    learner.publish_warmup()
+    final = learner.following(validation)
+    return learner, {"before": initial, "after": final, "trace": trace}
+
+
+def rollout(env, reference, readout, learner, case, limit, replay=None) -> dict:
+    """Execute an explicit control budget, optionally updating only small heads."""
+    obs = env.reset(case)
+    for _ in range(9):
+        obs, _, _ = env.step(np.array([0, 0, 0, 0, 0, 0, -1], np.float32))
+    digest = physical_reset_hash(env)
+    ticks, success, rewards, inference_seconds = 0, False, 0.0, 0.0
+    start = time.monotonic()
+    prediction = reference.predict(obs, env.instruction, case["seed"] * 1000)
+    features = readout.encode(prediction, obs["state"]) if readout else None
+    updates = []
+    while ticks < limit:
+        begin = time.monotonic()
+        action = (
+            learner.command(features, deterministic=replay is None)
+            if learner
+            else torch.from_numpy(prediction["ref"])
+        )
+        commands = env_commands(action.numpy())
+        inference_seconds += time.monotonic() - begin
+        chunk_ticks, chunk_reward = 0, 0.0
+        for command in commands:
+            obs, reward, done = env.step(command)
+            chunk_ticks += 1
+            ticks += 1
+            chunk_reward += reward
+            success = success or done
+            if done or ticks >= limit:
+                break
+        # Terminal transitions do not bootstrap, but keep a correctly shaped
+        # successor. A truncated partial chunk is ineligible for TD updates.
+        if not success:
+            begin = time.monotonic()
+            following = reference.predict(
+                obs, env.instruction, case["seed"] * 1000 + ticks
+            )
+            next_features = readout.encode(following, obs["state"]) if readout else None
+            inference_seconds += time.monotonic() - begin
+        else:
+            following, next_features = prediction, features
+        if replay is not None:
+            replay.append(
+                features
+                | {
+                    "action": torch.from_numpy(commands.copy()),
+                    "next_z": next_features["z"],
+                    "next_ref": next_features["ref"],
+                    "next_prop": next_features["prop"],
+                    "ticks": chunk_ticks,
+                    "terminal": success,
+                    "reward": chunk_reward * 5,
+                }
+            )
+            if chunk_ticks == 10 or success:
+                updates.append(learner.update(replay))
+        rewards += chunk_reward
+        prediction, features = following, next_features
+        if success:
+            break
+    return {
+        "case_id": case["id"],
+        "split": case["split"],
+        "state_id": case["state"],
+        "reset_hash": digest,
+        "success": success,
+        "ticks": ticks,
+        "reward": rewards,
+        "seconds": time.monotonic() - start,
+        "inference_seconds_partial": inference_seconds,
+        "updates": updates,
+        "assistance": False,
+        "memory": False,
+    }
+
+
+def run(args):
+    args.output.mkdir(parents=True, exist_ok=True)
+    if (args.output / "result.json").exists():
+        raise FileExistsError("Completed control pilots are immutable")
+    configure_gpu(args.gpu, args.output)
+    reservation = torch.empty(1, device="cuda")
+    configure_source(args.source)
+    torch.set_num_threads(4)
+    model, _ = load_model(args.assets, "cuda")
+    reference = PhysicalReference(model)
+    dataset = torch.load(args.dataset, map_location="cpu", weights_only=True)
+    cases = dataset["meta"]["cases"]
+    train_cases = [c for c in cases if c["split"] == "train"]
+    validation_cases = [c for c in cases if c["split"] == "validation"]
+    dev_cases = [c for c in cases if c["split"] == "development"]
+    env = LiberoProEnvironment()
+    records = []
+    try:
+        for case in validation_cases + dev_cases:
+            row = rollout(env, reference, None, None, case, 520)
+            records.append(row | {"method": "reference", "stage": "frozen"})
+            write_json(args.output / "episodes.json", records)
+        for method in args.methods:
+            path = args.probes / f"{method}-seed{args.seed}" / "readout.pt"
+            readout = FrozenReadout(path)
+            learner, fidelity = warmup(readout, dataset, args.seed, args.warmup_steps)
+            write_json(args.output / f"{method}-warmup.json", fidelity)
+            torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
+            validation_results = []
+            for case in validation_cases:
+                row = rollout(env, reference, readout, learner, case, 520)
+                validation_results.append(row)
+                records.append(row | {"method": method, "stage": "warmup"})
+                write_json(args.output / "episodes.json", records)
+            gate = (
+                fidelity["after"]["arm_mse"] < 0.02
+                and fidelity["after"]["gripper_disagreement"] < 0.05
+            )
+            gate = gate and any(r["success"] for r in validation_results)
+            write_json(
+                args.output / f"{method}-gate.json",
+                {
+                    "passed": gate,
+                    "selection_split": "validation",
+                    "rule": "arm MSE < .02, gripper mismatch < .05, at least one validation success",
+                    "meaning": "development safety gate; unequal passing arms are not a fair RL benchmark",
+                },
+            )
+            for case in dev_cases:
+                records.append(
+                    rollout(env, reference, readout, learner, case, 520)
+                    | {"method": method, "stage": "warmup"}
+                )
+                write_json(args.output / "episodes.json", records)
+            if gate and args.online_ticks:
+                replay, count = [], 0
+                for case in train_cases:
+                    budget = min(520, args.online_ticks - count)
+                    if budget <= 0:
+                        break
+                    row = rollout(
+                        env, reference, readout, learner, case, budget, replay
+                    )
+                    count += row["ticks"]
+                    records.append(row | {"method": method, "stage": "online_train"})
+                    write_json(args.output / "episodes.json", records)
+                    torch.save(
+                        learner.state_dict(), args.output / f"{method}-online.pt"
+                    )
+                for case in validation_cases + dev_cases:
+                    records.append(
+                        rollout(env, reference, readout, learner, case, 520)
+                        | {"method": method, "stage": "online_frozen_eval"}
+                    )
+                    write_json(args.output / "episodes.json", records)
+            del learner, readout
+            torch.cuda.empty_cache()
+    finally:
+        env.close()
+        del reservation
+    result = {
+        "state": "complete",
+        "episodes": len(records),
+        "seed": args.seed,
+        "role": "small development pilots, not final-test success claims",
+        "warmup_steps": args.warmup_steps,
+        "online_tick_cap": args.online_ticks,
+    }
+    write_json(args.output / "result.json", result)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("source", "assets", "dataset", "probes", "output"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--gpu", type=int, required=True)
+    parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--warmup-steps", type=int, default=1500)
+    parser.add_argument("--online-ticks", type=int, default=1040)
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=["action_recon", "geometry", "response", "joint"],
+    )
+    args = parser.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()
