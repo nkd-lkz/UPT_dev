@@ -16,7 +16,12 @@ import torch
 
 from toolkits.rlt.experiment_queue import validate_plan
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, td_eligible
-from toolkits.rlt.pi05_assets import file_hash
+from toolkits.rlt.libero_pro_environment import (
+    LiberoProEnvironment,
+    _observation,
+    observation_digest,
+)
+from toolkits.rlt.pi05_assets import REVISION, cached_release_metadata, file_hash
 from toolkits.rlt.pi05_baseline import (
     PROTOCOL,
     Pi05Reference,
@@ -73,6 +78,67 @@ def test_native_actions_are_not_unnormalized_or_inverted_twice():
         env_commands(native)
     with pytest.raises(ValueError):
         env_commands(np.zeros((8, 7)))
+
+
+def test_libero_pro_protocol_and_observation_are_not_standard_fallbacks():
+    standard = suite_protocol("libero_10")
+    pro = suite_protocol("libero_10", "libero_pro")
+    assert standard["benchmark"] == "libero"
+    assert pro["benchmark"] == "libero_pro"
+    assert standard != pro
+    validate_checkpoint({"protocol": pro}, "libero_10", "libero_pro")
+    with pytest.raises(ValueError, match="protocol"):
+        validate_checkpoint({"protocol": standard}, "libero_10", "libero_pro")
+
+    wrapped = {
+        "main_images": torch.zeros(1, 3, 8, 9, dtype=torch.uint8),
+        "wrist_images": torch.ones(1, 8, 9, 3, dtype=torch.uint8),
+        "states": torch.arange(8, dtype=torch.float32)[None],
+    }
+    obs = _observation(wrapped)
+    assert obs["primary_image"].shape == (8, 9, 3)
+    assert obs["wrist_image"].shape == (8, 9, 3)
+    assert obs["state"].shape == (8,)
+    first = observation_digest(obs, "libero_10:0:0:lan")
+    assert first == observation_digest(obs, "libero_10:0:0:lan")
+    assert first != observation_digest(obs, "libero_10:0:0:object")
+
+
+def test_libero_pro_does_not_count_time_limit_as_success():
+    wrapped = {
+        "main_images": np.zeros((1, 8, 9, 3), dtype=np.uint8),
+        "wrist_images": np.zeros((1, 8, 9, 3), dtype=np.uint8),
+        "states": np.zeros((1, 8), dtype=np.float32),
+    }
+
+    class TruncatedEnvironment:
+        def step(self, action, auto_reset):
+            assert action.shape == (1, 7)
+            assert auto_reset is False
+            return wrapped, np.array([0.0]), np.array([False]), np.array([True]), {}
+
+    environment = LiberoProEnvironment.__new__(LiberoProEnvironment)
+    environment.env = TruncatedEnvironment()
+    with pytest.raises(RuntimeError, match="truncated"):
+        environment.step(np.zeros(7, dtype=np.float32))
+
+
+def test_pinned_pi05_snapshot_metadata_supports_offline_verification(tmp_path):
+    from toolkits.rlt.pi05_assets import RELEASE_FILES
+
+    metadata_root = tmp_path / ".cache" / "huggingface" / "download"
+    for index, name in enumerate(sorted(RELEASE_FILES)):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"release-{index}".encode())
+        metadata = metadata_root / f"{name}.metadata"
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        digest = "a" * (64 if name.endswith((".safetensors", ".model")) else 40)
+        metadata.write_text(f"{REVISION}\n{digest}\n0\n")
+
+    release = cached_release_metadata(tmp_path)
+    assert release["sha"] == REVISION
+    assert {item["rfilename"] for item in release["siblings"]} == RELEASE_FILES
 
 
 def test_upstream_dataset_gripper_remap_reaches_native_commands():

@@ -86,6 +86,13 @@ def read_cases(path: Path) -> list[dict]:
                 )
         else:
             raise ValueError("Unknown case source")
+        if "perturbation" in case and case["perturbation"] not in {
+            "lan",
+            "object",
+            "swap",
+            "task",
+        }:
+            raise ValueError("Unknown LIBERO-Pro perturbation")
     return cases
 
 

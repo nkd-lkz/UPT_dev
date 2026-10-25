@@ -32,6 +32,7 @@ PROTOCOL = {
     "id": "alphabrain-rlt-pi05-libero-v3",
     "track": "rlt",
     "backbone": "pi05",
+    "benchmark": "libero",
     "suite": "libero_goal",
     "checkpoint_revision": REVISION,
     "source_revision": SOURCE_COMMIT,
@@ -75,11 +76,17 @@ SUITE_HORIZONS = {
 }
 
 
-def suite_protocol(suite: str = "libero_goal") -> dict:
+def suite_protocol(suite: str = "libero_goal", benchmark: str = "libero") -> dict:
     """Return the suite-specific contract without mutating the Goal pilot."""
     if suite not in SUITE_HORIZONS:
         raise ValueError(f"Unsupported LIBERO suite: {suite}")
-    return PROTOCOL | {"suite": suite, "max_control_steps": SUITE_HORIZONS[suite]}
+    if benchmark not in {"libero", "libero_pro"}:
+        raise ValueError(f"Unsupported LIBERO benchmark: {benchmark}")
+    return PROTOCOL | {
+        "benchmark": benchmark,
+        "suite": suite,
+        "max_control_steps": SUITE_HORIZONS[suite],
+    }
 
 
 def write_json(path: Path, value: dict | list) -> None:
@@ -341,7 +348,17 @@ def evaluation_cases(args: argparse.Namespace) -> list[dict]:
             for c in cases
         ):
             raise ValueError("Case manifest suite differs from --suite")
+        if getattr(args, "benchmark", "libero") == "libero_pro" and any(
+            case.get("kind") != "published"
+            or case.get("perturbation") not in {"lan", "object", "swap", "task"}
+            for case in cases
+        ):
+            raise ValueError(
+                "LIBERO-Pro requires explicit published cases with a valid perturbation"
+            )
         return cases
+    if getattr(args, "benchmark", "libero") == "libero_pro":
+        raise ValueError("LIBERO-Pro requires an explicit --cases manifest")
     return [
         {
             "id": f"dev-task{args.task}-state{args.state_start + i}",
@@ -362,15 +379,22 @@ def evaluate(args: argparse.Namespace, metrics: Metrics) -> dict:
     from toolkits.rlt.libero_acceptance import RemoteEnvironment
 
     device = "cpu" if args.mode == "cpu-reference" else "cuda"
-    protocol = suite_protocol(args.suite)
+    protocol = suite_protocol(args.suite, args.benchmark)
     model, config = load_model(args.assets, device)
     reference = Pi05Reference(model)
     encoder = learner = None
     if args.mode in {"actor-eval", "online"}:
         from toolkits.rlt.pi05_learning import encode_row, load_heads, save_heads
 
-        encoder, learner = load_heads(args.checkpoint, args.objective, args.suite)
-    env = RemoteEnvironment()
+        encoder, learner = load_heads(
+            args.checkpoint, args.objective, args.suite, args.benchmark
+        )
+    if args.benchmark == "libero_pro":
+        from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
+
+        env = LiberoProEnvironment()
+    else:
+        env = RemoteEnvironment()
     results, cache, replay = [], [], []
     parity = None
     total_ticks = 0
@@ -392,7 +416,12 @@ def evaluate(args: argparse.Namespace, metrics: Metrics) -> dict:
             if env.reset_hash in seen_states:
                 raise ValueError("Duplicate physical initial state in case manifest")
             seen_states.add(env.reset_hash)
-            for _ in range(protocol["settling_steps"]):
+            settling_steps = protocol["settling_steps"] - getattr(
+                env, "settling_steps_consumed", 0
+            )
+            if settling_steps < 0:
+                raise ValueError("Environment consumed too many settling steps")
+            for _ in range(settling_steps):
                 obs, _, _ = env.step(
                     np.asarray([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
                 )
@@ -535,7 +564,13 @@ def evaluate(args: argparse.Namespace, metrics: Metrics) -> dict:
                 )
             print(f"Episode {episode}: success={success} ticks={ticks}", flush=True)
             if args.mode == "online":
-                save_heads(args.output / "online.pt", encoder, learner, args.suite)
+                save_heads(
+                    args.output / "online.pt",
+                    encoder,
+                    learner,
+                    args.suite,
+                    args.benchmark,
+                )
     finally:
         env.close()
     if args.collect:
@@ -580,6 +615,9 @@ def main() -> None:
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--task", type=int, default=0)
     parser.add_argument("--suite", choices=SUITE_HORIZONS, default="libero_goal")
+    parser.add_argument(
+        "--benchmark", choices=("libero", "libero_pro"), default="libero"
+    )
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42000)
     parser.add_argument("--min-successes", type=int, default=1)
@@ -606,7 +644,7 @@ def main() -> None:
     parser.add_argument("--wandb-entity")
     parser.add_argument("--group", default="rlt-pi05-acceptance")
     args = parser.parse_args()
-    protocol = suite_protocol(args.suite)
+    protocol = suite_protocol(args.suite, args.benchmark)
     # Keep validation free of runtime imports until CUDA/EGL have been isolated.
     case_count = (
         len(json.loads(args.cases.read_text())) if args.cases else args.episodes
@@ -617,6 +655,13 @@ def main() -> None:
         or not 0 <= args.min_successes <= case_count
     ):
         parser.error("Invalid development case/gate budget")
+    if args.benchmark == "libero_pro" and os.environ.get("LIBERO_TYPE") != "pro":
+        parser.error("LIBERO-Pro requires LIBERO_TYPE=pro")
+    if (
+        args.benchmark == "libero"
+        and os.environ.get("LIBERO_TYPE", "standard") == "pro"
+    ):
+        parser.error("Refusing to label a LIBERO-Pro process as standard LIBERO")
     if not 0 <= args.state_start <= 50 - args.episodes:
         parser.error("Development states must not wrap modulo 50")
     if args.mode == "warmup" and (
@@ -665,6 +710,7 @@ def main() -> None:
                 "pi05_learning.py",
                 "libero_acceptance_learning.py",
                 "libero_acceptance_env.py",
+                "libero_pro_environment.py",
             )
         },
     }
