@@ -190,6 +190,36 @@ def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_pat
     }
 
 
+def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.campaign import prepare_response_check
+
+    base = tmp_path / "base"
+    probes = tmp_path / "probes"
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        (base / name / "collection").mkdir(parents=True)
+        for method in ("joint", "arm_q_gripper_joint", "eef_gripper_joint"):
+            path = probes / name / "probes" / f"{method}-seed31"
+            path.mkdir(parents=True)
+            (path / "readout.pt").touch()
+    output = tmp_path / "output"
+    prepare_response_check(output, base, probes, tmp_path, tmp_path)
+    plan = json.loads((output / "plan.json").read_text())
+    assert len(plan["jobs"]) == 2
+    assert "contact-pair" in plan["contact_scope"]
+    for job in plan["jobs"]:
+        args = job["args"]
+        assert args[args.index("--online-ticks") + 1] == "0"
+        assert args[args.index("--warmup-steps") + 1] == "1500"
+        assert args[args.index("--methods") + 1 :] == [
+            "joint",
+            "arm_q_gripper_joint",
+            "eef_gripper_joint",
+        ]
+
+
 def test_failed_job_blocks_only_its_dependents():
     jobs = [
         {"id": "a", "dependencies": []},

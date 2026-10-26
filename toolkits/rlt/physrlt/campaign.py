@@ -694,6 +694,75 @@ def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
     )
 
 
+def prepare_response_check(
+    root: Path,
+    base_root: Path,
+    probes_root: Path,
+    source: Path,
+    assets: Path,
+) -> None:
+    """Screen response targets with matched BC and no online interaction."""
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "plan.json").exists():
+        raise FileExistsError("An existing plan must not be silently changed")
+    jobs = []
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        output = root / name / "control-seed31"
+        readouts = probes_root / name / "probes"
+        for method in ("joint", "arm_q_gripper_joint", "eef_gripper_joint"):
+            if not (readouts / f"{method}-seed31/readout.pt").exists():
+                raise FileNotFoundError(f"Missing response ablation: {method}")
+        jobs.append(
+            {
+                "id": f"task{task}-response-control",
+                "kind": "gpu",
+                "dependencies": [],
+                "output": str(output),
+                "timeout_seconds": 10800,
+                "module": "toolkits.rlt.physrlt.control",
+                "args": [
+                    "--source",
+                    str(source),
+                    "--assets",
+                    str(assets),
+                    "--dataset",
+                    str(base_root / name / "collection/transitions.pt"),
+                    "--probes",
+                    str(readouts),
+                    "--output",
+                    str(output),
+                    "--seed",
+                    "31",
+                    "--warmup-steps",
+                    "1500",
+                    "--online-ticks",
+                    "0",
+                    "--methods",
+                    "joint",
+                    "arm_q_gripper_joint",
+                    "eef_gripper_joint",
+                ],
+            }
+        )
+    write_json(
+        root / "plan.json",
+        {
+            "schema": 1,
+            "title": "Matched execution-response redundancy screen",
+            "control_protocol_version": 2,
+            "global_wall_time_limit": None,
+            "no_final_test_access": True,
+            "base_root": str(base_root),
+            "probes_root": str(probes_root),
+            "hypothesis": "Arm-joint and end-effector response targets are kinematically redundant; retain the smaller target only if matched BC control does not regress",
+            "matching": "Same action features, 128D bottleneck, geometry target, 400 readout updates, 1500 actor BC updates, seed and layouts; no online RL",
+            "contact_scope": "No force, tactile, simulator contact-pair, impulse, friction or stiffness supervision",
+            "jobs": jobs,
+        },
+    )
+
+
 def claim_gpu(gpu: int, directory: Path = LEASE_DIRECTORY):
     """Acquire the shared research lease without waiting or taking another job's card."""
     lease = (directory / f"rlt-research-gpu{gpu}.lock").open("a")
@@ -894,6 +963,7 @@ def main() -> None:
             "prepare-anchor-recovery",
             "prepare-repeat",
             "prepare-paired-actions",
+            "prepare-response-check",
             "run",
             "summarize",
         ),
@@ -903,6 +973,7 @@ def main() -> None:
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--base-root", type=Path)
     parser.add_argument("--after-root", type=Path)
+    parser.add_argument("--probes-root", type=Path)
     parser.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--idle-seconds", type=int, default=30)
     args = parser.parse_args()
@@ -915,6 +986,7 @@ def main() -> None:
         "prepare-anchor-recovery",
         "prepare-repeat",
         "prepare-paired-actions",
+        "prepare-response-check",
     }:
         if not args.source or not args.assets:
             parser.error("prepare requires --source and --assets")
@@ -922,6 +994,18 @@ def main() -> None:
             if not args.base_root:
                 parser.error("prepare-paired-actions requires --base-root")
             prepare_paired_actions(args.root, args.base_root, args.source)
+        elif args.mode == "prepare-response-check":
+            if not args.base_root or not args.probes_root:
+                parser.error(
+                    "prepare-response-check requires --base-root and --probes-root"
+                )
+            prepare_response_check(
+                args.root,
+                args.base_root,
+                args.probes_root,
+                args.source,
+                args.assets,
+            )
         elif args.mode in {
             "prepare-control-check",
             "prepare-control-recovery",
