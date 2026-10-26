@@ -31,7 +31,12 @@ def file_sha256(path: Path) -> str:
 
 
 def paired_records(
-    dataset: dict, measurements: list[dict], axis: int, offset: float
+    dataset: dict,
+    measurements: list[dict],
+    axis: int,
+    offset: float,
+    *,
+    expected_split: str = "train",
 ) -> list[dict]:
     """Join same-state branches to their pre-execution model inputs.
 
@@ -54,8 +59,8 @@ def paired_records(
         if key not in rows:
             raise ValueError("Paired-action state is absent from the transition data")
         row = rows[key]
-        if row["split"] != "train":
-            raise ValueError("Paired-effect fitting is restricted to training layouts")
+        if row["split"] != expected_split:
+            raise ValueError(f"Expected paired states from the {expected_split} split")
         if set(measurement["branches"]) != {-1, 1}:
             raise ValueError("Each paired state requires exactly two signed branches")
         branches = {}
@@ -90,7 +95,7 @@ def paired_records(
             {"case_id": key[0], "start_tick": key[1], "row": row, "branches": branches}
         )
     if len({record["case_id"] for record in records}) < 2:
-        raise ValueError("Cross-fitting requires paired effects from two layouts")
+        raise ValueError("Paired effects require at least two layouts")
     return records
 
 
@@ -278,12 +283,50 @@ def run(args: argparse.Namespace) -> dict:
         expected_dataset=args.dataset,
         expected_method="joint",
     )
+    evaluation_measurements = getattr(args, "evaluation_measurements", None)
+    evaluation_paired_result = getattr(args, "evaluation_paired_result", None)
+    if bool(evaluation_measurements) != bool(evaluation_paired_result):
+        raise ValueError("Evaluation measurements and result must be provided together")
+    evaluation_records, evaluation_meta = None, None
+    if evaluation_measurements:
+        evaluation = torch.load(
+            evaluation_measurements, map_location="cpu", weights_only=True
+        )
+        evaluation_meta = json.loads(evaluation_paired_result.read_text())
+        if (
+            evaluation_meta.get("state") != "complete"
+            or not evaluation_meta.get("no_training")
+            or evaluation_meta.get("split") != "development"
+            or evaluation_meta.get("paired_states") != len(evaluation)
+        ):
+            raise ValueError("Evaluation artifact is not a complete development run")
+        evaluation_records = paired_records(
+            dataset,
+            evaluation,
+            evaluation_meta["axis"],
+            evaluation_meta["offset"],
+            expected_split="development",
+        )
+        if {row["case_id"] for row in records} & {
+            row["case_id"] for row in evaluation_records
+        }:
+            raise ValueError("Training and evaluation paired layouts overlap")
     args.output.mkdir(parents=True)
-    cases = sorted({record["case_id"] for record in records})
-    folds, started = [], time.monotonic()
-    for fold, heldout in enumerate(cases):
-        train = [record for record in records if record["case_id"] != heldout]
-        test = [record for record in records if record["case_id"] == heldout]
+    started = time.monotonic()
+    folds = []
+    if evaluation_records is None:
+        cases = sorted({record["case_id"] for record in records})
+        partitions = [
+            (
+                heldout,
+                [record for record in records if record["case_id"] != heldout],
+                [record for record in records if record["case_id"] == heldout],
+            )
+            for heldout in cases
+        ]
+    else:
+        partitions = [("development", records, evaluation_records)]
+    for fold, (heldout, train, test) in enumerate(partitions):
         arms = {"base": (readout.model, [])}
         for arm in ("pointwise", "effect", "reversed_effect"):
             arms[arm] = fine_tune(
@@ -326,9 +369,19 @@ def run(args: argparse.Namespace) -> dict:
         "seed": args.seed,
         "steps_per_fold_arm": args.steps,
         "paired_states": len(records),
+        "evaluation_paired_states": (
+            len(evaluation_records) if evaluation_records is not None else None
+        ),
+        "evaluation_measurements_sha256": (
+            file_sha256(evaluation_measurements) if evaluation_measurements else None
+        ),
         "folds": folds,
         "seconds": time.monotonic() - started,
-        "interpretation": "paired-label cross-fit development evidence; not held-out-layout or control evidence",
+        "interpretation": (
+            "training-pair fit evaluated on readout-held-out development layouts; not control evidence"
+            if evaluation_records is not None
+            else "paired-label cross-fit development evidence; not held-out-layout or control evidence"
+        ),
     }
     write_json(args.output / "result.json", result)
     return result
@@ -338,6 +391,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("dataset", "measurements", "paired-result", "checkpoint", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--evaluation-measurements", type=Path)
+    parser.add_argument("--evaluation-paired-result", type=Path)
     parser.add_argument("--seed", type=int, default=31)
     parser.add_argument("--steps", type=int, default=100)
     args = parser.parse_args()

@@ -314,6 +314,50 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
                 steps=2,
             )
         )
+    evaluation_measurements = []
+    for row in (rows[16], rows[20]):
+        evaluation_measurements.append(
+            {
+                "case": {"id": row["case_id"]},
+                "start_tick": row["start_tick"],
+                "branches": {
+                    sign: {
+                        "horizon_mask": row["horizon_mask"].clone(),
+                        "response": row["response"] + sign * 0.01,
+                        "geometry": row["geometry"] + sign * 0.02,
+                    }
+                    for sign in (-1, 1)
+                },
+                "predictions": {},
+            }
+        )
+    evaluation_path = tmp_path / "evaluation_measurements.pt"
+    torch.save(evaluation_measurements, evaluation_path)
+    evaluation_result = tmp_path / "evaluation_result.json"
+    evaluation_result.write_text(
+        '{"state":"complete","no_training":true,"split":"development",'
+        '"axis":0,"offset":0.05,"paired_states":2}'
+    )
+    paired_result.write_text(
+        '{"state":"complete","no_training":true,"axis":0,"offset":0.05,'
+        '"paired_states":2}'
+    )
+    transfer = run_effect_probe(
+        Namespace(
+            dataset=dataset,
+            measurements=measurement_path,
+            paired_result=paired_result,
+            evaluation_measurements=evaluation_path,
+            evaluation_paired_result=evaluation_result,
+            checkpoint=probe_root / "joint-seed3/readout.pt",
+            output=tmp_path / "effect-transfer",
+            seed=7,
+            steps=2,
+        )
+    )
+    assert transfer["evaluation_paired_states"] == 2
+    assert len(transfer["folds"]) == 1
+    assert transfer["folds"][0]["heldout_paired_case"] == "development"
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
