@@ -358,6 +358,19 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
     assert transfer["evaluation_paired_states"] == 2
     assert len(transfer["folds"]) == 1
     assert transfer["folds"][0]["heldout_paired_case"] == "development"
+    for arm in ("pointwise", "effect", "reversed_effect"):
+        checkpoint = tmp_path / "effect-transfer/checkpoints" / f"{arm}.pt"
+        assert checkpoint.is_file()
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        assert payload["effect_supervision"] == arm
+        assert payload["effect_steps"] == 2
+        assert payload["effect_measurements_sha256"]
+        restored = PhysicalReadout(
+            payload["response_dim"],
+            payload["geometry_dim"],
+            factorized=payload["factorized"],
+        )
+        restored.load_state_dict(payload["model"], strict=True)
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):

@@ -262,6 +262,38 @@ def summarize(rows: list[dict]) -> dict:
     return result
 
 
+def effect_checkpoint(
+    readout: FrozenReadout,
+    model: torch.nn.Module,
+    *,
+    supervision: str,
+    measurements: Path,
+    seed: int,
+    steps: int,
+    revision: str,
+) -> dict:
+    """Build a deployable readout with explicit paired-supervision provenance."""
+    if supervision not in {"pointwise", "effect", "reversed_effect"}:
+        raise ValueError("Unknown effect checkpoint supervision")
+    payload = {
+        key: value
+        for key, value in readout.payload.items()
+        if key not in {"model", "revision", "seed"}
+    }
+    return payload | {
+        "model": {
+            key: value.detach().cpu().clone()
+            for key, value in model.state_dict().items()
+        },
+        "revision": revision,
+        "seed": seed,
+        "effect_supervision": supervision,
+        "effect_steps": steps,
+        "effect_measurements": str(measurements.resolve()),
+        "effect_measurements_sha256": file_sha256(measurements),
+    }
+
+
 def run(args: argparse.Namespace) -> dict:
     """Cross-fit paired labels by layout and retain all fold-level outcomes."""
     if not 1 <= args.steps <= 400:
@@ -313,6 +345,7 @@ def run(args: argparse.Namespace) -> dict:
             raise ValueError("Training and evaluation paired layouts overlap")
     args.output.mkdir(parents=True)
     started = time.monotonic()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     folds = []
     if evaluation_records is None:
         cases = sorted({record["case_id"] for record in records})
@@ -338,6 +371,22 @@ def run(args: argparse.Namespace) -> dict:
                 args.seed + fold,
                 args.steps,
             )
+        if evaluation_records is not None:
+            checkpoint_root = args.output / "checkpoints"
+            checkpoint_root.mkdir(exist_ok=True)
+            for arm in ("pointwise", "effect", "reversed_effect"):
+                torch.save(
+                    effect_checkpoint(
+                        readout,
+                        arms[arm][0],
+                        supervision=arm,
+                        measurements=args.measurements,
+                        seed=args.seed + fold,
+                        steps=args.steps,
+                        revision=revision,
+                    ),
+                    checkpoint_root / f"{arm}.pt",
+                )
         folds.append(
             {
                 "heldout_paired_case": heldout,
@@ -360,9 +409,7 @@ def run(args: argparse.Namespace) -> dict:
         )
     result = {
         "state": "complete",
-        "revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip(),
+        "revision": revision,
         "dataset_sha256": dataset_sha256(args.dataset),
         "measurements_sha256": file_sha256(args.measurements),
         "checkpoint_sha256": file_sha256(args.checkpoint),
