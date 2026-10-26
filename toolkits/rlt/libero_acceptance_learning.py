@@ -106,11 +106,16 @@ class AcceptanceLearner:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
         self.actor_updates = self.critic_updates = 0
 
-    def _critic_token(self, token: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def _critic_token(
+        self,
+        token: torch.Tensor,
+        action: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
         """Build the critic state while preserving action gradients."""
         if self.critic_conditioner is None:
             return token
-        conditioned = self.critic_conditioner(token, action)
+        conditioned = self.critic_conditioner(token, action, reference)
         if conditioned.shape != token.shape or not torch.isfinite(conditioned).all():
             raise FloatingPointError("Invalid critic conditioning token")
         return conditioned
@@ -154,7 +159,7 @@ class AcceptanceLearner:
                 noise = (torch.randn_like(next_action) * 0.2).clamp(-0.5, 0.5)
                 next_action = (next_action + noise).clamp(-1, 1)
                 q1, q2 = self.target_critic(
-                    self._critic_token(batch["next_z"], next_action),
+                    self._critic_token(batch["next_z"], next_action, batch["next_ref"]),
                     next_action,
                     batch["next_prop"],
                 )
@@ -165,7 +170,7 @@ class AcceptanceLearner:
                     torch.minimum(q1, q2),
                 )
             q1, q2 = self.critic(
-                self._critic_token(batch["z"], batch["action"]),
+                self._critic_token(batch["z"], batch["action"], batch["ref"]),
                 batch["action"],
                 batch["prop"],
             )
@@ -193,7 +198,7 @@ class AcceptanceLearner:
             # retroactively constructed expert suffix after observing outcomes.
             bc = (action - batch["ref"]).square().sum((-2, -1)).mean()
             q = self.critic.q1_forward(
-                self._critic_token(batch["z"], action.clamp(-1, 1)),
+                self._critic_token(batch["z"], action.clamp(-1, 1), batch["ref"]),
                 action.clamp(-1, 1),
                 batch["prop"],
             ).mean()

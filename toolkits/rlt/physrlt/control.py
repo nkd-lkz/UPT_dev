@@ -155,6 +155,7 @@ def warmup(
     if critic_conditioning != "latent" and candidate_mode not in {
         "outcomes",
         "mixed",
+        "relative",
     }:
         raise ValueError("Unknown critic conditioning protocol")
     learner = AcceptanceLearner(
@@ -413,7 +414,10 @@ def run(args):
     records = []
     external_readouts = parse_external_readouts(getattr(args, "external_readouts", []))
     candidate_critics = set(getattr(args, "candidate_critics", []))
-    unknown_candidates = candidate_critics - set(args.methods)
+    relative_critics = set(getattr(args, "relative_critics", []))
+    if candidate_critics & relative_critics:
+        raise ValueError("Absolute and relative critic labels must be disjoint")
+    unknown_candidates = (candidate_critics | relative_critics) - set(args.methods)
     if unknown_candidates:
         raise ValueError("Candidate critic labels must also be requested methods")
     rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
@@ -455,9 +459,11 @@ def run(args):
                 expected_dataset=args.dataset,
                 expected_method=expected_method,
             )
-            critic_conditioning = (
-                "candidate_mixed" if method in candidate_critics else "latent"
-            )
+            critic_conditioning = "latent"
+            if method in candidate_critics:
+                critic_conditioning = "candidate_mixed"
+            elif method in relative_critics:
+                critic_conditioning = "candidate_relative"
             write_json(
                 args.output / f"{method}-readout.json",
                 {
@@ -565,6 +571,7 @@ def main():
         metavar="LABEL=PATH",
     )
     parser.add_argument("--candidate-critics", nargs="*", default=[])
+    parser.add_argument("--relative-critics", nargs="*", default=[])
     parser.add_argument(
         "--methods",
         nargs="+",

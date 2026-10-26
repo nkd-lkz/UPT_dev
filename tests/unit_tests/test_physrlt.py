@@ -145,13 +145,30 @@ def test_candidate_consequences_match_commands_and_preserve_action_gradients():
     model = PhysicalReadout(12, 67)
     conditioner = CandidateConsequenceConditioner(model, "joint", mode="mixed")
     token = torch.randn(2, 128)
-    result = conditioner(token, actions)
+    result = conditioner(token, actions, torch.zeros_like(actions))
     assert result.shape == token.shape
     result.square().mean().backward()
     assert torch.isfinite(actions.grad).all()
     assert actions.grad[..., :6].abs().sum() > 0
     assert actions.grad[..., 6].abs().sum() > 0
     assert not any(parameter.requires_grad for parameter in conditioner.parameters())
+
+
+def test_relative_candidate_consequences_are_zero_at_reference():
+    torch.manual_seed(27)
+    model = PhysicalReadout(12, 67)
+    conditioner = CandidateConsequenceConditioner(model, "joint", mode="relative")
+    token = torch.randn(2, 128)
+    reference = torch.randn(2, 10, 7)
+    result = conditioner(token, reference, reference)
+    torch.testing.assert_close(result[:, :64], token[:, :64])
+    assert result[:, 64:].count_nonzero() == 0
+    candidate = (reference + 0.1).requires_grad_(True)
+    changed = conditioner(token, candidate, reference)
+    assert changed[:, 64:].count_nonzero() > 0
+    changed.square().mean().backward()
+    assert torch.isfinite(candidate.grad).all()
+    assert candidate.grad.abs().sum() > 0
 
 
 def test_external_readout_labels_are_explicit_and_unique(tmp_path):

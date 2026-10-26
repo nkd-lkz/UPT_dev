@@ -210,9 +210,9 @@ def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(sourc
             super().__init__()
             self.calls = 0
 
-        def forward(self, token, action):
+        def forward(self, token, action, reference):
             self.calls += 1
-            return token + action.mean((-2, -1), keepdim=False)[:, None]
+            return token + (action - reference).mean((-2, -1))[:, None]
 
     conditioner = Conditioner()
     learner = AcceptanceLearner(
@@ -233,8 +233,8 @@ def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(sourc
 
 def test_candidate_conditioning_cannot_change_bc_warmup(source):
     class Conditioner(torch.nn.Module):
-        def forward(self, token, action):
-            return token + action.mean((-2, -1))[:, None]
+        def forward(self, token, action, reference):
+            return token + (action - reference).mean((-2, -1))[:, None]
 
     actors = []
     for conditioned in (False, True):

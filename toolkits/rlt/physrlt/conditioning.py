@@ -69,7 +69,7 @@ class CandidateConsequenceConditioner(nn.Module):
 
     def __init__(self, model: nn.Module, method: str, mode: str = "mixed") -> None:
         super().__init__()
-        if mode not in {"outcomes", "mixed"}:
+        if mode not in {"outcomes", "mixed", "relative"}:
             raise ValueError("Unknown candidate consequence conditioning mode")
         self.model = copy.deepcopy(model).eval().requires_grad_(False)
         self.method = method
@@ -81,14 +81,26 @@ class CandidateConsequenceConditioner(nn.Module):
         self.model.eval()
         return self
 
-    def forward(self, token: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        token: torch.Tensor,
+        actions: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
         """Return a 128-D candidate-aware critic token."""
         if token.ndim != 2 or token.shape[-1] != 128:
             raise ValueError("Candidate conditioning requires a 128-D base token")
+        if reference.shape != actions.shape:
+            raise ValueError("Reference and candidate action chunks must match")
         physical = physical_quantities(self.model, token, actions, self.method)
         if self.mode == "outcomes":
             result = physical
         else:
+            if self.mode == "relative":
+                reference_physical = physical_quantities(
+                    self.model, token, reference, self.method
+                )
+                physical = physical - reference_physical
             compact = torch.nn.functional.adaptive_avg_pool1d(physical[:, None], 64)[
                 :, 0
             ]
