@@ -29,7 +29,31 @@ METHODS = (
     "joint_recon",
     "factorized_joint",
     "residual_joint",
+    "arm_q_gripper_joint",
+    "eef_gripper_joint",
 )
+
+RESPONSE_GROUPS = {
+    "arm_joint_position": tuple(range(7)),
+    "eef_position": tuple(range(7, 10)),
+    "gripper_position": tuple(range(10, 12)),
+}
+
+
+def response_indices(method: str) -> tuple[int, ...]:
+    """Select measured response fields for a redundancy ablation.
+
+    Collection retains every commonly available proprioceptive field. These
+    variants change only the supervision target, so their input, bottleneck,
+    geometry loss and optimization budget remain matched.
+    """
+    if method == "arm_q_gripper_joint":
+        return (
+            RESPONSE_GROUPS["arm_joint_position"] + RESPONSE_GROUPS["gripper_position"]
+        )
+    if method == "eef_gripper_joint":
+        return RESPONSE_GROUPS["eef_position"] + RESPONSE_GROUPS["gripper_position"]
+    return tuple(range(12))
 
 
 def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
@@ -135,7 +159,12 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                         + masked_loss(pred[key][..., 64:], target[..., 64:], mask)
                     )
                 else:
-                    terms[key] = masked_loss(pred[key], target, mask)
+                    selected_response = response_indices(method)
+                    terms[key] = masked_loss(
+                        pred[key][..., selected_response],
+                        target[..., selected_response],
+                        mask,
+                    )
                 loss = loss + terms[key]
             if method == "joint_recon":
                 loss = (
@@ -245,6 +274,19 @@ def evaluate_representation(model, data, stats, method, rows) -> dict:
                     ),
                     "development_samples": int((development & valid).sum()),
                 }
+                if field == "response":
+                    field_results[name]["groups"] = {
+                        group: {
+                            "development_rmse": float(error[:, indices].mean().sqrt()),
+                            "development_scaled_mse": float(
+                                (
+                                    error[:, indices]
+                                    / stats["response_scale"][list(indices)].square()
+                                ).mean()
+                            ),
+                        }
+                        for group, indices in RESPONSE_GROUPS.items()
+                    }
                 if field == "geometry":
                     field_results[name]["depth_rmse_metres"] = float(
                         error[:, :64].mean().sqrt()
@@ -297,6 +339,11 @@ def run(args: argparse.Namespace) -> list[dict]:
                 "response_target": "crossfitted_state_action_residual"
                 if method == "residual_joint"
                 else "measured_delta",
+                "response_supervision": [
+                    group
+                    for group, indices in RESPONSE_GROUPS.items()
+                    if set(indices).issubset(response_indices(method))
+                ],
                 "steps": args.steps,
                 "training_rows": int(train.sum()),
                 "all_rows": len(rows),
@@ -315,6 +362,7 @@ def run(args: argparse.Namespace) -> list[dict]:
                     "seed": seed,
                     "factorized": model.factorized,
                     "response_target": result["response_target"],
+                    "response_supervision": result["response_supervision"],
                     "response_dim": data["response"].shape[-1],
                     "geometry_dim": data["geometry"].shape[-1],
                     "dataset": str(args.dataset),

@@ -22,6 +22,7 @@ from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
     inputs,
     normalization,
+    response_indices,
     run,
     tensor_data,
 )
@@ -154,6 +155,39 @@ def test_small_experiment_writes_auditable_results(tmp_path):
     assert "NOT control improvement" in results[0]["interpretation"]
     assert (tmp_path / "probe/table.csv").is_file()
     assert (tmp_path / "probe/joint-seed3/readout.pt").is_file()
+
+
+def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):
+    assert response_indices("joint") == tuple(range(12))
+    assert response_indices("arm_q_gripper_joint") == (*range(7), 10, 11)
+    assert response_indices("eef_gripper_joint") == (7, 8, 9, 10, 11)
+    path = tmp_path / "synthetic.pt"
+    torch.save({"rows": synthetic_rows()}, path)
+    results = run(
+        Namespace(
+            dataset=path,
+            output=tmp_path / "response-ablation",
+            methods=["arm_q_gripper_joint", "eef_gripper_joint"],
+            seeds=[3],
+            steps=2,
+            threads=2,
+        )
+    )
+    assert results[0]["trainable_parameters"] == results[1]["trainable_parameters"]
+    assert results[0]["response_supervision"] == [
+        "arm_joint_position",
+        "gripper_position",
+    ]
+    assert results[1]["response_supervision"] == [
+        "eef_position",
+        "gripper_position",
+    ]
+    groups = results[0]["horizons"]["3"]["response"]["token_and_action"]["groups"]
+    assert set(groups) == {
+        "arm_joint_position",
+        "eef_position",
+        "gripper_position",
+    }
 
 
 def test_failed_job_blocks_only_its_dependents():
