@@ -231,6 +231,27 @@ def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(sourc
         AcceptanceLearner("cpu", critic_conditioning="missing")
 
 
+def test_candidate_conditioning_cannot_change_bc_warmup(source):
+    class Conditioner(torch.nn.Module):
+        def forward(self, token, action):
+            return token + action.mean((-2, -1))[:, None]
+
+    actors = []
+    for conditioned in (False, True):
+        torch.manual_seed(29)
+        learner = AcceptanceLearner(
+            "cpu",
+            critic_conditioner=Conditioner() if conditioned else None,
+            critic_conditioning="candidate_test" if conditioned else "latent",
+        )
+        random.seed(37)
+        torch.manual_seed(37)
+        learner.update(rows(), warmup=True)
+        actors.append(learner.actor.state_dict())
+    for name in actors[0]:
+        torch.testing.assert_close(actors[0][name], actors[1][name], rtol=0, atol=0)
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (
