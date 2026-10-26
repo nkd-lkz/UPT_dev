@@ -389,6 +389,7 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
             output=tmp_path / "effect-transfer",
             seed=7,
             steps=2,
+            parameter_scope="decoders",
         )
     )
     assert transfer["evaluation_paired_states"] == 2
@@ -400,6 +401,7 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
         assert payload["effect_supervision"] == arm
         assert payload["effect_steps"] == 2
+        assert payload["effect_parameter_scope"] == "decoders"
         assert payload["effect_measurements_sha256"]
         restored = PhysicalReadout(
             payload["response_dim"],
@@ -407,6 +409,14 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
             factorized=payload["factorized"],
         )
         restored.load_state_dict(payload["model"], strict=True)
+        original = torch.load(
+            probe_root / "joint-seed3/readout.pt",
+            map_location="cpu",
+            weights_only=True,
+        )["model"]
+        for name, value in payload["model"].items():
+            if name.startswith(("encoder.", "reconstruct.")):
+                torch.testing.assert_close(value, original[name], rtol=0, atol=0)
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):

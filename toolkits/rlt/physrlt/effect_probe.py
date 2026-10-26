@@ -183,11 +183,20 @@ def fine_tune(
     mode: str,
     seed: int,
     steps: int,
+    parameter_scope: str = "all",
 ):
     """Update an identical base model with one paired supervision objective."""
+    if parameter_scope not in {"all", "decoders"}:
+        raise ValueError("Paired updates require all or decoders parameter scope")
     torch.manual_seed(seed)
-    model = copy.deepcopy(base).train().requires_grad_(True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    model = copy.deepcopy(base).train().requires_grad_(parameter_scope == "all")
+    if parameter_scope == "decoders":
+        model.response.requires_grad_(True)
+        model.geometry.requires_grad_(True)
+    trainable = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    optimizer = torch.optim.AdamW(trainable, lr=1e-4, weight_decay=1e-4)
     generator = torch.Generator().manual_seed(seed)
     trace = []
     for step in range(steps):
@@ -271,6 +280,7 @@ def effect_checkpoint(
     seed: int,
     steps: int,
     revision: str,
+    parameter_scope: str,
 ) -> dict:
     """Build a deployable readout with explicit paired-supervision provenance."""
     if supervision not in {"pointwise", "effect", "reversed_effect"}:
@@ -289,6 +299,7 @@ def effect_checkpoint(
         "seed": seed,
         "effect_supervision": supervision,
         "effect_steps": steps,
+        "effect_parameter_scope": parameter_scope,
         "effect_measurements": str(measurements.resolve()),
         "effect_measurements_sha256": file_sha256(measurements),
     }
@@ -320,6 +331,9 @@ def run(args: argparse.Namespace) -> dict:
     if bool(evaluation_measurements) != bool(evaluation_paired_result):
         raise ValueError("Evaluation measurements and result must be provided together")
     evaluation_records, evaluation_meta = None, None
+    parameter_scope = getattr(args, "parameter_scope", "all")
+    if parameter_scope not in {"all", "decoders"}:
+        raise ValueError("Unknown paired-effect parameter scope")
     if evaluation_measurements:
         evaluation = torch.load(
             evaluation_measurements, map_location="cpu", weights_only=True
@@ -370,6 +384,7 @@ def run(args: argparse.Namespace) -> dict:
                 arm,
                 args.seed + fold,
                 args.steps,
+                parameter_scope,
             )
         if evaluation_records is not None:
             checkpoint_root = args.output / "checkpoints"
@@ -384,6 +399,7 @@ def run(args: argparse.Namespace) -> dict:
                         seed=args.seed + fold,
                         steps=args.steps,
                         revision=revision,
+                        parameter_scope=parameter_scope,
                     ),
                     checkpoint_root / f"{arm}.pt",
                 )
@@ -415,6 +431,7 @@ def run(args: argparse.Namespace) -> dict:
         "checkpoint_sha256": file_sha256(args.checkpoint),
         "seed": args.seed,
         "steps_per_fold_arm": args.steps,
+        "parameter_scope": parameter_scope,
         "paired_states": len(records),
         "evaluation_paired_states": (
             len(evaluation_records) if evaluation_records is not None else None
@@ -442,6 +459,7 @@ def main() -> None:
     parser.add_argument("--evaluation-paired-result", type=Path)
     parser.add_argument("--seed", type=int, default=31)
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--parameter-scope", choices=("all", "decoders"), default="all")
     args = parser.parse_args()
     print(json.dumps(run(args), indent=2))
 
