@@ -118,10 +118,15 @@ def measured_snapshot(environment, object_keys: list[str] | None = None) -> dict
     }
 
 
-def physical_reset_hash(environment) -> str:
-    """Hash physics state without the case name, seed or process metadata."""
+def physical_reset_state(environment) -> np.ndarray:
+    """Copy the numeric simulator state without process or case metadata."""
     state = environment.env.env.get_sim_state()[0]
-    return hashlib.sha256(np.asarray(state, dtype="<f8").tobytes()).hexdigest()
+    return np.asarray(state, dtype="<f8").copy()
+
+
+def physical_reset_hash(environment) -> str:
+    """Hash the numeric physics state for audit logs."""
+    return hashlib.sha256(physical_reset_state(environment).tobytes()).hexdigest()
 
 
 def transition_targets(before: dict, following: dict[int, dict]) -> dict:

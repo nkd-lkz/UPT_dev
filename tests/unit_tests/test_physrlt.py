@@ -569,7 +569,8 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
     from toolkits.rlt.physrlt import control
 
     class SimulatorEdge:
-        pilot_reset_hashes = {}
+        collection_reset_hashes = {}
+        control_reset_states = {}
         instruction = "synthetic integration test"
 
         def reset(self, case):
@@ -600,6 +601,11 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
             return {"updated": 1}
 
     monkeypatch.setattr(control, "physical_reset_hash", lambda env: "synthetic-reset")
+    monkeypatch.setattr(
+        control,
+        "physical_reset_state",
+        lambda env: np.array([0.5, 1.0], dtype=np.float64),
+    )
     case = {"id": "synthetic", "split": "train", "state": 0, "seed": 3}
     replay = []
     result = control.rollout(
@@ -622,6 +628,27 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
         assert replay[0]["prop"][0] == 9
         assert replay[0]["next_prop"][0] == 9 + limit
     assert len(result["updates"]) == int(limit == 10)
+
+
+def test_control_reset_pairing_rejects_physics_drift(monkeypatch):
+    from toolkits.rlt.physrlt import control
+
+    class Environment:
+        control_reset_states = {}
+
+    environment = Environment()
+    states = iter(
+        [
+            np.array([0.5, 1.0], dtype=np.float64),
+            np.array([0.5, 1.0 + 5e-10], dtype=np.float64),
+            np.array([0.5, 1.0 + 2e-8], dtype=np.float64),
+        ]
+    )
+    monkeypatch.setattr(control, "physical_reset_state", lambda env: next(states))
+    assert control.paired_reset_delta(environment, "case") == 0
+    assert control.paired_reset_delta(environment, "case") == pytest.approx(5e-10)
+    with pytest.raises(RuntimeError, match="Paired control reset differs"):
+        control.paired_reset_delta(environment, "case")
 
 
 def test_structured_physics_token_remains_causal(tmp_path):

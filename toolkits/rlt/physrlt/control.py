@@ -23,7 +23,12 @@ from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     physical_quantities,
 )
-from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash, projection
+from toolkits.rlt.physrlt.data import (
+    PhysicalReference,
+    physical_reset_hash,
+    physical_reset_state,
+    projection,
+)
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
 from toolkits.rlt.pi05_baseline import (
@@ -207,6 +212,29 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def paired_reset_delta(environment, case_id: str) -> float:
+    """Require every control arm to start from the same current-run physics state.
+
+    Collection and control may use different simulator builds or assets, so an
+    old byte hash is provenance rather than a valid cross-run equality test.
+    The first reset in this process becomes the control reference; subsequent
+    methods must reproduce it within numerical tolerance.
+    """
+    state = physical_reset_state(environment)
+    expected = environment.control_reset_states.get(case_id)
+    if expected is None:
+        environment.control_reset_states[case_id] = state
+        return 0.0
+    if state.shape != expected.shape:
+        raise RuntimeError("Paired control reset state shape changed")
+    delta = float(np.max(np.abs(state - expected)))
+    if not np.allclose(state, expected, rtol=0, atol=1e-9):
+        raise RuntimeError(
+            f"Paired control reset differs for {case_id}: max_abs_delta={delta:.3e}"
+        )
+    return delta
+
+
 def rollout(
     env,
     reference,
@@ -233,16 +261,7 @@ def rollout(
     for _ in range(9):
         obs, _, _ = env.step(np.array([0, 0, 0, 0, 0, 0, -1], np.float32))
     digest = physical_reset_hash(env)
-    expected = env.pilot_reset_hashes.get(case["id"])
-    if expected is not None and digest != expected:
-        raise RuntimeError(
-            "Control reset differs from the recorded collection initial state"
-        )
-    if expected is None and digest in env.pilot_reset_hashes.values():
-        raise RuntimeError(
-            "New development case duplicates a previously used physical layout"
-        )
-    env.pilot_reset_hashes[case["id"]] = digest
+    reset_delta = paired_reset_delta(env, case["id"])
     ticks, success, rewards, inference_seconds = 0, False, 0.0, 0.0
     start = time.monotonic()
     prediction = reference.predict(obs, env.instruction, case["seed"] * 1000)
@@ -312,6 +331,8 @@ def rollout(
         "split": case["split"],
         "state_id": case["state"],
         "reset_hash": digest,
+        "collection_reset_hash": env.collection_reset_hashes.get(case["id"]),
+        "paired_reset_max_abs_delta": reset_delta,
         "success": success,
         "ticks": ticks,
         "reward": rewards,
@@ -367,6 +388,8 @@ def run(args):
             "critic_action_space": "policy_proposal_with_fixed_environment_mapping",
             "physical_target_action_space": "accepted_native_commands",
             "control_protocol_version": 2,
+            "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
+            "collection_reset_hash_role": "provenance_only",
         },
     )
     configure_gpu(args.gpu, args.output)
@@ -383,9 +406,10 @@ def run(args):
     if getattr(args, "development_cases", None):
         dev_cases = development_cases(args.development_cases, cases)
     env = LiberoProEnvironment()
-    env.pilot_reset_hashes = {
+    env.collection_reset_hashes = {
         episode["case"]["id"]: episode["reset_hash"] for episode in dataset["episodes"]
     }
+    env.control_reset_states = {}
     records = []
     external_readouts = parse_external_readouts(getattr(args, "external_readouts", []))
     candidate_critics = set(getattr(args, "candidate_critics", []))
@@ -518,6 +542,7 @@ def run(args):
         "warmup_steps": args.warmup_steps,
         "online_tick_cap": args.online_ticks,
         "control_protocol_version": 2,
+        "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
     write_json(args.output / "result.json", result)
 

@@ -38,7 +38,8 @@ def main() -> None:
     reference = PhysicalReference(model)
     conditions = [(1.0, 0), (0.7, 0), (0.4, 0), (1.0, 2), (1.0, 5)]
     env = LiberoProEnvironment()
-    env.pilot_reset_hashes = {}
+    env.collection_reset_hashes = {}
+    env.control_reset_states = {}
     records = []
     try:
         for path in sorted(args.base_root.glob("task*/cases.json")):
