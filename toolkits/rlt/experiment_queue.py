@@ -27,6 +27,15 @@ def validate_plan(plan: dict) -> None:
         raise ValueError("Require a wall-clock budget in (0, 12] hours")
     if type(plan.get("stop_on_failure", False)) is not bool:
         raise ValueError("stop_on_failure must be a boolean")
+    revision = plan.get("revision")
+    if revision is not None and (
+        not isinstance(revision, str)
+        or len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
+    ):
+        raise ValueError("revision must be a full lowercase Git commit")
+    if type(plan.get("require_clean_worktree", False)) is not bool:
+        raise ValueError("require_clean_worktree must be a boolean")
     known = set()
     for job in plan["jobs"]:
         name = job["name"]
@@ -41,6 +50,35 @@ def validate_plan(plan: dict) -> None:
         if not Path(job["cwd"]).is_dir():
             raise ValueError(f"Working directory does not exist: {job['cwd']}")
         known.add(name)
+
+
+def repository_state(cwd: str) -> tuple[str, bool]:
+    """Return the checked-out revision and whether tracked or untracked files differ."""
+    revision = subprocess.check_output(
+        ["git", "-C", cwd, "rev-parse", "HEAD"], text=True, timeout=10
+    ).strip()
+    dirty = bool(
+        subprocess.check_output(
+            ["git", "-C", cwd, "status", "--porcelain"], text=True, timeout=10
+        ).strip()
+    )
+    return revision, dirty
+
+
+def revision_error(plan: dict, job: dict) -> str | None:
+    """Reject a queued job if its reviewed source contract has changed."""
+    expected = plan.get("revision")
+    if expected is None:
+        return None
+    try:
+        revision, dirty = repository_state(job["cwd"])
+    except (subprocess.SubprocessError, OSError) as error:
+        return f"source audit failed: {type(error).__name__}"
+    if revision != expected:
+        return f"revision changed: expected {expected}, found {revision}"
+    if plan.get("require_clean_worktree", False) and dirty:
+        return "worktree changed after plan review"
+    return None
 
 
 def gpu_idle(gpu: int) -> tuple[bool, str]:
@@ -169,8 +207,17 @@ def run_plan(plan: dict, output: Path) -> dict:
                 row["state"] = "skipped_dependency"
                 save()
                 continue
+            source_error = revision_error(plan, job)
+            if source_error is not None:
+                row.update(state="revision_mismatch", error=source_error)
+                state.update(state="halted_revision_mismatch", failed_job=job["name"])
+                save()
+                break
             idle_checks = 0
             while job.get("requires_gpu", True) and time.monotonic() < deadline:
+                source_error = revision_error(plan, job)
+                if source_error is not None:
+                    break
                 idle, detail = gpu_idle(plan["gpu"])
                 idle_checks = idle_checks + 1 if idle else 0
                 row.update(state="waiting_gpu", gpu=detail, idle_checks=idle_checks)
@@ -179,9 +226,20 @@ def run_plan(plan: dict, output: Path) -> dict:
                 if idle_checks >= 2:
                     break
                 time.sleep(min(30, max(0, deadline - time.monotonic())))
+            if source_error is not None:
+                row.update(state="revision_mismatch", error=source_error)
+                state.update(state="halted_revision_mismatch", failed_job=job["name"])
+                save()
+                break
             if time.monotonic() >= deadline:
                 row["state"] = "not_started_deadline"
                 state["state"] = "deadline"
+                break
+            source_error = revision_error(plan, job)
+            if source_error is not None:
+                row.update(state="revision_mismatch", error=source_error)
+                state.update(state="halted_revision_mismatch", failed_job=job["name"])
+                save()
                 break
             row.update(state="running", started_at=time.time())
             save()

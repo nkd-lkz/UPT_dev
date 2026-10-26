@@ -41,12 +41,40 @@ def test_queue_requires_explicit_gpu_and_finite_deadline(tmp_path):
         {"hours": 13},
         {"hours": float("nan")},
         {"stop_on_failure": "false"},
+        {"revision": "short"},
+        {"require_clean_worktree": "true"},
     ):
         with pytest.raises(ValueError):
             validate_plan({**plan, **changes})
     plan["jobs"][0]["depends_on"] = ["future"]
     with pytest.raises(ValueError, match="earlier"):
         validate_plan(plan)
+
+
+def test_queue_rejects_source_changes_before_launch(tmp_path, monkeypatch):
+    expected = "a" * 40
+    monkeypatch.setattr(
+        "toolkits.rlt.experiment_queue.repository_state",
+        lambda cwd: ("b" * 40, False),
+    )
+    plan = {
+        "gpu": 2,
+        "hours": 0.01,
+        "revision": expected,
+        "require_clean_worktree": True,
+        "jobs": [job(tmp_path, "never", "raise AssertionError('must not run')")],
+    }
+    result = run_plan(plan, tmp_path / "queue-revision")
+    assert result["state"] == "halted_revision_mismatch"
+    assert result["jobs"]["never"]["state"] == "revision_mismatch"
+    assert not (tmp_path / "queue-revision/never.log").exists()
+    monkeypatch.setattr(
+        "toolkits.rlt.experiment_queue.repository_state",
+        lambda cwd: (expected, True),
+    )
+    dirty = run_plan(plan, tmp_path / "queue-dirty")
+    assert dirty["state"] == "halted_revision_mismatch"
+    assert "worktree changed" in dirty["jobs"]["never"]["error"]
 
 
 def test_queue_propagates_failures_and_rejects_incomplete_manifest(tmp_path):
