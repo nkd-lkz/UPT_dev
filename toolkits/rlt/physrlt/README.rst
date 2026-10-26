@@ -53,6 +53,8 @@ After the offline ablation, use ``prepare-response-check`` to create a separate 
 
 ``balanced_joint`` retains all three response views but computes arm-joint, end-effector and gripper errors separately before averaging the three groups. It tests whether dimension-wise averaging overweights the seven joint coordinates. This remains multi-view auxiliary supervision; it does not present FK-related quantities as independent physical information.
 
+Explicit ``outcomes`` and ``mixed`` policy inputs use only response fields supervised by the selected ablation. Omitted decoder rows are replaced by their normalized training mean, so random, untrained outputs cannot enter the actor or critic. Latent-only deployment is unchanged.
+
 No memory retrieval, external agent, language-model API or contact-sensor supervision is added. The implementation enforces native action bounds and measurement validity; it does not use simulator-only contact pairs, impulses or friction parameters, assume unknown friction laws, or impose rigid coupling between end-effector and object displacement. Depth and object states are privileged training targets, not extra deployment sensors. The geometry head is a compact short-horizon predictor, not PrismWAM's depth diffusion model. Here, consolidating experience means learning from consequence-prediction targets; it is not teacher-student knowledge distillation or sim-to-real by itself.
 
 Prediction improvements must be followed by repeated closed-loop gains. This pilot cannot establish reduced human intervention, cross-generator generality or throughput gains. Report wall time and inference overhead separately from interaction efficiency, and create a fresh split before formal paper experiments.
