@@ -144,6 +144,7 @@ def warmup(
     steps: int,
     critic_conditioning: str = "latent",
     correction_limit: float | None = None,
+    correction_axes: tuple[int, ...] | None = None,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -171,6 +172,7 @@ def warmup(
         ),
         critic_conditioning=critic_conditioning,
         correction_limit=correction_limit,
+        correction_axes=correction_axes,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -478,6 +480,7 @@ def run(args):
                     ),
                     "critic_conditioning": critic_conditioning,
                     "correction_limit": getattr(args, "correction_limit", None),
+                    "correction_axes": getattr(args, "correction_axes", None),
                 },
             )
             learner, fidelity = warmup(
@@ -487,6 +490,11 @@ def run(args):
                 args.warmup_steps,
                 critic_conditioning,
                 getattr(args, "correction_limit", None),
+                (
+                    tuple(args.correction_axes)
+                    if getattr(args, "correction_axes", None) is not None
+                    else None
+                ),
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -553,6 +561,7 @@ def run(args):
         "warmup_steps": args.warmup_steps,
         "online_tick_cap": args.online_ticks,
         "correction_limit": getattr(args, "correction_limit", None),
+        "correction_axes": getattr(args, "correction_axes", None),
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -569,6 +578,13 @@ def main():
     parser.add_argument("--online-ticks", type=int, default=1040)
     parser.add_argument("--execution-gain", type=float, default=1.0)
     parser.add_argument("--correction-limit", type=float)
+    parser.add_argument(
+        "--correction-axes",
+        type=int,
+        choices=range(7),
+        nargs="+",
+        help="Restrict bounded corrections to listed action dimensions",
+    )
     parser.add_argument("--development-cases", type=Path)
     parser.add_argument(
         "--external-readouts",

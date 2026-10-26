@@ -62,6 +62,7 @@ class AcceptanceLearner:
         critic_conditioner: nn.Module | None = None,
         critic_conditioning: str = "latent",
         correction_limit: float | None = None,
+        correction_axes: tuple[int, ...] | None = None,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -79,10 +80,21 @@ class AcceptanceLearner:
             )
         if correction_limit is not None and not 0 < correction_limit <= 2:
             raise ValueError("Correction limit must be in (0, 2]")
+        if correction_axes is not None:
+            correction_axes = tuple(correction_axes)
+            if correction_limit is None:
+                raise ValueError("Correction axes require a correction limit")
+            if (
+                not correction_axes
+                or len(set(correction_axes)) != len(correction_axes)
+                or any(axis not in range(7) for axis in correction_axes)
+            ):
+                raise ValueError("Correction axes must be unique action dimensions")
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
         self.correction_limit = correction_limit
+        self.correction_axes = correction_axes
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
             if critic_conditioner is not None
@@ -131,7 +143,12 @@ class AcceptanceLearner:
         if self.correction_limit is None:
             return raw_action
         difference = (raw_action - reference) / self.correction_limit
-        return reference + self.correction_limit * torch.tanh(difference)
+        correction = self.correction_limit * torch.tanh(difference)
+        if self.correction_axes is not None:
+            mask = torch.zeros(7, dtype=correction.dtype, device=correction.device)
+            mask[list(self.correction_axes)] = 1
+            correction = correction * mask
+        return reference + correction
 
     @torch.no_grad()
     def command(self, row: dict, *, deterministic: bool) -> torch.Tensor:
@@ -316,6 +333,7 @@ class AcceptanceLearner:
             "critic_updates": self.critic_updates,
             "critic_conditioning": self.critic_conditioning,
             "correction_limit": self.correction_limit,
+            "correction_axes": self.correction_axes,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -325,6 +343,8 @@ class AcceptanceLearner:
             raise ValueError("Checkpoint critic conditioning differs from the learner")
         if state.get("correction_limit") != self.correction_limit:
             raise ValueError("Checkpoint correction limit differs from the learner")
+        if state.get("correction_axes") != self.correction_axes:
+            raise ValueError("Checkpoint correction axes differ from the learner")
         for name in (
             "actor",
             "critic",

@@ -271,6 +271,32 @@ def test_reference_correction_is_bounded_and_checkpointed(source):
     torch.testing.assert_close(unbounded._policy_action(raw, reference), raw)
 
 
+def test_reference_correction_can_match_supervised_action_support(source):
+    learner = AcceptanceLearner("cpu", correction_limit=0.1, correction_axes=(0, 2))
+    reference = torch.linspace(-0.8, 0.8, 14).reshape(1, 2, 7)
+    raw = (reference + 0.5).requires_grad_()
+    action = learner._policy_action(raw, reference)
+    assert (action[..., (0, 2)] - reference[..., (0, 2)]).abs().max() <= 0.1 + 1e-6
+    torch.testing.assert_close(
+        action[..., (1, 3, 4, 5, 6)], reference[..., (1, 3, 4, 5, 6)]
+    )
+    action.sum().backward()
+    assert (raw.grad[..., (0, 2)] > 0).all()
+    assert (raw.grad[..., (1, 3, 4, 5, 6)] == 0).all()
+
+    state = learner.state_dict()
+    AcceptanceLearner(
+        "cpu", correction_limit=0.1, correction_axes=(0, 2)
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="correction axes differ"):
+        AcceptanceLearner("cpu", correction_limit=0.1).load_state_dict(state)
+    for axes in ((), (0, 0), (-1,), (7,)):
+        with pytest.raises(ValueError, match="Correction axes"):
+            AcceptanceLearner("cpu", correction_limit=0.1, correction_axes=axes)
+    with pytest.raises(ValueError, match="require a correction limit"):
+        AcceptanceLearner("cpu", correction_axes=(0,))
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (
