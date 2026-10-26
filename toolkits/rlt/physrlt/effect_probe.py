@@ -1,0 +1,335 @@
+# Copyright 2026 The RLinf Authors.
+# SPDX-License-Identifier: Apache-2.0
+"""Cross-fit paired action-effect supervision on frozen-transition artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import subprocess
+import time
+from pathlib import Path
+
+import torch
+
+from toolkits.rlt.physrlt.control import FrozenReadout
+from toolkits.rlt.physrlt.counterfactual import effect_errors
+from toolkits.rlt.physrlt.data import HORIZONS, masked_loss
+from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
+from toolkits.rlt.pi05_baseline import env_commands, write_json
+
+
+def file_sha256(path: Path) -> str:
+    """Hash an experiment artifact without loading or rewriting it."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def paired_records(
+    dataset: dict, measurements: list[dict], axis: int, offset: float
+) -> list[dict]:
+    """Join same-state branches to their pre-execution model inputs.
+
+    The pair artifact contains only completed physical outcomes. Current-state
+    features are recovered by exact ``(case_id, start_tick)`` identity from the
+    immutable transition dataset. No nearest-neighbour or aggregate matching is
+    allowed.
+    """
+    if axis not in (0, 1, 2) or not 0 < offset <= 0.1:
+        raise ValueError("Paired interventions exceed the declared action bounds")
+    rows = {(row["case_id"], row["start_tick"]): row for row in dataset["rows"]}
+    if len(rows) != len(dataset["rows"]):
+        raise ValueError("Transition identities must be unique")
+    records, identities = [], set()
+    for measurement in measurements:
+        key = (measurement["case"]["id"], measurement["start_tick"])
+        if key in identities:
+            raise ValueError("Duplicate paired-action state")
+        identities.add(key)
+        if key not in rows:
+            raise ValueError("Paired-action state is absent from the transition data")
+        row = rows[key]
+        if row["split"] != "train":
+            raise ValueError("Paired-effect fitting is restricted to training layouts")
+        if set(measurement["branches"]) != {-1, 1}:
+            raise ValueError("Each paired state requires exactly two signed branches")
+        branches = {}
+        for sign in (-1, 1):
+            branch = measurement["branches"][sign]
+            if branch["horizon_mask"].shape != (len(HORIZONS),):
+                raise ValueError("Unexpected paired horizon mask")
+            if branch["horizon_mask"].dtype != torch.bool:
+                raise ValueError("Paired horizon mask must be boolean")
+            for field in ("response", "geometry"):
+                expected = (len(HORIZONS), row[field].shape[-1])
+                if branch[field].shape != expected:
+                    raise ValueError(f"Unexpected paired {field} shape")
+                if not torch.isfinite(branch[field]).all():
+                    raise ValueError(f"Nonfinite paired {field}")
+            commands = torch.from_numpy(env_commands(row["ref"].numpy())).float()
+            commands[:, axis] = (commands[:, axis] + sign * offset).clamp(-1, 1)
+            branches[sign] = {
+                "commands": commands,
+                "horizon_mask": branch["horizon_mask"].clone(),
+                "response": branch["response"].clone(),
+                "geometry": branch["geometry"].clone(),
+            }
+        records.append(
+            {"case_id": key[0], "start_tick": key[1], "row": row, "branches": branches}
+        )
+    if len({record["case_id"] for record in records}) < 2:
+        raise ValueError("Cross-fitting requires paired effects from two layouts")
+    return records
+
+
+def _current_inputs(row: dict, stats: dict, method: str) -> tuple[torch.Tensor, ...]:
+    data = {
+        key: row[key][None]
+        for key in ("action_feature", "prefix_feature", "ref", "prop")
+    }
+    return inputs(data, stats, method)
+
+
+def _field_loss(
+    prediction: dict, target: dict, mask: torch.Tensor, stats: dict
+) -> torch.Tensor:
+    response = masked_loss(
+        prediction["response"],
+        target["response"] / stats["response_scale"],
+        mask,
+    )
+    geometry_target = target["geometry"] / stats["geometry_scale"]
+    geometry = 0.5 * (
+        masked_loss(
+            prediction["geometry"][..., :64],
+            geometry_target[..., :64],
+            mask,
+        )
+        + masked_loss(
+            prediction["geometry"][..., 64:],
+            geometry_target[..., 64:],
+            mask,
+        )
+    )
+    return response + geometry
+
+
+def paired_objective(model, stats: dict, method: str, record: dict, mode: str):
+    """Return matched pointwise or action-effect supervision for one state."""
+    if mode not in {"pointwise", "effect"}:
+        raise ValueError("Unknown paired supervision mode")
+    token = model.encode(*_current_inputs(record["row"], stats, method))
+    predictions = {
+        sign: model.consequences(token, branch["commands"][None])
+        for sign, branch in record["branches"].items()
+    }
+    valid = (
+        record["branches"][-1]["horizon_mask"] & record["branches"][1]["horizon_mask"]
+    )[None]
+    if not valid.any():
+        raise ValueError("Paired state has no common completed horizon")
+    if mode == "pointwise":
+        return torch.stack(
+            [
+                _field_loss(
+                    predictions[sign],
+                    {
+                        field: record["branches"][sign][field][None]
+                        for field in ("response", "geometry")
+                    },
+                    valid,
+                    stats,
+                )
+                for sign in (-1, 1)
+            ]
+        ).mean()
+    difference_prediction = {
+        field: predictions[1][field] - predictions[-1][field]
+        for field in ("response", "geometry")
+    }
+    difference_target = {
+        field: (record["branches"][1][field] - record["branches"][-1][field])[None]
+        for field in ("response", "geometry")
+    }
+    return _field_loss(difference_prediction, difference_target, valid, stats)
+
+
+def fine_tune(
+    base,
+    stats: dict,
+    method: str,
+    records: list[dict],
+    mode: str,
+    seed: int,
+    steps: int,
+):
+    """Update an identical base model with one paired supervision objective."""
+    torch.manual_seed(seed)
+    model = copy.deepcopy(base).train().requires_grad_(True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    generator = torch.Generator().manual_seed(seed)
+    trace = []
+    for step in range(steps):
+        selected = records[int(torch.randint(len(records), (), generator=generator))]
+        loss = paired_objective(model, stats, method, selected, mode)
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Nonfinite {mode} paired objective")
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        if not torch.isfinite(grad):
+            raise FloatingPointError(f"Nonfinite {mode} paired gradients")
+        optimizer.step()
+        if step % 25 == 0 or step == steps - 1:
+            trace.append(
+                {"step": step + 1, "loss": float(loss.detach()), "grad": float(grad)}
+            )
+    return model.eval().requires_grad_(False), trace
+
+
+@torch.no_grad()
+def evaluate_effects(
+    model, stats: dict, method: str, records: list[dict]
+) -> list[dict]:
+    """Evaluate command-conditioned differences on paired labels never fitted."""
+    results = []
+    for record in records:
+        token = model.encode(*_current_inputs(record["row"], stats, method))
+        predictions = {}
+        for sign in (-1, 1):
+            prediction = model.consequences(
+                token, record["branches"][sign]["commands"][None]
+            )
+            predictions[sign] = {
+                field: prediction[field] * stats[field + "_scale"]
+                for field in ("response", "geometry")
+            }
+        for result in effect_errors(
+            record["branches"][1],
+            record["branches"][-1],
+            predictions[1],
+            predictions[-1],
+            stats,
+        ):
+            results.append(
+                {
+                    "case_id": record["case_id"],
+                    "start_tick": record["start_tick"],
+                    **result,
+                }
+            )
+    return results
+
+
+def summarize(rows: list[dict]) -> dict:
+    """Aggregate paired errors without treating horizons as independent seeds."""
+    result = {}
+    for horizon in HORIZONS:
+        selected = [row for row in rows if row["horizon"] == horizon]
+        if not selected:
+            result[str(horizon)] = {"paired_states": 0}
+            continue
+        result[str(horizon)] = {
+            key: sum(row[key] for row in selected) / len(selected)
+            for key in (
+                "response_effect_scaled_mse",
+                "zero_effect_response_scaled_mse",
+                "object_effect_rmse_m",
+                "zero_effect_object_rmse_m",
+            )
+        } | {"paired_states": len(selected)}
+    return result
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Cross-fit paired labels by layout and retain all fold-level outcomes."""
+    if not 1 <= args.steps <= 400:
+        raise ValueError("Paired pilot is bounded to 1-400 updates")
+    if args.output.exists():
+        raise FileExistsError("Paired-effect output must be a new directory")
+    dataset = torch.load(args.dataset, map_location="cpu", weights_only=True)
+    measurements = torch.load(args.measurements, map_location="cpu", weights_only=True)
+    result_meta = json.loads(args.paired_result.read_text())
+    if result_meta.get("state") != "complete" or not result_meta.get("no_training"):
+        raise ValueError("Paired artifact must be a completed measurement-only run")
+    records = paired_records(
+        dataset, measurements, result_meta["axis"], result_meta["offset"]
+    )
+    readout = FrozenReadout(
+        args.checkpoint,
+        expected_dataset=args.dataset,
+        expected_method="joint",
+    )
+    args.output.mkdir(parents=True)
+    cases = sorted({record["case_id"] for record in records})
+    folds, started = [], time.monotonic()
+    for fold, heldout in enumerate(cases):
+        train = [record for record in records if record["case_id"] != heldout]
+        test = [record for record in records if record["case_id"] == heldout]
+        arms = {"base": (readout.model, [])}
+        for arm in ("pointwise", "effect"):
+            arms[arm] = fine_tune(
+                readout.model,
+                readout.payload["stats"],
+                readout.payload["method"],
+                train,
+                arm,
+                args.seed + fold,
+                args.steps,
+            )
+        folds.append(
+            {
+                "heldout_paired_case": heldout,
+                "training_paired_cases": sorted({row["case_id"] for row in train}),
+                "arms": {
+                    arm: {
+                        "summary": summarize(
+                            evaluate_effects(
+                                model,
+                                readout.payload["stats"],
+                                readout.payload["method"],
+                                test,
+                            )
+                        ),
+                        "loss_trace": trace,
+                    }
+                    for arm, (model, trace) in arms.items()
+                },
+            }
+        )
+    result = {
+        "state": "complete",
+        "revision": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "dataset_sha256": dataset_sha256(args.dataset),
+        "measurements_sha256": file_sha256(args.measurements),
+        "checkpoint_sha256": file_sha256(args.checkpoint),
+        "seed": args.seed,
+        "steps_per_fold_arm": args.steps,
+        "paired_states": len(records),
+        "folds": folds,
+        "seconds": time.monotonic() - started,
+        "interpretation": "paired-label cross-fit development evidence; not held-out-layout or control evidence",
+    }
+    write_json(args.output / "result.json", result)
+    return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("dataset", "measurements", "paired-result", "checkpoint", "output"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--steps", type=int, default=100)
+    args = parser.parse_args()
+    print(json.dumps(run(args), indent=2))
+
+
+if __name__ == "__main__":
+    main()

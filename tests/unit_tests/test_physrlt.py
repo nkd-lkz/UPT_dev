@@ -17,6 +17,12 @@ from toolkits.rlt.physrlt.data import (
     metric_depth,
     transition_targets,
 )
+from toolkits.rlt.physrlt.effect_probe import (
+    paired_records,
+)
+from toolkits.rlt.physrlt.effect_probe import (
+    run as run_effect_probe,
+)
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
@@ -215,6 +221,72 @@ def test_balanced_response_loss_gives_each_physical_group_equal_weight():
     dimension_weighted = execution_response_loss(prediction, target, mask, "joint")
     assert dimension_weighted.item() == pytest.approx((7 + 3 * 4 + 2 * 9) / 12)
     assert loss != dimension_weighted
+
+
+def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
+    rows = synthetic_rows()
+    for index, row in enumerate(rows):
+        row["start_tick"] = index % 4 * 10
+    dataset = tmp_path / "synthetic.pt"
+    torch.save({"rows": rows}, dataset)
+    probe_root = tmp_path / "probes"
+    run(
+        Namespace(
+            dataset=dataset,
+            output=probe_root,
+            methods=["joint"],
+            seeds=[3],
+            steps=2,
+            threads=2,
+        )
+    )
+    measurements = []
+    for row in (rows[0], rows[4]):
+        branches = {}
+        for sign in (-1, 1):
+            branches[sign] = {
+                "horizon_mask": row["horizon_mask"].clone(),
+                "response": row["response"] + sign * 0.01,
+                "geometry": row["geometry"] + sign * 0.02,
+            }
+        measurements.append(
+            {
+                "case": {"id": row["case_id"]},
+                "start_tick": row["start_tick"],
+                "branches": branches,
+                "predictions": {},
+            }
+        )
+    measurement_path = tmp_path / "measurements.pt"
+    torch.save(measurements, measurement_path)
+    paired_result = tmp_path / "paired_result.json"
+    paired_result.write_text(
+        '{"state":"complete","no_training":true,"axis":0,"offset":0.05}'
+    )
+    joined = paired_records({"rows": rows}, measurements, axis=0, offset=0.05)
+    assert len(joined) == 2
+    torch.testing.assert_close(
+        joined[0]["branches"][1]["commands"][:, 0]
+        - joined[0]["branches"][-1]["commands"][:, 0],
+        torch.full((10,), 0.1),
+    )
+    result = run_effect_probe(
+        Namespace(
+            dataset=dataset,
+            measurements=measurement_path,
+            paired_result=paired_result,
+            checkpoint=probe_root / "joint-seed3/readout.pt",
+            output=tmp_path / "effect-probe",
+            seed=7,
+            steps=2,
+        )
+    )
+    assert result["state"] == "complete" and len(result["folds"]) == 2
+    for fold in result["folds"]:
+        assert fold["heldout_paired_case"] not in fold["training_paired_cases"]
+        assert set(fold["arms"]) == {"base", "pointwise", "effect"}
+        for arm in fold["arms"].values():
+            assert arm["summary"]["10"]["paired_states"] == 1
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
