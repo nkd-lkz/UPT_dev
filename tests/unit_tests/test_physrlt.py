@@ -261,7 +261,8 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
     torch.save(measurements, measurement_path)
     paired_result = tmp_path / "paired_result.json"
     paired_result.write_text(
-        '{"state":"complete","no_training":true,"axis":0,"offset":0.05}'
+        '{"state":"complete","no_training":true,"axis":0,"offset":0.05,'
+        '"paired_states":2}'
     )
     joined = paired_records({"rows": rows}, measurements, axis=0, offset=0.05)
     assert len(joined) == 2
@@ -270,6 +271,11 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
         - joined[0]["branches"][-1]["commands"][:, 0],
         torch.full((10,), 0.1),
     )
+    saturated = copy.deepcopy(rows)
+    saturated[0]["ref"][:, 0] = 100
+    saturated[4]["ref"][:, 0] = 100
+    with pytest.raises(ValueError, match="clipping"):
+        paired_records({"rows": saturated}, measurements, axis=0, offset=0.05)
     result = run_effect_probe(
         Namespace(
             dataset=dataset,
@@ -292,6 +298,22 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
         }
         for arm in fold["arms"].values():
             assert arm["summary"]["10"]["paired_states"] == 1
+    paired_result.write_text(
+        '{"state":"complete","no_training":true,"axis":0,"offset":0.05,'
+        '"paired_states":1}'
+    )
+    with pytest.raises(ValueError, match="count differs"):
+        run_effect_probe(
+            Namespace(
+                dataset=dataset,
+                measurements=measurement_path,
+                paired_result=paired_result,
+                checkpoint=probe_root / "joint-seed3/readout.pt",
+                output=tmp_path / "invalid-effect-probe",
+                seed=7,
+                steps=2,
+            )
+        )
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):

@@ -79,6 +79,13 @@ def paired_records(
                 "response": branch["response"].clone(),
                 "geometry": branch["geometry"].clone(),
             }
+        separation = (
+            branches[1]["commands"][:, axis] - branches[-1]["commands"][:, axis]
+        )
+        if not torch.allclose(
+            separation, torch.full_like(separation, 2 * offset), atol=1e-6, rtol=0
+        ):
+            raise ValueError("Action clipping changed the paired intervention")
         records.append(
             {"case_id": key[0], "start_tick": key[1], "row": row, "branches": branches}
         )
@@ -261,6 +268,8 @@ def run(args: argparse.Namespace) -> dict:
     result_meta = json.loads(args.paired_result.read_text())
     if result_meta.get("state") != "complete" or not result_meta.get("no_training"):
         raise ValueError("Paired artifact must be a completed measurement-only run")
+    if result_meta.get("paired_states") != len(measurements):
+        raise ValueError("Paired measurement count differs from its completion record")
     records = paired_records(
         dataset, measurements, result_meta["axis"], result_meta["offset"]
     )
