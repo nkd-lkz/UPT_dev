@@ -93,6 +93,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 列入 ``--relative-critics`` 的 label 改为向 critic 提供“候选动作预测后果减去冻结 reference 动作预测后果”。同一个冻结 decoder 分别计算两个动作，可消除与动作无关的绝对值偏差，并让部署接口更贴合配对差分监督；critic 仍单独读取候选动作，actor 结构不变。绝对后果与相对后果 label 不能重叠。只有在同一相对接口下比较逐点 decoder 和配对差分 decoder，才能把差异归因于 effect 监督。
 
+``--correction-limit`` 启用一项独立的 reference 锚定控制变体。actor 仍预测完整动作 chunk，但环境实际执行且 critic 读取的动作会变换为 ``reference + limit * tanh((raw - reference) / limit)``；BC 继续约束 actor 的原始输出，target policy smoothing 也经过同一有界变换。该选项默认关闭，因此不会改变 baseline。实验报告必须把它视为匹配的 actor 参数化对照，而不是 physical readout 自身的证据：如果逐点监督和配对差分监督都受益，只能归因于 reference 锚定；只有配对差分组进一步优于同配置逐点组，才能支持 effect 监督收益。
+
 首轮闭环门槛应在 ``effect_probe`` 中设置 ``--parameter-scope decoders``。逐点、正确差分及符号反转差分监督此时冻结 encoder 和重建头，只更新响应与几何 decoder；三者提供给 actor 的 token 与起始 ``joint`` readout 逐参数一致，后续控制差异不能再归因于 actor 表征变化。默认的 ``all`` scope 仍可用于表征学习诊断，但必须与 decoder-only 结果分开报告。
 
 候选动作条件化 critic 只是有预算上限的开发实验，不会因为接口实现就自动成为正结果。需要在相同 warmup 状态、在线交互量和评估布局下比较原始 latent critic、原始联合 readout 的候选条件化、同数据逐点监督和配对差分监督。BC 热身仍须通过动作保真度与 validation 成功门槛，才允许在线更新；仅有预测误差改善不能触发更大训练预算。

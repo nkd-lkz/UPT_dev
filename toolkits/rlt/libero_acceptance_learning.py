@@ -61,6 +61,7 @@ class AcceptanceLearner:
         gripper_threshold: float = 0.5,
         critic_conditioner: nn.Module | None = None,
         critic_conditioning: str = "latent",
+        correction_limit: float | None = None,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -76,9 +77,12 @@ class AcceptanceLearner:
             raise ValueError(
                 "Non-latent critic conditioning requires its explicit module"
             )
+        if correction_limit is not None and not 0 < correction_limit <= 2:
+            raise ValueError("Correction limit must be in (0, 2]")
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
+        self.correction_limit = correction_limit
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
             if critic_conditioner is not None
@@ -120,16 +124,27 @@ class AcceptanceLearner:
             raise FloatingPointError("Invalid critic conditioning token")
         return conditioned
 
+    def _policy_action(
+        self, raw_action: torch.Tensor, reference: torch.Tensor
+    ) -> torch.Tensor:
+        """Optionally bound every learned correction around the reference."""
+        if self.correction_limit is None:
+            return raw_action
+        difference = (raw_action - reference) / self.correction_limit
+        return reference + self.correction_limit * torch.tanh(difference)
+
     @torch.no_grad()
     def command(self, row: dict, *, deterministic: bool) -> torch.Tensor:
         """Generate a command with dropout disabled for physical execution."""
         self.actor.eval()
-        action, _ = self.actor(
+        raw_action, _ = self.actor(
             row["z"][None].to(self.device),
             row["ref"][None].to(self.device),
             row["prop"][None].to(self.device),
             deterministic=deterministic,
         )
+        reference = row["ref"][None].to(self.device)
+        action = self._policy_action(raw_action, reference)
         if not torch.isfinite(action).all():
             raise FloatingPointError("Nonfinite actor command")
         return action[0].float().cpu().clamp(-1, 1)
@@ -150,14 +165,16 @@ class AcceptanceLearner:
         if not warmup:
             self.critic.train()
             with torch.no_grad():
-                next_action, _ = self.target_actor(
+                next_raw_action, _ = self.target_actor(
                     batch["next_z"],
                     batch["next_ref"],
                     batch["next_prop"],
                     deterministic=True,
                 )
-                noise = (torch.randn_like(next_action) * 0.2).clamp(-0.5, 0.5)
-                next_action = (next_action + noise).clamp(-1, 1)
+                noise = (torch.randn_like(next_raw_action) * 0.2).clamp(-0.5, 0.5)
+                next_action = self._policy_action(
+                    next_raw_action + noise, batch["next_ref"]
+                ).clamp(-1, 1)
                 q1, q2 = self.target_critic(
                     self._critic_token(batch["next_z"], next_action, batch["next_ref"]),
                     next_action,
@@ -191,12 +208,15 @@ class AcceptanceLearner:
         if warmup or self.critic_updates % 2 == 0:
             self.actor.train()
             self.critic.requires_grad_(False)
-            action, _ = self.actor(
+            raw_action, _ = self.actor(
                 batch["z"], batch["ref"], batch["prop"], deterministic=False
             )
+            action = self._policy_action(raw_action, batch["ref"])
             # The target is a full proposal issued before execution, not a
             # retroactively constructed expert suffix after observing outcomes.
-            bc = (action - batch["ref"]).square().sum((-2, -1)).mean()
+            # Keep BC in the actor's native output space. Applying it after the
+            # bounded transform would weaken the safety prior near the limit.
+            bc = (raw_action - batch["ref"]).square().sum((-2, -1)).mean()
             q = self.critic.q1_forward(
                 self._critic_token(batch["z"], action.clamp(-1, 1), batch["ref"]),
                 action.clamp(-1, 1),
@@ -218,6 +238,11 @@ class AcceptanceLearner:
                 bc_sum=bc.item(),
                 q_actor=q.item(),
                 actor_grad=float(grad),
+                correction_rms=(action.detach() - batch["ref"])
+                .square()
+                .mean()
+                .sqrt()
+                .item(),
             )
             with torch.no_grad():
                 for model, target_model in (
@@ -247,9 +272,10 @@ class AcceptanceLearner:
                 )
                 for key in ("z", "ref", "prop")
             }
-            mean, _ = self.actor(
+            raw_mean, _ = self.actor(
                 batch["z"], batch["ref"], batch["prop"], deterministic=True
             )
+            mean = self._policy_action(raw_mean, batch["ref"])
             errors.append((mean - batch["ref"]).square().cpu())
             gripper_errors.append(
                 (
@@ -289,6 +315,7 @@ class AcceptanceLearner:
             "actor_updates": self.actor_updates,
             "critic_updates": self.critic_updates,
             "critic_conditioning": self.critic_conditioning,
+            "correction_limit": self.correction_limit,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -296,6 +323,8 @@ class AcceptanceLearner:
         saved_conditioning = state.get("critic_conditioning", "latent")
         if saved_conditioning != self.critic_conditioning:
             raise ValueError("Checkpoint critic conditioning differs from the learner")
+        if state.get("correction_limit") != self.correction_limit:
+            raise ValueError("Checkpoint correction limit differs from the learner")
         for name in (
             "actor",
             "critic",

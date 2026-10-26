@@ -252,6 +252,25 @@ def test_candidate_conditioning_cannot_change_bc_warmup(source):
         torch.testing.assert_close(actors[0][name], actors[1][name], rtol=0, atol=0)
 
 
+def test_reference_correction_is_bounded_and_checkpointed(source):
+    learner = AcceptanceLearner("cpu", correction_limit=0.1)
+    reference = torch.linspace(-0.8, 0.8, 14).reshape(1, 2, 7)
+    raw = reference + torch.tensor([-10.0, 10.0])[None, :, None]
+    action = learner._policy_action(raw, reference)
+    assert (action - reference).abs().max() <= 0.1 + 1e-6
+    torch.testing.assert_close(learner._policy_action(reference, reference), reference)
+    state = learner.state_dict()
+    AcceptanceLearner("cpu", correction_limit=0.1).load_state_dict(state)
+    with pytest.raises(ValueError, match="correction limit differs"):
+        AcceptanceLearner("cpu").load_state_dict(state)
+    for invalid in (0, -0.1, 2.1):
+        with pytest.raises(ValueError, match="Correction limit"):
+            AcceptanceLearner("cpu", correction_limit=invalid)
+
+    unbounded = AcceptanceLearner("cpu")
+    torch.testing.assert_close(unbounded._policy_action(raw, reference), raw)
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (

@@ -143,6 +143,7 @@ def warmup(
     seed: int,
     steps: int,
     critic_conditioning: str = "latent",
+    correction_limit: float | None = None,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -169,6 +170,7 @@ def warmup(
             readout.candidate_conditioner(candidate_mode) if candidate_mode else None
         ),
         critic_conditioning=critic_conditioning,
+        correction_limit=correction_limit,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -475,6 +477,7 @@ def run(args):
                         "effect_measurements_sha256"
                     ),
                     "critic_conditioning": critic_conditioning,
+                    "correction_limit": getattr(args, "correction_limit", None),
                 },
             )
             learner, fidelity = warmup(
@@ -483,6 +486,7 @@ def run(args):
                 args.seed,
                 args.warmup_steps,
                 critic_conditioning,
+                getattr(args, "correction_limit", None),
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -548,6 +552,7 @@ def run(args):
         "role": "small development pilots, not final-test success claims",
         "warmup_steps": args.warmup_steps,
         "online_tick_cap": args.online_ticks,
+        "correction_limit": getattr(args, "correction_limit", None),
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -563,6 +568,7 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=1500)
     parser.add_argument("--online-ticks", type=int, default=1040)
     parser.add_argument("--execution-gain", type=float, default=1.0)
+    parser.add_argument("--correction-limit", type=float)
     parser.add_argument("--development-cases", type=Path)
     parser.add_argument(
         "--external-readouts",
