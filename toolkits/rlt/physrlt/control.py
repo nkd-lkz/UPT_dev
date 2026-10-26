@@ -535,6 +535,7 @@ def run(args):
         env.close()
         del reservation
     result = {
+        "complete": True,
         "state": "complete",
         "episodes": len(records),
         "seed": args.seed,
