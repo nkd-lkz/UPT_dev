@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -31,6 +33,7 @@ METHODS = (
     "residual_joint",
     "arm_q_gripper_joint",
     "eef_gripper_joint",
+    "balanced_joint",
 )
 
 RESPONSE_GROUPS = {
@@ -38,6 +41,15 @@ RESPONSE_GROUPS = {
     "eef_position": tuple(range(7, 10)),
     "gripper_position": tuple(range(10, 12)),
 }
+
+
+def dataset_sha256(path: Path) -> str:
+    """Hash the immutable transition artifact used to fit a readout."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def response_indices(method: str) -> tuple[int, ...]:
@@ -66,6 +78,24 @@ def mismatched_targets(index: torch.Tensor, episode_id: torch.Tensor) -> dict[in
         target = candidates[torch.randint(len(candidates), ())]
         result[int(source)] = int(target)
     return result
+
+
+def execution_response_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    method: str,
+) -> torch.Tensor:
+    """Balance response groups or apply the declared field ablation."""
+    if method == "balanced_joint":
+        return torch.stack(
+            [
+                masked_loss(prediction[..., indices], target[..., indices], mask)
+                for indices in RESPONSE_GROUPS.values()
+            ]
+        ).mean()
+    selected = response_indices(method)
+    return masked_loss(prediction[..., selected], target[..., selected], mask)
 
 
 def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
@@ -170,11 +200,8 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                         + masked_loss(pred[key][..., 64:], target[..., 64:], mask)
                     )
                 else:
-                    selected_response = response_indices(method)
-                    terms[key] = masked_loss(
-                        pred[key][..., selected_response],
-                        target[..., selected_response],
-                        mask,
+                    terms[key] = execution_response_loss(
+                        pred[key], target, mask, method
                     )
                 loss = loss + terms[key]
             if method == "joint_recon":
@@ -330,6 +357,8 @@ def run(args: argparse.Namespace) -> list[dict]:
         raise ValueError("Run probes per task with a fixed geometry target schema")
     data = tensor_data(rows)
     train = torch.tensor([r["split"] == "train" for r in rows])
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    data_digest = dataset_sha256(args.dataset)
     args.output.mkdir(parents=True, exist_ok=True)
     all_results = []
     for seed in args.seeds:
@@ -344,6 +373,8 @@ def run(args: argparse.Namespace) -> list[dict]:
             evaluation = evaluate_representation(model, data, stats, method, rows)
             result = {
                 "state": "complete",
+                "revision": revision,
+                "dataset_sha256": data_digest,
                 "method": method,
                 "seed": seed,
                 "factorized": model.factorized,
@@ -355,6 +386,9 @@ def run(args: argparse.Namespace) -> list[dict]:
                     for group, indices in RESPONSE_GROUPS.items()
                     if set(indices).issubset(response_indices(method))
                 ],
+                "response_weighting": "equal_physical_groups"
+                if method == "balanced_joint"
+                else "equal_selected_dimensions",
                 "steps": args.steps,
                 "training_rows": int(train.sum()),
                 "all_rows": len(rows),
@@ -367,6 +401,8 @@ def run(args: argparse.Namespace) -> list[dict]:
             torch.save(
                 {
                     "schema": 1,
+                    "revision": revision,
+                    "dataset_sha256": data_digest,
                     "model": model.state_dict(),
                     "stats": stats,
                     "method": method,
@@ -374,6 +410,7 @@ def run(args: argparse.Namespace) -> list[dict]:
                     "factorized": model.factorized,
                     "response_target": result["response_target"],
                     "response_supervision": result["response_supervision"],
+                    "response_weighting": result["response_weighting"],
                     "response_dim": data["response"].shape[-1],
                     "geometry_dim": data["geometry"].shape[-1],
                     "dataset": str(args.dataset),

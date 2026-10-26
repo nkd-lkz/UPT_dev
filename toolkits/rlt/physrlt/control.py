@@ -20,7 +20,7 @@ from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
 from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash, projection
 from toolkits.rlt.physrlt.model import PhysicalReadout
-from toolkits.rlt.physrlt.probe import inputs
+from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
 from toolkits.rlt.pi05_baseline import (
     configure_gpu,
     configure_source,
@@ -57,6 +57,13 @@ class FrozenReadout:
             expected_dataset.resolve()
         ):
             raise ValueError("Physical readout was fitted on a different dataset")
+        expected_digest = self.payload.get("dataset_sha256")
+        if (
+            expected_dataset is not None
+            and expected_digest is not None
+            and dataset_sha256(expected_dataset) != expected_digest
+        ):
+            raise ValueError("Physical readout dataset contents have changed")
         self.anchor = (
             FrozenReadout(
                 anchor,

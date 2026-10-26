@@ -20,6 +20,7 @@ from toolkits.rlt.physrlt.data import (
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
+    execution_response_loss,
     inputs,
     mismatched_targets,
     normalization,
@@ -200,6 +201,20 @@ def test_shuffled_physical_targets_always_use_another_episode():
     assert all(
         episodes[source] != episodes[target] for source, target in mapping.items()
     )
+
+
+def test_balanced_response_loss_gives_each_physical_group_equal_weight():
+    prediction = torch.zeros(1, 2, 12)
+    target = torch.zeros_like(prediction)
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    target[..., :7] = 1
+    target[..., 7:10] = 2
+    target[..., 10:] = 3
+    loss = execution_response_loss(prediction, target, mask, "balanced_joint")
+    assert loss.item() == pytest.approx((1 + 4 + 9) / 3)
+    dimension_weighted = execution_response_loss(prediction, target, mask, "joint")
+    assert dimension_weighted.item() == pytest.approx((7 + 3 * 4 + 2 * 9) / 12)
+    assert loss != dimension_weighted
 
 
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
@@ -450,6 +465,9 @@ def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path
         FrozenReadout(physical, expected_dataset=tmp_path / "other.pt")
     with pytest.raises(ValueError, match="requested arm"):
         FrozenReadout(physical, expected_method="geometry")
+    dataset.write_bytes(dataset.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="contents have changed"):
+        FrozenReadout(physical, expected_dataset=dataset, expected_method="joint")
 
 
 def test_new_development_cases_exclude_all_original_layouts(tmp_path):
