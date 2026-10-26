@@ -87,6 +87,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 ``python -m toolkits.rlt.physrlt.effect_probe`` 读取不可变的 transition 数据、``measurements.pt``、对应的纯测量 ``result.json`` 和一个 ``joint`` checkpoint，并按布局交叉使用配对标签：一个配对布局用于更新，另一个用于评估，随后交换。base、同数据逐点监督、正确差分监督和符号反转差分负对照都从同一 checkpoint 开始；``--steps`` 上限为 400。输出保留来源哈希和全部 fold。由于基础 readout 已见过两个训练布局的普通 transition，这仍是配对标签层面的开发证据，不能解释为未见布局泛化。
 
+独立的 development split 采集完成后，同时传入 ``--evaluation-measurements`` 和 ``--evaluation-paired-result``。此时模块使用全部训练布局配对数据更新，只在未参与 readout 拟合和配对效果更新的 development 布局上评估。代码拒绝不完整记录、split 不匹配、布局重叠以及经过动作裁剪后幅度改变的干预。该结果属于更严格的后果预测证据，仍不能代替任务成功率或在线 RL 收益。
+
 目前各 supervisor 在启动前申请共享研究 GPU 锁，子进程继承并持有到退出；进度检查同时读取回合／效果结果和终端日志。早先 pilot-v3 的守护进程启动时仍使用只检查 stdout 的旧逻辑，误停了仍在产出结果的实验；其中已完成、协议正确的回合仍属于有效开发数据。prepare-control-recovery 在新目录仅补跑未完成的 mixed-token 对照和被阻塞的 reference 扰动筛查。进程中断不能解释为算法负结果。
 
 旧 pilot-v4 守护进程也中断了 task 0 的 anchor 实验。prepare-anchor-recovery 只补跑其中响应和联合两组；已经完成的 task 3 及 task 0 的重建／几何两组结果仍保留。所有补跑使用新目录，不覆盖原始失败记录。
