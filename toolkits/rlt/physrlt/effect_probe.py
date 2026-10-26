@@ -121,7 +121,7 @@ def _field_loss(
 
 def paired_objective(model, stats: dict, method: str, record: dict, mode: str):
     """Return matched pointwise or action-effect supervision for one state."""
-    if mode not in {"pointwise", "effect"}:
+    if mode not in {"pointwise", "effect", "reversed_effect"}:
         raise ValueError("Unknown paired supervision mode")
     token = model.encode(*_current_inputs(record["row"], stats, method))
     predictions = {
@@ -156,6 +156,10 @@ def paired_objective(model, stats: dict, method: str, record: dict, mode: str):
         field: (record["branches"][1][field] - record["branches"][-1][field])[None]
         for field in ("response", "geometry")
     }
+    if mode == "reversed_effect":
+        difference_target = {
+            field: -target for field, target in difference_target.items()
+        }
     return _field_loss(difference_prediction, difference_target, valid, stats)
 
 
@@ -272,7 +276,7 @@ def run(args: argparse.Namespace) -> dict:
         train = [record for record in records if record["case_id"] != heldout]
         test = [record for record in records if record["case_id"] == heldout]
         arms = {"base": (readout.model, [])}
-        for arm in ("pointwise", "effect"):
+        for arm in ("pointwise", "effect", "reversed_effect"):
             arms[arm] = fine_tune(
                 readout.model,
                 readout.payload["stats"],

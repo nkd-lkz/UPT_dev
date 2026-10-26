@@ -284,7 +284,12 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
     assert result["state"] == "complete" and len(result["folds"]) == 2
     for fold in result["folds"]:
         assert fold["heldout_paired_case"] not in fold["training_paired_cases"]
-        assert set(fold["arms"]) == {"base", "pointwise", "effect"}
+        assert set(fold["arms"]) == {
+            "base",
+            "pointwise",
+            "effect",
+            "reversed_effect",
+        }
         for arm in fold["arms"].values():
             assert arm["summary"]["10"]["paired_states"] == 1
 
