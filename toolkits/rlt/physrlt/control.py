@@ -20,7 +20,7 @@ from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
 from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash, projection
 from toolkits.rlt.physrlt.model import PhysicalReadout
-from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
+from toolkits.rlt.physrlt.probe import dataset_sha256, inputs, response_indices
 from toolkits.rlt.pi05_baseline import (
     configure_gpu,
     configure_source,
@@ -103,11 +103,20 @@ class FrozenReadout:
         if self.mode != "latent":
             commands = torch.from_numpy(env_commands(data["ref"][0].numpy()))[None]
             predictions = self.model.consequences(z, commands)
+            # Redundancy-ablation checkpoints deliberately leave some response
+            # decoder rows unsupervised. Do not turn their random outputs into
+            # policy inputs in explicit-outcome deployment modes. Zero is the
+            # training-normalized mean and therefore the neutral replacement.
+            response = predictions["response"].clone()
+            supervised = response_indices(self.payload["method"])
+            omitted = sorted(set(range(response.shape[-1])) - set(supervised))
+            if omitted:
+                response[..., omitted] = 0
             depth = predictions["geometry"][..., :64].reshape(2, 1, 8, 8)
             depth = torch.nn.functional.avg_pool2d(depth, 2).flatten()
             quantities = torch.cat(
                 (
-                    predictions["response"].flatten(),
+                    response.flatten(),
                     depth,
                     predictions["geometry"][..., 64:].flatten(),
                 )

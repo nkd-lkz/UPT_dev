@@ -421,6 +421,37 @@ def test_structured_physics_token_remains_causal(tmp_path):
         assert original.shape == (128,)
 
 
+def test_outcome_token_masks_unsupervised_response_decoder_rows(tmp_path):
+    from toolkits.rlt.physrlt.control import FrozenReadout
+
+    rows = synthetic_rows()
+    path = tmp_path / "synthetic.pt"
+    torch.save({"rows": rows}, path)
+    run(
+        Namespace(
+            dataset=path,
+            output=tmp_path / "probes",
+            methods=["arm_q_gripper_joint"],
+            seeds=[3],
+            steps=2,
+            threads=2,
+        )
+    )
+    checkpoint = tmp_path / "probes/arm_q_gripper_joint-seed3/readout.pt"
+    original = FrozenReadout(checkpoint, mode="outcomes").encode(
+        rows[0], rows[0]["prop"]
+    )["z"]
+    payload = torch.load(checkpoint, weights_only=True)
+    payload["model"]["response.2.weight"][7:10] = 1e6
+    payload["model"]["response.2.bias"][7:10] = 1e6
+    altered = tmp_path / "altered.pt"
+    torch.save(payload, altered)
+    actual = FrozenReadout(altered, mode="outcomes").encode(rows[0], rows[0]["prop"])[
+        "z"
+    ]
+    torch.testing.assert_close(actual, original)
+
+
 def test_delayed_online_rl_requires_state_augmentation():
     from toolkits.rlt.physrlt.control import rollout
 
