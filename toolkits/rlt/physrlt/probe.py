@@ -56,6 +56,18 @@ def response_indices(method: str) -> tuple[int, ...]:
     return tuple(range(12))
 
 
+def mismatched_targets(index: torch.Tensor, episode_id: torch.Tensor) -> dict[int, int]:
+    """Choose a physical target from another episode for every train row."""
+    result = {}
+    for source in index:
+        candidates = index[episode_id[index] != episode_id[source]]
+        if not len(candidates):
+            raise ValueError("Shuffled controls require multiple training episodes")
+        target = candidates[torch.randint(len(candidates), ())]
+        result[int(source)] = int(target)
+    return result
+
+
 def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
     """Load only completed-horizon labels and pre-execution inputs."""
     keys = (
@@ -125,8 +137,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
     features, props, refs = inputs(data, stats, method)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     index = train.nonzero().flatten()
-    wrong = index[torch.randperm(len(index))]
-    shuffled = {int(i): int(j) for i, j in zip(index, wrong)}
+    shuffled = mismatched_targets(index, data["episode_id"])
     losses = []
     for step in range(steps):
         selected = index[torch.randint(len(index), (min(64, len(index)),))]

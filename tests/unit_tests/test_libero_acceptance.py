@@ -71,6 +71,13 @@ def test_td_discount_and_terminal_mask_use_executed_ticks():
     assert td_eligible({"ticks": 8, "terminal": False})
     assert td_eligible({"ticks": 3, "terminal": True})
     assert not td_eligible({"ticks": 3, "terminal": False})
+    with pytest.raises(ValueError, match="flat batch shape"):
+        td_target(
+            torch.ones(2),
+            torch.ones(2),
+            torch.zeros(2, dtype=torch.bool),
+            torch.ones(2, 1),
+        )
 
 
 def test_split_excludes_whole_episodes_and_protocol_rejects_old_runtime():

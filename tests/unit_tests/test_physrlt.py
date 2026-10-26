@@ -21,6 +21,7 @@ from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
     inputs,
+    mismatched_targets,
     normalization,
     response_indices,
     run,
@@ -190,6 +191,17 @@ def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_pat
     }
 
 
+def test_shuffled_physical_targets_always_use_another_episode():
+    torch.manual_seed(7)
+    episodes = torch.tensor([0, 0, 1, 1, 2, 2])
+    index = torch.arange(len(episodes))
+    mapping = mismatched_targets(index, episodes)
+    assert set(mapping) == set(index.tolist())
+    assert all(
+        episodes[source] != episodes[target] for source, target in mapping.items()
+    )
+
+
 def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
     import json
 
@@ -355,13 +367,14 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
         execution_gain=gain,
     )
     assert result["ticks"] == limit
-    assert len(replay) == 1
-    assert replay[0]["action"][0, 6].item() == pytest.approx(0.2)
-    assert replay[0]["accepted_commands"][0, 6].item() == 1
-    assert replay[0]["accepted_commands"][0, 0].item() == pytest.approx(0.2 * gain)
-    assert replay[0]["accepted_commands"][limit:].count_nonzero() == 0
-    assert replay[0]["prop"][0] == 9
-    assert replay[0]["next_prop"][0] == 9 + limit
+    assert len(replay) == int(limit == 10)
+    if replay:
+        assert replay[0]["action"][0, 6].item() == pytest.approx(0.2)
+        assert replay[0]["accepted_commands"][0, 6].item() == 1
+        assert replay[0]["accepted_commands"][0, 0].item() == pytest.approx(0.2 * gain)
+        assert replay[0]["accepted_commands"][limit:].count_nonzero() == 0
+        assert replay[0]["prop"][0] == 9
+        assert replay[0]["next_prop"][0] == 9 + limit
     assert len(result["updates"]) == int(limit == 10)
 
 
@@ -433,6 +446,10 @@ def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path
     torch.save(payload, tmp_path / "mismatch.pt")
     with pytest.raises(ValueError, match="same training dataset"):
         FrozenReadout(physical, anchor=tmp_path / "mismatch.pt")
+    with pytest.raises(ValueError, match="different dataset"):
+        FrozenReadout(physical, expected_dataset=tmp_path / "other.pt")
+    with pytest.raises(ValueError, match="requested arm"):
+        FrozenReadout(physical, expected_method="geometry")
 
 
 def test_new_development_cases_exclude_all_original_layouts(tmp_path):

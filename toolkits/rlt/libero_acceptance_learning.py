@@ -19,6 +19,9 @@ def td_target(
     gamma: float = 0.99,
 ) -> torch.Tensor:
     """Bootstrap after a full nonterminal chunk, not after a successful terminal."""
+    shapes = {tuple(value.shape) for value in (rewards, ticks, terminal, next_q)}
+    if len(shapes) != 1 or rewards.ndim != 1:
+        raise ValueError("TD inputs must share one flat batch shape")
     return rewards + gamma**ticks * (~terminal).float() * next_q
 
 

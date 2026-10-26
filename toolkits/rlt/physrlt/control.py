@@ -33,15 +33,43 @@ from toolkits.rlt.pi05_baseline import (
 class FrozenReadout:
     """Own a fixed representation version throughout a control experiment."""
 
-    def __init__(self, path: Path, mode: str = "latent", anchor: Path | None = None):
+    def __init__(
+        self,
+        path: Path,
+        mode: str = "latent",
+        anchor: Path | None = None,
+        *,
+        expected_dataset: Path | None = None,
+        expected_method: str | None = None,
+    ):
         if mode not in {"latent", "outcomes", "mixed"}:
             raise ValueError("Unknown physical token deployment mode")
         self.mode = mode
         self.payload = torch.load(path, map_location="cpu", weights_only=True)
-        self.anchor = FrozenReadout(anchor) if anchor is not None else None
+        if self.payload.get("schema") != 1:
+            raise ValueError("Unsupported physical readout schema")
+        if (
+            expected_method is not None
+            and self.payload.get("method") != expected_method
+        ):
+            raise ValueError("Physical readout method differs from the requested arm")
+        if expected_dataset is not None and Path(self.payload["dataset"]).resolve() != (
+            expected_dataset.resolve()
+        ):
+            raise ValueError("Physical readout was fitted on a different dataset")
+        self.anchor = (
+            FrozenReadout(
+                anchor,
+                expected_dataset=expected_dataset,
+                expected_method="action_recon",
+            )
+            if anchor is not None
+            else None
+        )
         if (
             self.anchor is not None
-            and self.anchor.payload["dataset"] != self.payload["dataset"]
+            and Path(self.anchor.payload["dataset"]).resolve()
+            != Path(self.payload["dataset"]).resolve()
         ):
             raise ValueError(
                 "Anchor and physical readout must use the same training dataset"
@@ -208,7 +236,7 @@ def rollout(
             inference_seconds += time.monotonic() - begin
         else:
             following, next_features = prediction, features
-        if replay is not None:
+        if replay is not None and (chunk_ticks == 10 or success):
             accepted_commands = torch.from_numpy(accepted)
             replay.append(
                 features
@@ -227,8 +255,7 @@ def rollout(
                     "reward": chunk_reward * 5,
                 }
             )
-            if chunk_ticks == 10 or success:
-                updates.append(learner.update(replay))
+            updates.append(learner.update(replay))
         rewards += chunk_reward
         prediction, features = following, next_features
         if success:
@@ -336,7 +363,13 @@ def run(args):
                 if method.endswith(suffix):
                     base_method, mode = method.removesuffix(suffix), suffix[1:]
             path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
-            readout = FrozenReadout(path, mode=mode, anchor=anchor)
+            readout = FrozenReadout(
+                path,
+                mode=mode,
+                anchor=anchor,
+                expected_dataset=args.dataset,
+                expected_method=base_method,
+            )
             learner, fidelity = warmup(readout, dataset, args.seed, args.warmup_steps)
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
