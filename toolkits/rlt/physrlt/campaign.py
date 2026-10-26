@@ -633,8 +633,12 @@ def prepare_repeat(
     )
 
 
-def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
+def prepare_paired_actions(
+    root: Path, base_root: Path, source: Path, *, split: str = "train"
+) -> None:
     """Queue independent paired-action diagnostics after verifying frozen inputs."""
+    if split not in {"train", "development"}:
+        raise ValueError("Paired actions require the train or development split")
     root.mkdir(parents=True, exist_ok=True)
     if (root / "plan.json").exists():
         raise FileExistsError("An existing plan must not be silently changed")
@@ -651,7 +655,7 @@ def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
         output = root / name / "paired_actions"
         jobs.append(
             {
-                "id": f"task{task}-paired-actions",
+                "id": f"task{task}-{split}-paired-actions",
                 "kind": "gpu",
                 "dependencies": [],
                 "output": str(output),
@@ -676,6 +680,8 @@ def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
                     str(0 if task == 0 else 1),
                     "--offset",
                     "0.1",
+                    "--split",
+                    split,
                 ],
             }
         )
@@ -686,8 +692,13 @@ def prepare_paired_actions(root: Path, base_root: Path, source: Path) -> None:
             "title": "Paired candidate-action effect diagnostic",
             "global_wall_time_limit": None,
             "no_final_test_access": True,
+            "paired_split": split,
             "hypothesis": "A grounded consequence decoder should predict the difference between two executed candidate actions from an identical state",
-            "limits": "Training states with new paired actions; at most 12 states; not generalization or control-success evidence",
+            "limits": (
+                "Development layouts with new paired actions; at most 12 states; independent of readout fitting but still development evidence"
+                if split == "development"
+                else "Training states with new paired actions; at most 12 states; not generalization or control-success evidence"
+            ),
             "base_root": str(base_root),
             "jobs": jobs,
         },
@@ -976,6 +987,9 @@ def main() -> None:
     parser.add_argument("--probes-root", type=Path)
     parser.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--idle-seconds", type=int, default=30)
+    parser.add_argument(
+        "--paired-split", choices=("train", "development"), default="train"
+    )
     args = parser.parse_args()
     if args.mode in {
         "prepare",
@@ -993,7 +1007,9 @@ def main() -> None:
         if args.mode == "prepare-paired-actions":
             if not args.base_root:
                 parser.error("prepare-paired-actions requires --base-root")
-            prepare_paired_actions(args.root, args.base_root, args.source)
+            prepare_paired_actions(
+                args.root, args.base_root, args.source, split=args.paired_split
+            )
         elif args.mode == "prepare-response-check":
             if not args.base_root or not args.probes_root:
                 parser.error(

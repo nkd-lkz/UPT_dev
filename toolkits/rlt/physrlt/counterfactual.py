@@ -74,7 +74,9 @@ def run(args: argparse.Namespace) -> None:
     configure_source(args.source)
     torch.set_num_threads(4)
     dataset = torch.load(args.dataset, map_location="cpu", weights_only=True)
-    cases = [c for c in dataset["meta"]["cases"] if c["split"] == "train"][: args.cases]
+    cases = [case for case in dataset["meta"]["cases"] if case["split"] == args.split][
+        : args.cases
+    ]
     readouts = {
         name: FrozenReadout(args.probes / f"{name}-seed31/readout.pt")
         for name in ("joint", "shuffled_joint", "state_action_joint")
@@ -202,7 +204,8 @@ def run(args: argparse.Namespace) -> None:
             "paired_states": completed_states,
             "axis": args.axis,
             "offset": args.offset,
-            "states_from": "training-layout replay; new actions; not held-out generalization",
+            "states_from": f"{args.split}-layout replay with new paired actions",
+            "split": args.split,
             "no_training": True,
             "policy_calls": 0,
             "interpretation": "Direct consequence-decoder fidelity under paired action changes; not a representation-vs-reconstruction or control-success comparison",
@@ -220,6 +223,7 @@ def main() -> None:
     parser.add_argument("--ticks", nargs="+", type=int, default=[40, 100, 160])
     parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--offset", type=float, default=0.1)
+    parser.add_argument("--split", choices=("train", "development"), default="train")
     args = parser.parse_args()
     if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 2:
         parser.error(

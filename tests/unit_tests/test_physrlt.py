@@ -346,6 +346,35 @@ def test_response_control_plan_is_bc_only_and_capacity_matched(tmp_path):
         ]
 
 
+def test_paired_action_plan_can_reserve_development_layouts(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.campaign import prepare_paired_actions
+
+    base = tmp_path / "base"
+    for task, perturbation in ((0, "object"), (3, "lan")):
+        name = f"task{task}-{perturbation}"
+        collection = base / name / "collection"
+        collection.mkdir(parents=True)
+        (collection / "transitions.pt").touch()
+        for method in ("joint", "shuffled_joint", "state_action_joint"):
+            checkpoint = base / name / "probes" / f"{method}-seed31/readout.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.touch()
+    output = tmp_path / "paired-development"
+    prepare_paired_actions(output, base, tmp_path, split="development")
+    plan = json.loads((output / "plan.json").read_text())
+    assert plan["paired_split"] == "development"
+    assert len(plan["jobs"]) == 2
+    assert all("development" in job["id"] for job in plan["jobs"])
+    assert all(
+        job["args"][job["args"].index("--split") + 1] == "development"
+        for job in plan["jobs"]
+    )
+    with pytest.raises(ValueError, match="train or development"):
+        prepare_paired_actions(tmp_path / "invalid", base, tmp_path, split="test")
+
+
 def test_failed_job_blocks_only_its_dependents():
     jobs = [
         {"id": "a", "dependencies": []},
