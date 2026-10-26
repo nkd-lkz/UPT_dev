@@ -59,6 +59,8 @@ class AcceptanceLearner:
         bottleneck_dim: int = 256,
         chunk_len: int = 8,
         gripper_threshold: float = 0.5,
+        critic_conditioner: nn.Module | None = None,
+        critic_conditioning: str = "latent",
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -70,8 +72,18 @@ class AcceptanceLearner:
         self.device, self.objective, self.beta = device, objective, beta
         if bottleneck_dim < 1 or chunk_len < 1:
             raise ValueError("Require positive token width and chunk length")
+        if (critic_conditioner is None) != (critic_conditioning == "latent"):
+            raise ValueError(
+                "Non-latent critic conditioning requires its explicit module"
+            )
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
+        self.critic_conditioning = critic_conditioning
+        self.critic_conditioner = (
+            critic_conditioner.to(device).eval().requires_grad_(False)
+            if critic_conditioner is not None
+            else None
+        )
         self.actor = ActionTokenActor(
             bottleneck_dim=bottleneck_dim,
             action_dim=7,
@@ -93,6 +105,15 @@ class AcceptanceLearner:
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
         self.actor_updates = self.critic_updates = 0
+
+    def _critic_token(self, token: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """Build the critic state while preserving action gradients."""
+        if self.critic_conditioner is None:
+            return token
+        conditioned = self.critic_conditioner(token, action)
+        if conditioned.shape != token.shape or not torch.isfinite(conditioned).all():
+            raise FloatingPointError("Invalid critic conditioning token")
+        return conditioned
 
     @torch.no_grad()
     def command(self, row: dict, *, deterministic: bool) -> torch.Tensor:
@@ -133,7 +154,9 @@ class AcceptanceLearner:
                 noise = (torch.randn_like(next_action) * 0.2).clamp(-0.5, 0.5)
                 next_action = (next_action + noise).clamp(-1, 1)
                 q1, q2 = self.target_critic(
-                    batch["next_z"], next_action, batch["next_prop"]
+                    self._critic_token(batch["next_z"], next_action),
+                    next_action,
+                    batch["next_prop"],
                 )
                 target = td_target(
                     torch.tensor([r["reward"] for r in rows], device=self.device),
@@ -141,7 +164,11 @@ class AcceptanceLearner:
                     torch.tensor([r["terminal"] for r in rows], device=self.device),
                     torch.minimum(q1, q2),
                 )
-            q1, q2 = self.critic(batch["z"], batch["action"], batch["prop"])
+            q1, q2 = self.critic(
+                self._critic_token(batch["z"], batch["action"]),
+                batch["action"],
+                batch["prop"],
+            )
             critic_loss = ((q1 - target).square() + (q2 - target).square()).mean()
             if not torch.isfinite(critic_loss):
                 raise FloatingPointError("Nonfinite critic loss")
@@ -166,7 +193,9 @@ class AcceptanceLearner:
             # retroactively constructed expert suffix after observing outcomes.
             bc = (action - batch["ref"]).square().sum((-2, -1)).mean()
             q = self.critic.q1_forward(
-                batch["z"], action.clamp(-1, 1), batch["prop"]
+                self._critic_token(batch["z"], action.clamp(-1, 1)),
+                action.clamp(-1, 1),
+                batch["prop"],
             ).mean()
             loss = self.beta * bc
             if not warmup and self.objective == "q_bc":
@@ -251,10 +280,17 @@ class AcceptanceLearner:
                 "actor_opt",
                 "critic_opt",
             )
-        } | {"actor_updates": self.actor_updates, "critic_updates": self.critic_updates}
+        } | {
+            "actor_updates": self.actor_updates,
+            "critic_updates": self.critic_updates,
+            "critic_conditioning": self.critic_conditioning,
+        }
 
     def load_state_dict(self, state: dict) -> None:
         """Restore the same warm start for either explicitly selected objective."""
+        saved_conditioning = state.get("critic_conditioning", "latent")
+        if saved_conditioning != self.critic_conditioning:
+            raise ValueError("Checkpoint critic conditioning differs from the learner")
         for name in (
             "actor",
             "critic",

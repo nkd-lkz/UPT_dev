@@ -204,6 +204,33 @@ def test_bc_actor_ignores_critic_values_while_q_bc_uses_them(source):
     assert any(not torch.equal(actors[0][key], actors[2][key]) for key in actors[0])
 
 
+def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(source):
+    class Conditioner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, token, action):
+            self.calls += 1
+            return token + action.mean((-2, -1), keepdim=False)[:, None]
+
+    conditioner = Conditioner()
+    learner = AcceptanceLearner(
+        "cpu",
+        critic_conditioner=conditioner,
+        critic_conditioning="candidate_test",
+    )
+    learner.update(rows())
+    learner.update(rows())
+    assert conditioner.calls == 5
+    state = learner.state_dict()
+    assert state["critic_conditioning"] == "candidate_test"
+    with pytest.raises(ValueError, match="conditioning differs"):
+        AcceptanceLearner("cpu").load_state_dict(state)
+    with pytest.raises(ValueError, match="explicit module"):
+        AcceptanceLearner("cpu", critic_conditioning="missing")
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (

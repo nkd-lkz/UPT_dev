@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import subprocess
@@ -18,9 +19,13 @@ import torch
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
+from toolkits.rlt.physrlt.conditioning import (
+    CandidateConsequenceConditioner,
+    physical_quantities,
+)
 from toolkits.rlt.physrlt.data import PhysicalReference, physical_reset_hash, projection
 from toolkits.rlt.physrlt.model import PhysicalReadout
-from toolkits.rlt.physrlt.probe import dataset_sha256, inputs, response_indices
+from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
 from toolkits.rlt.pi05_baseline import (
     configure_gpu,
     configure_source,
@@ -89,6 +94,14 @@ class FrozenReadout:
         self.model.load_state_dict(self.payload["model"], strict=True)
         self.model.eval().requires_grad_(False)
 
+    def candidate_conditioner(
+        self, mode: str = "mixed"
+    ) -> CandidateConsequenceConditioner:
+        """Build a frozen, action-conditioned consequence view for a critic."""
+        return CandidateConsequenceConditioner(
+            self.model, self.payload["method"], mode=mode
+        )
+
     @torch.no_grad()
     def encode(self, prediction: dict, prop) -> dict:
         data = {
@@ -101,31 +114,9 @@ class FrozenReadout:
             *inputs(data, self.payload["stats"], self.payload["method"])
         )
         if self.mode != "latent":
-            commands = torch.from_numpy(env_commands(data["ref"][0].numpy()))[None]
-            predictions = self.model.consequences(z, commands)
-            # Redundancy-ablation checkpoints deliberately leave some response
-            # decoder rows unsupervised. Do not turn their random outputs into
-            # policy inputs in explicit-outcome deployment modes. Zero is the
-            # training-normalized mean and therefore the neutral replacement.
-            response = predictions["response"].clone()
-            supervised = response_indices(self.payload["method"])
-            omitted = sorted(set(range(response.shape[-1])) - set(supervised))
-            if omitted:
-                response[..., omitted] = 0
-            depth = predictions["geometry"][..., :64].reshape(2, 1, 8, 8)
-            depth = torch.nn.functional.avg_pool2d(depth, 2).flatten()
-            quantities = torch.cat(
-                (
-                    response.flatten(),
-                    depth,
-                    predictions["geometry"][..., 64:].flatten(),
-                )
+            physical = physical_quantities(
+                self.model, z, data["ref"].clamp(-1, 1), self.payload["method"]
             )
-            if quantities.numel() > 128:
-                raise ValueError("Explicit physical quantities exceed token budget")
-            physical = torch.nn.functional.pad(
-                quantities, (0, 128 - quantities.numel())
-            )[None]
             if self.mode == "outcomes":
                 z = physical
             else:
@@ -141,10 +132,26 @@ class FrozenReadout:
         return {"z": z[0], "ref": data["ref"][0].clamp(-1, 1), "prop": data["prop"][0]}
 
 
-def warmup(readout: FrozenReadout, dataset: dict, seed: int, steps: int):
+def warmup(
+    readout: FrozenReadout,
+    dataset: dict,
+    seed: int,
+    steps: int,
+    critic_conditioning: str = "latent",
+):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
     torch.manual_seed(seed)
+    candidate_mode = (
+        critic_conditioning.removeprefix("candidate_")
+        if critic_conditioning.startswith("candidate_")
+        else None
+    )
+    if critic_conditioning != "latent" and candidate_mode not in {
+        "outcomes",
+        "mixed",
+    }:
+        raise ValueError("Unknown critic conditioning protocol")
     learner = AcceptanceLearner(
         "cuda",
         "q_bc",
@@ -152,6 +159,10 @@ def warmup(readout: FrozenReadout, dataset: dict, seed: int, steps: int):
         bottleneck_dim=128,
         chunk_len=10,
         gripper_threshold=0,
+        critic_conditioner=(
+            readout.candidate_conditioner(candidate_mode) if candidate_mode else None
+        ),
+        critic_conditioning=critic_conditioning,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -174,6 +185,26 @@ def warmup(readout: FrozenReadout, dataset: dict, seed: int, steps: int):
     learner.publish_warmup()
     final = learner.following(validation)
     return learner, {"before": initial, "after": final, "trace": trace}
+
+
+def parse_external_readouts(specs: list[str]) -> dict[str, Path]:
+    """Parse explicit labels without inferring scientific meaning from filenames."""
+    result = {}
+    for spec in specs:
+        label, separator, path = spec.partition("=")
+        if not separator or not label or not path or label in result:
+            raise ValueError("External readouts require unique LABEL=PATH entries")
+        result[label] = Path(path).resolve()
+    return result
+
+
+def file_sha256(path: Path) -> str:
+    """Hash a readout used by a control run."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def rollout(
@@ -356,6 +387,11 @@ def run(args):
         episode["case"]["id"]: episode["reset_hash"] for episode in dataset["episodes"]
     }
     records = []
+    external_readouts = parse_external_readouts(getattr(args, "external_readouts", []))
+    candidate_critics = set(getattr(args, "candidate_critics", []))
+    unknown_candidates = candidate_critics - set(args.methods)
+    if unknown_candidates:
+        raise ValueError("Candidate critic labels must also be requested methods")
     rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
     try:
         for case in validation_cases + dev_cases:
@@ -369,24 +405,55 @@ def run(args):
         for method in args.methods:
             base_method, mode = method, "latent"
             anchor = None
-            if method.endswith("_anchor"):
+            if method in external_readouts:
+                path = external_readouts[method]
+                expected_method = None
+            elif method.endswith("_anchor"):
                 base_method = method.removesuffix("_anchor")
                 # Every arm has two 400-step encoders. The fixed prior uses a
                 # different initialization, including in the dual-reconstruction
                 # control; this avoids a rank-deficient duplicate baseline.
                 anchor = args.probes / "action_recon-seed59" / "readout.pt"
+                path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
+                expected_method = base_method
             for suffix in ("_outcomes", "_mixed"):
-                if method.endswith(suffix):
+                if method not in external_readouts and method.endswith(suffix):
                     base_method, mode = method.removesuffix(suffix), suffix[1:]
-            path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
+                    path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
+                    expected_method = base_method
+            if method not in external_readouts and not method.endswith("_anchor"):
+                path = args.probes / f"{base_method}-seed{args.seed}" / "readout.pt"
+                expected_method = base_method
             readout = FrozenReadout(
                 path,
                 mode=mode,
                 anchor=anchor,
                 expected_dataset=args.dataset,
-                expected_method=base_method,
+                expected_method=expected_method,
             )
-            learner, fidelity = warmup(readout, dataset, args.seed, args.warmup_steps)
+            critic_conditioning = (
+                "candidate_mixed" if method in candidate_critics else "latent"
+            )
+            write_json(
+                args.output / f"{method}-readout.json",
+                {
+                    "checkpoint": str(path),
+                    "checkpoint_sha256": file_sha256(path),
+                    "method": readout.payload["method"],
+                    "effect_supervision": readout.payload.get("effect_supervision"),
+                    "effect_measurements_sha256": readout.payload.get(
+                        "effect_measurements_sha256"
+                    ),
+                    "critic_conditioning": critic_conditioning,
+                },
+            )
+            learner, fidelity = warmup(
+                readout,
+                dataset,
+                args.seed,
+                args.warmup_steps,
+                critic_conditioning,
+            )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
             validation_results = []
@@ -465,6 +532,13 @@ def main():
     parser.add_argument("--online-ticks", type=int, default=1040)
     parser.add_argument("--execution-gain", type=float, default=1.0)
     parser.add_argument("--development-cases", type=Path)
+    parser.add_argument(
+        "--external-readouts",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+    )
+    parser.add_argument("--candidate-critics", nargs="*", default=[])
     parser.add_argument(
         "--methods",
         nargs="+",

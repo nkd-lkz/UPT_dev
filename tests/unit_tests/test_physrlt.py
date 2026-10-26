@@ -10,6 +10,11 @@ import pytest
 import torch
 
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
+from toolkits.rlt.physrlt.conditioning import (
+    CandidateConsequenceConditioner,
+    differentiable_env_commands,
+)
+from toolkits.rlt.physrlt.control import parse_external_readouts
 from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
@@ -34,6 +39,7 @@ from toolkits.rlt.physrlt.probe import (
     run,
     tensor_data,
 )
+from toolkits.rlt.pi05_baseline import env_commands
 
 
 def synthetic_rows():
@@ -126,6 +132,36 @@ def test_response_decoder_depends_on_candidate_but_not_its_future_suffix():
         torch.testing.assert_close(
             response[:, 0], model.consequences(token, changed)["response"][:, 0]
         )
+
+
+def test_candidate_consequences_match_commands_and_preserve_action_gradients():
+    torch.manual_seed(23)
+    actions = torch.linspace(-2, 2, 140).reshape(2, 10, 7).requires_grad_(True)
+    commands = differentiable_env_commands(actions)
+    expected = torch.from_numpy(
+        np.stack([env_commands(row.detach().numpy()) for row in actions])
+    )
+    torch.testing.assert_close(commands.detach(), expected)
+    model = PhysicalReadout(12, 67)
+    conditioner = CandidateConsequenceConditioner(model, "joint", mode="mixed")
+    token = torch.randn(2, 128)
+    result = conditioner(token, actions)
+    assert result.shape == token.shape
+    result.square().mean().backward()
+    assert torch.isfinite(actions.grad).all()
+    assert actions.grad[..., :6].abs().sum() > 0
+    assert actions.grad[..., 6].abs().sum() > 0
+    assert not any(parameter.requires_grad for parameter in conditioner.parameters())
+
+
+def test_external_readout_labels_are_explicit_and_unique(tmp_path):
+    expected = (tmp_path / "effect.pt").resolve()
+    assert parse_external_readouts([f"effect_candidate={expected}"]) == {
+        "effect_candidate": expected
+    }
+    for invalid in (["effect.pt"], ["=effect.pt"], ["effect="], ["a=x", "a=y"]):
+        with pytest.raises(ValueError, match="unique LABEL=PATH"):
+            parse_external_readouts(invalid)
 
 
 def test_training_scaling_and_policy_inputs_do_not_read_future_labels():
