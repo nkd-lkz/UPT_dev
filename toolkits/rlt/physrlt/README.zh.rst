@@ -83,6 +83,8 @@ prepare-repeat 排队运行两个训练 seed（47、59）、六个新开发初�
 
 prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲卡上排队运行无需训练的诊断。代码重放已记录的命令前缀，核对本体与几何状态一致，再从同一状态执行两个方向相反、幅度受限的平移改动。比较预测后果之差、实测后果之差和“没有动作效应”的零预测对照；原始测量与预测保存在 measurements.pt。对照包括联合监督、打乱标签及“本体＋动作”的解码器，不使用重建模型中未经训练的后果解码器。最多检查十二个训练布局上的状态，因此只能检验局部动作敏感性，不能证明未见条件泛化或任务成功率提升。
 
+默认的 ``--paired-split train`` 复现上述诊断；准备新实验时设置 ``--paired-split development``，可把原有 development 布局用于配对动作采集。这些布局未参与 readout 拟合，但仍属于开发数据，不是论文最终测试集。
+
 ``python -m toolkits.rlt.physrlt.effect_probe`` 读取不可变的 transition 数据、``measurements.pt``、对应的纯测量 ``result.json`` 和一个 ``joint`` checkpoint，并按布局交叉使用配对标签：一个配对布局用于更新，另一个用于评估，随后交换。base、同数据逐点监督、正确差分监督和符号反转差分负对照都从同一 checkpoint 开始；``--steps`` 上限为 400。输出保留来源哈希和全部 fold。由于基础 readout 已见过两个训练布局的普通 transition，这仍是配对标签层面的开发证据，不能解释为未见布局泛化。
 
 目前各 supervisor 在启动前申请共享研究 GPU 锁，子进程继承并持有到退出；进度检查同时读取回合／效果结果和终端日志。早先 pilot-v3 的守护进程启动时仍使用只检查 stdout 的旧逻辑，误停了仍在产出结果的实验；其中已完成、协议正确的回合仍属于有效开发数据。prepare-control-recovery 在新目录仅补跑未完成的 mixed-token 对照和被阻塞的 reference 扰动筛查。进程中断不能解释为算法负结果。
