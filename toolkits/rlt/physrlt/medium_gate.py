@@ -544,6 +544,19 @@ def _aggregate(rows: list[dict]) -> tuple[int, int, float]:
     return successes, len(rows), ticks
 
 
+def _physical_episodes(root: Path) -> list[dict]:
+    """Read either the serial control result or disjoint parallel shards."""
+    serial = root / "physical/control_seed31/episodes.json"
+    if serial.exists():
+        return json.loads(serial.read_text())
+    rows = []
+    for name in ("control_direct_seed31", "control_effect_seed31"):
+        path = root / f"physical/{name}/episodes.json"
+        if path.exists():
+            rows.extend(json.loads(path.read_text()))
+    return rows
+
+
 def summarize(root: Path) -> list[dict]:
     """Publish a single table that keeps pending and negative outcomes visible."""
     plan = json.loads((root / "plan.json").read_text())
@@ -557,10 +570,10 @@ def summarize(root: Path) -> list[dict]:
         if episodes:
             observations[method] = _aggregate(episodes)
     validation_successes: dict[str, int] = {}
-    physical_path = root / "physical/control_seed31/episodes.json"
-    if physical_path.exists():
+    physical_episodes = _physical_episodes(root)
+    if physical_episodes:
         groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        for row in json.loads(physical_path.read_text()):
+        for row in physical_episodes:
             groups[(row["method"], row["stage"])].append(row)
         for method in ("action_recon", "joint", "pointwise_axis0", "effect_axis0"):
             frozen = groups.get((method, "online_frozen_eval"), [])

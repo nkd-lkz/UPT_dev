@@ -305,6 +305,32 @@ def test_medium_gate_summary_exposes_matched_gain(tmp_path):
     assert (root / "comparison.csv").is_file()
 
 
+def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
+    root = tmp_path / "medium"
+    root.mkdir()
+    (root / "plan.json").write_text('{"benchmark_cell":"task5-object"}')
+    for directory, method in (
+        ("control_direct_seed31", "joint"),
+        ("control_effect_seed31", "effect_axis0"),
+    ):
+        output = root / "physical" / directory
+        output.mkdir(parents=True)
+        rows = [
+            {
+                "method": method,
+                "stage": "online_frozen_eval",
+                "split": "development",
+                "success": True,
+                "ticks": 100,
+            }
+        ]
+        (output / "episodes.json").write_text(json.dumps(rows))
+    rows = summarize_medium_gate(root)
+    keyed = {row["method"]: row for row in rows}
+    assert keyed["Physical latent"]["success_rate_pct"] == 100
+    assert keyed["Paired-effect Physical Token"]["success_rate_pct"] == 100
+
+
 def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):
     assert response_indices("joint") == tuple(range(12))
     assert response_indices("arm_q_gripper_joint") == (*range(7), 10, 11)
