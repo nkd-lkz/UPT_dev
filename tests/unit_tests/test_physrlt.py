@@ -16,7 +16,11 @@ from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     differentiable_env_commands,
 )
-from toolkits.rlt.physrlt.control import parse_external_readouts, replay_trace_sha256
+from toolkits.rlt.physrlt.control import (
+    deferred_update_summary,
+    parse_external_readouts,
+    replay_trace_sha256,
+)
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.data import (
     check_split,
@@ -908,6 +912,20 @@ def test_deferred_control_keeps_replay_but_skips_inline_update(monkeypatch):
     changed = copy.deepcopy(replay)
     changed[0]["accepted_commands"][0, 0] = 1
     assert replay_trace_sha256(changed) != replay_trace_sha256(replay)
+
+
+def test_deferred_update_summary_keeps_reward_and_drift_diagnostics():
+    metrics = [
+        {"critic_loss": 4.0, "correction_rms": 0.01},
+        {"critic_loss": 2.0, "correction_rms": 0.03},
+    ]
+    replay = [{"reward": 0.0}, {"reward": 5.0}]
+    summary = deferred_update_summary(metrics, replay)
+    assert summary["updates"] == summary["transitions"] == 2
+    assert summary["positive_transitions"] == 1
+    assert summary["reward_sum"] == 5
+    assert summary["metrics"]["critic_loss"]["mean"] == 3
+    assert summary["metrics"]["correction_rms"]["max"] == 0.03
 
 
 def test_control_reset_pairing_rejects_physics_drift(monkeypatch):

@@ -255,6 +255,37 @@ def replay_trace_sha256(replay: list[dict]) -> str:
     return digest.hexdigest()
 
 
+def deferred_update_summary(metrics: list[dict], replay: list[dict]) -> dict:
+    """Summarize delayed learning without discarding drift diagnostics."""
+    names = (
+        "critic_loss",
+        "q_mean",
+        "target_mean",
+        "actor_loss",
+        "bc_sum",
+        "q_actor",
+        "actor_grad",
+        "correction_rms",
+    )
+    summary = {}
+    for name in names:
+        values = [float(row[name]) for row in metrics if name in row]
+        if values:
+            summary[name] = {
+                "first": values[0],
+                "last": values[-1],
+                "mean": sum(values) / len(values),
+                "max": max(values),
+            }
+    return {
+        "updates": len(metrics),
+        "transitions": len(replay),
+        "positive_transitions": sum(float(row["reward"]) > 0 for row in replay),
+        "reward_sum": sum(float(row["reward"]) for row in replay),
+        "metrics": summary,
+    }
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -593,11 +624,11 @@ def run(args):
                     torch.save(replay, args.output / f"{method}-replay.pt")
                 if getattr(args, "deferred_online_updates", False):
                     deferred_metrics = [learner.update(replay) for _ in replay]
+                    update_summary = deferred_update_summary(deferred_metrics, replay)
                     write_json(
                         args.output / f"{method}-deferred.json",
                         {
-                            "updates": len(deferred_metrics),
-                            "transitions": len(replay),
+                            **update_summary,
                             "trace_sha256": replay_trace_sha256(replay),
                             "last_update": deferred_metrics[-1]
                             if deferred_metrics
