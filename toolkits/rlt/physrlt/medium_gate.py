@@ -602,10 +602,14 @@ def summarize_followups(root: Path) -> list[dict]:
         for gate_path in sorted(run.glob("*-gate.json")):
             method = gate_path.name.removesuffix("-gate.json")
             trace = None
+            positive_transitions = None
+            updates_skipped = None
             deferred_path = run / f"{method}-deferred.json"
             if deferred_path.exists():
                 deferred_payload = json.loads(deferred_path.read_text())
                 trace = deferred_payload.get("trace_sha256")
+                positive_transitions = deferred_payload.get("positive_transitions")
+                updates_skipped = deferred_payload.get("updates_skipped")
                 if not trace or deferred_payload.get("transitions", 0) < 1:
                     raise ValueError(
                         f"Invalid deferred replay audit for {run.name}/{method}"
@@ -621,6 +625,8 @@ def summarize_followups(root: Path) -> list[dict]:
                 "rows": selected,
                 "run": run.name,
                 "trace": trace,
+                "positive_transitions": positive_transitions,
+                "updates_skipped": updates_skipped,
             }
 
     trace_counts: dict[tuple[str, int, str], int] = defaultdict(int)
@@ -702,6 +708,17 @@ def summarize_followups(root: Path) -> list[dict]:
                     payload["trace"] is not None
                     and trace_counts[(protocol, seed, payload["trace"])] >= 2
                     for seed, payload in group
+                ),
+                "positive_replay_seeds": sum(
+                    payload["positive_transitions"] is not None
+                    and payload["positive_transitions"] > 0
+                    for _, payload in group
+                ),
+                "zero_positive_replay_seeds": sum(
+                    payload["positive_transitions"] == 0 for _, payload in group
+                ),
+                "updates_skipped_seeds": sum(
+                    payload["updates_skipped"] is True for _, payload in group
                 ),
                 "runs": ",".join(payload["run"] for _, payload in sorted(group)),
             }

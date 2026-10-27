@@ -394,6 +394,8 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                     {
                         "updates": 4,
                         "transitions": 4,
+                        "positive_transitions": 0 if positive_gate else 1,
+                        "updates_skipped": positive_gate,
                         "trace_sha256": "a" * 64,
                     }
                 )
@@ -406,6 +408,8 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
     assert keyed[("deferred_residual", "joint")]["matched_collection_seeds"] == 0
     gated = keyed[("positive_gated_deferred_residual", "joint")]
     assert gated["online_dev_successes"] == 4
+    assert gated["zero_positive_replay_seeds"] == 1
+    assert gated["updates_skipped_seeds"] == 1
     assert (root / "followup_comparison.csv").is_file()
 
 
