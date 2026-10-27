@@ -652,7 +652,8 @@ def summarize_followups(root: Path) -> list[dict]:
     output = []
     for (protocol, method), group in sorted(grouped.items()):
         warmup_dev, online_dev, online_validation = [], [], []
-        for _, payload in group:
+        evaluated_seed_ids = set()
+        for seed, payload in group:
             for row in payload["rows"]:
                 destination = None
                 if row.get("stage") == "warmup" and row.get("split") == "development":
@@ -669,6 +670,8 @@ def summarize_followups(root: Path) -> list[dict]:
                     destination = online_validation
                 if destination is not None:
                     destination.append(row)
+            if any(row.get("stage") == "online_frozen_eval" for row in payload["rows"]):
+                evaluated_seed_ids.add(seed)
         warmup = metrics(warmup_dev)
         development = metrics(online_dev)
         validation = metrics(online_validation)
@@ -678,16 +681,8 @@ def summarize_followups(root: Path) -> list[dict]:
                 "method": method,
                 "attempted_seeds": len(group),
                 "gate_passed_seeds": sum(payload["gate"] for _, payload in group),
-                "evaluated_seeds": len(
-                    {
-                        seed
-                        for seed, payload in group
-                        if any(
-                            row.get("stage") == "online_frozen_eval"
-                            for row in payload["rows"]
-                        )
-                    }
-                ),
+                "evaluated_seeds": len(evaluated_seed_ids),
+                "evaluated_seed_ids": ";".join(map(str, sorted(evaluated_seed_ids))),
                 "warmup_dev_successes": warmup[0],
                 "warmup_dev_episodes": warmup[1],
                 "online_dev_successes": development[0],
@@ -697,6 +692,9 @@ def summarize_followups(root: Path) -> list[dict]:
                 "online_validation_successes": validation[0],
                 "online_validation_episodes": validation[1],
                 "online_validation_rate_pct": validation[2],
+                "delta_dev_vs_action_recon_pp": "",
+                "delta_validation_vs_action_recon_pp": "",
+                "delta_dev_ticks_vs_action_recon": "",
                 "matched_collection_seeds": sum(
                     payload["trace"] is not None
                     and trace_counts[(protocol, seed, payload["trace"])] >= 2
@@ -705,6 +703,31 @@ def summarize_followups(root: Path) -> list[dict]:
                 "runs": ",".join(payload["run"] for _, payload in sorted(group)),
             }
         )
+    comparators = {
+        row["protocol"]: row for row in output if row["method"] == "action_recon"
+    }
+    for row in output:
+        comparator = comparators.get(row["protocol"])
+        matched = (
+            comparator is not None
+            and row["evaluated_seed_ids"] == comparator["evaluated_seed_ids"]
+            and row["online_dev_episodes"] == comparator["online_dev_episodes"]
+            and row["online_validation_episodes"]
+            == comparator["online_validation_episodes"]
+        )
+        if matched and row["online_dev_episodes"]:
+            row["delta_dev_vs_action_recon_pp"] = round(
+                row["online_dev_rate_pct"] - comparator["online_dev_rate_pct"], 2
+            )
+            row["delta_validation_vs_action_recon_pp"] = round(
+                row["online_validation_rate_pct"]
+                - comparator["online_validation_rate_pct"],
+                2,
+            )
+            row["delta_dev_ticks_vs_action_recon"] = round(
+                row["online_dev_mean_ticks"] - comparator["online_dev_mean_ticks"],
+                2,
+            )
     _write_table(root / "followup_comparison", output)
     return output
 

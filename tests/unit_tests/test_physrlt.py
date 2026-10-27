@@ -428,6 +428,36 @@ def test_followup_summary_rejects_unmatched_deferred_collection(tmp_path):
         summarize_followups(root)
 
 
+def test_followup_summary_reports_only_seed_matched_control_delta(tmp_path):
+    root = tmp_path / "medium"
+    output = root / "physical" / "control_direct_seed31"
+    output.mkdir(parents=True)
+    rows = []
+    for method, successes, ticks in (
+        ("action_recon", 1, 500),
+        ("joint", 2, 450),
+    ):
+        rows.extend(
+            {
+                "method": method,
+                "stage": "online_frozen_eval",
+                "split": split,
+                "success": index < successes,
+                "ticks": ticks,
+            }
+            for split in ("development", "validation")
+            for index in range(4)
+        )
+        (output / f"{method}-gate.json").write_text('{"passed":true}')
+    (output / "episodes.json").write_text(json.dumps(rows))
+    (output / "result.json").write_text(json.dumps({"complete": True, "seed": 31}))
+    keyed = {row["method"]: row for row in summarize_followups(root)}
+    assert keyed["joint"]["evaluated_seed_ids"] == "31"
+    assert keyed["joint"]["delta_dev_vs_action_recon_pp"] == 25
+    assert keyed["joint"]["delta_validation_vs_action_recon_pp"] == 25
+    assert keyed["joint"]["delta_dev_ticks_vs_action_recon"] == -50
+
+
 def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):
     assert response_indices("joint") == tuple(range(12))
     assert response_indices("arm_q_gripper_joint") == (*range(7), 10, 11)
