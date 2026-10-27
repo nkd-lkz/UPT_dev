@@ -145,6 +145,7 @@ def warmup(
     critic_conditioning: str = "latent",
     correction_limit: float | None = None,
     correction_axes: tuple[int, ...] | None = None,
+    residual_output: bool = False,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -173,6 +174,7 @@ def warmup(
         critic_conditioning=critic_conditioning,
         correction_limit=correction_limit,
         correction_axes=correction_axes,
+        residual_output=residual_output,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -206,6 +208,22 @@ def parse_external_readouts(specs: list[str]) -> dict[str, Path]:
             raise ValueError("External readouts require unique LABEL=PATH entries")
         result[label] = Path(path).resolve()
     return result
+
+
+def warmup_gate(
+    fidelity: dict, validation_results: list[dict], residual_output: bool
+) -> tuple[bool, str]:
+    """Require reference fidelity and an appropriate closed-loop safety check."""
+    passed = (
+        fidelity["after"]["arm_mse"] < 0.02
+        and fidelity["after"]["gripper_disagreement"] < 0.05
+    )
+    if residual_output:
+        return passed, "arm MSE < .02 and gripper mismatch < .05"
+    return (
+        passed and any(row["success"] for row in validation_results),
+        "arm MSE < .02, gripper mismatch < .05, at least one validation success",
+    )
 
 
 def file_sha256(path: Path) -> str:
@@ -481,6 +499,7 @@ def run(args):
                     "critic_conditioning": critic_conditioning,
                     "correction_limit": getattr(args, "correction_limit", None),
                     "correction_axes": getattr(args, "correction_axes", None),
+                    "residual_output": getattr(args, "residual_output", False),
                 },
             )
             learner, fidelity = warmup(
@@ -495,6 +514,7 @@ def run(args):
                     if getattr(args, "correction_axes", None) is not None
                     else None
                 ),
+                getattr(args, "residual_output", False),
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -504,17 +524,17 @@ def run(args):
                 validation_results.append(row)
                 records.append(row | {"method": method, "stage": "warmup"})
                 write_json(args.output / "episodes.json", records)
-            gate = (
-                fidelity["after"]["arm_mse"] < 0.02
-                and fidelity["after"]["gripper_disagreement"] < 0.05
+            gate, gate_rule = warmup_gate(
+                fidelity,
+                validation_results,
+                getattr(args, "residual_output", False),
             )
-            gate = gate and any(r["success"] for r in validation_results)
             write_json(
                 args.output / f"{method}-gate.json",
                 {
                     "passed": gate,
                     "selection_split": "validation",
-                    "rule": "arm MSE < .02, gripper mismatch < .05, at least one validation success",
+                    "rule": gate_rule,
                     "meaning": "development safety gate; unequal passing arms are not a fair RL benchmark",
                 },
             )
@@ -562,6 +582,7 @@ def run(args):
         "online_tick_cap": args.online_ticks,
         "correction_limit": getattr(args, "correction_limit", None),
         "correction_axes": getattr(args, "correction_axes", None),
+        "residual_output": getattr(args, "residual_output", False),
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -584,6 +605,11 @@ def main():
         choices=range(7),
         nargs="+",
         help="Restrict bounded corrections to listed action dimensions",
+    )
+    parser.add_argument(
+        "--residual-output",
+        action="store_true",
+        help="Zero-initialize the actor as a bounded residual around reference",
     )
     parser.add_argument("--development-cases", type=Path)
     parser.add_argument(

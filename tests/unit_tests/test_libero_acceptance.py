@@ -297,6 +297,37 @@ def test_reference_correction_can_match_supervised_action_support(source):
         AcceptanceLearner("cpu", correction_axes=(0,))
 
 
+def test_zero_initialized_residual_actor_starts_at_reference(source):
+    learner = AcceptanceLearner(
+        "cpu",
+        correction_limit=0.1,
+        correction_axes=(0,),
+        residual_output=True,
+    )
+    token = torch.randn(256)
+    reference = torch.linspace(-0.8, 0.8, 56).reshape(8, 7)
+    row = {"z": token, "ref": reference, "prop": torch.randn(8)}
+    torch.testing.assert_close(learner.command(row, deterministic=True), reference)
+    torch.testing.assert_close(
+        learner._policy_action(torch.zeros_like(reference), reference), reference
+    )
+    learner.update(rows(), warmup=True)
+    torch.testing.assert_close(learner.command(row, deterministic=True), reference)
+    state = learner.state_dict()
+    AcceptanceLearner(
+        "cpu",
+        correction_limit=0.1,
+        correction_axes=(0,),
+        residual_output=True,
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="residual-output mode differs"):
+        AcceptanceLearner(
+            "cpu", correction_limit=0.1, correction_axes=(0,)
+        ).load_state_dict(state)
+    with pytest.raises(ValueError, match="requires a correction limit"):
+        AcceptanceLearner("cpu", residual_output=True)
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (

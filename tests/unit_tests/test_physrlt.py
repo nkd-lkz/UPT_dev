@@ -17,6 +17,7 @@ from toolkits.rlt.physrlt.conditioning import (
     differentiable_env_commands,
 )
 from toolkits.rlt.physrlt.control import parse_external_readouts
+from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
@@ -253,6 +254,17 @@ def test_medium_gate_is_disjoint_and_pre_registered(tmp_path):
     ]
     assert probe["env"]["PYTHONPATH"] == str(Path.cwd())
     assert "LD_LIBRARY_PATH" not in probe["env"]
+
+
+def test_residual_warmup_gate_accepts_exact_reference_without_lucky_success():
+    fidelity = {
+        "after": {"arm_mse": 0.0, "gripper_disagreement": 0.0},
+    }
+    failed_rollouts = [{"success": False} for _ in range(4)]
+    assert not physical_warmup_gate(fidelity, failed_rollouts, False)[0]
+    assert physical_warmup_gate(fidelity, failed_rollouts, True)[0]
+    fidelity["after"]["arm_mse"] = 0.03
+    assert not physical_warmup_gate(fidelity, failed_rollouts, True)[0]
 
 
 def test_medium_gate_summary_exposes_matched_gain(tmp_path):

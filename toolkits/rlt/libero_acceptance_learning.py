@@ -63,6 +63,7 @@ class AcceptanceLearner:
         critic_conditioning: str = "latent",
         correction_limit: float | None = None,
         correction_axes: tuple[int, ...] | None = None,
+        residual_output: bool = False,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -80,6 +81,8 @@ class AcceptanceLearner:
             )
         if correction_limit is not None and not 0 < correction_limit <= 2:
             raise ValueError("Correction limit must be in (0, 2]")
+        if residual_output and correction_limit is None:
+            raise ValueError("Residual output requires a correction limit")
         if correction_axes is not None:
             correction_axes = tuple(correction_axes)
             if correction_limit is None:
@@ -95,6 +98,7 @@ class AcceptanceLearner:
         self.critic_conditioning = critic_conditioning
         self.correction_limit = correction_limit
         self.correction_axes = correction_axes
+        self.residual_output = residual_output
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
             if critic_conditioner is not None
@@ -109,6 +113,9 @@ class AcceptanceLearner:
             fixed_std=0.1,
             prop_dim=8,
         ).to(device)
+        if self.residual_output:
+            nn.init.zeros_(self.actor.net[-1].weight)
+            nn.init.zeros_(self.actor.net[-1].bias)
         self.critic = ActionTokenQCritic(
             bottleneck_dim=bottleneck_dim,
             action_dim=7,
@@ -142,7 +149,11 @@ class AcceptanceLearner:
         """Optionally bound every learned correction around the reference."""
         if self.correction_limit is None:
             return raw_action
-        difference = (raw_action - reference) / self.correction_limit
+        difference = (
+            raw_action / self.correction_limit
+            if self.residual_output
+            else (raw_action - reference) / self.correction_limit
+        )
         correction = self.correction_limit * torch.tanh(difference)
         if self.correction_axes is not None:
             mask = torch.zeros(7, dtype=correction.dtype, device=correction.device)
@@ -226,14 +237,20 @@ class AcceptanceLearner:
             self.actor.train()
             self.critic.requires_grad_(False)
             raw_action, _ = self.actor(
-                batch["z"], batch["ref"], batch["prop"], deterministic=False
+                batch["z"],
+                batch["ref"],
+                batch["prop"],
+                deterministic=warmup and self.residual_output,
             )
             action = self._policy_action(raw_action, batch["ref"])
             # The target is a full proposal issued before execution, not a
             # retroactively constructed expert suffix after observing outcomes.
             # Keep BC in the actor's native output space. Applying it after the
             # bounded transform would weaken the safety prior near the limit.
-            bc = (raw_action - batch["ref"]).square().sum((-2, -1)).mean()
+            bc_target = (
+                torch.zeros_like(raw_action) if self.residual_output else batch["ref"]
+            )
+            bc = (raw_action - bc_target).square().sum((-2, -1)).mean()
             q = self.critic.q1_forward(
                 self._critic_token(batch["z"], action.clamp(-1, 1), batch["ref"]),
                 action.clamp(-1, 1),
@@ -334,6 +351,7 @@ class AcceptanceLearner:
             "critic_conditioning": self.critic_conditioning,
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
+            "residual_output": self.residual_output,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -345,6 +363,8 @@ class AcceptanceLearner:
             raise ValueError("Checkpoint correction limit differs from the learner")
         if state.get("correction_axes") != self.correction_axes:
             raise ValueError("Checkpoint correction axes differ from the learner")
+        if state.get("residual_output", False) != self.residual_output:
+            raise ValueError("Checkpoint residual-output mode differs from the learner")
         for name in (
             "actor",
             "critic",
