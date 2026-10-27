@@ -132,6 +132,8 @@ def audit_replay(
         raise ValueError("Critic audit requires non-empty replay")
     returns = discounted_success_returns(replay, gamma, episode_tick_cap)
     q1_values, q2_values, policy_advantages = [], [], []
+    base_squares, conditioned_squares, action_signal_squares = 0.0, 0.0, 0.0
+    base_elements, conditioned_elements = 0, 0
     for start in range(0, len(replay), 128):
         rows = replay[start : start + 128]
         batch = {
@@ -139,6 +141,12 @@ def audit_replay(
             for name in ("z", "ref", "prop", "action")
         }
         token = learner._critic_token(batch["z"], batch["action"], batch["ref"])
+        reference_token = learner._critic_token(batch["z"], batch["ref"], batch["ref"])
+        base_squares += float(batch["z"].square().sum())
+        conditioned_squares += float(token.square().sum())
+        action_signal_squares += float((token - reference_token).square().sum())
+        base_elements += batch["z"].numel()
+        conditioned_elements += token.numel()
         q1, q2 = learner.critic(token, batch["action"], batch["prop"])
         raw_action, _ = learner.actor(
             batch["z"], batch["ref"], batch["prop"], deterministic=True
@@ -176,6 +184,10 @@ def audit_replay(
         / len(q1_values),
         "policy_minus_reference_q1_mean": sum(policy_advantages)
         / len(policy_advantages),
+        "base_token_rms": (base_squares / base_elements) ** 0.5,
+        "conditioned_token_rms": (conditioned_squares / conditioned_elements) ** 0.5,
+        "action_conditioning_signal_rms": (action_signal_squares / conditioned_elements)
+        ** 0.5,
     }
 
 
