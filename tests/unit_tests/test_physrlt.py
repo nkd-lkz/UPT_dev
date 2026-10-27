@@ -41,6 +41,12 @@ from toolkits.rlt.physrlt.effect_probe import (
 from toolkits.rlt.physrlt.effect_probe import (
     run as run_effect_probe,
 )
+from toolkits.rlt.physrlt.gain_probe import (
+    realized_translation_score,
+)
+from toolkits.rlt.physrlt.gain_probe import (
+    summarize as summarize_gain_probe,
+)
 from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize_followups
@@ -56,6 +62,60 @@ from toolkits.rlt.physrlt.probe import (
     tensor_data,
 )
 from toolkits.rlt.pi05_baseline import env_commands
+
+
+def test_realized_translation_score_uses_issued_command_direction():
+    commands = torch.zeros(3, 7)
+    commands[:, 0] = 0.1
+    response = torch.zeros(12)
+    response[7] = 0.15
+    assert realized_translation_score(commands, response) == pytest.approx(0.5)
+    response[7] = -0.15
+    assert realized_translation_score(commands, response) == pytest.approx(-0.5)
+
+
+def test_gain_probe_gate_uses_only_paired_development_records():
+    records = []
+    for split, count in (("train", 2), ("development", 6)):
+        for state in range(count):
+            for horizon in (3, 10):
+                for gain, score in ((1.0, 1.0), (0.7, 0.7)):
+                    records.append(
+                        {
+                            "split": split,
+                            "case_id": f"{split}-{state}",
+                            "start_tick": 10 * state,
+                            "horizon": horizon,
+                            "execution_gain": gain,
+                            "translation_score": score,
+                        }
+                    )
+    result = summarize_gain_probe(records, 0.7)
+    assert result["development_gate"]["passed"]
+    assert result["summaries"]["development"]["3"][
+        "paired_order_accuracy"
+    ] == pytest.approx(1.0)
+    changed = copy.deepcopy(records)
+    for row in changed:
+        if row["split"] == "development" and row["execution_gain"] == 0.7:
+            row["translation_score"] = 1.1
+    assert not summarize_gain_probe(changed, 0.7)["development_gate"]["passed"]
+
+
+def test_gain_probe_does_not_pass_without_development_pairs():
+    records = [
+        {
+            "split": "train",
+            "case_id": "train-0",
+            "start_tick": 0,
+            "horizon": horizon,
+            "execution_gain": gain,
+            "translation_score": score,
+        }
+        for horizon in (3, 10)
+        for gain, score in ((1.0, 1.0), (0.7, 0.7))
+    ]
+    assert not summarize_gain_probe(records, 0.7)["development_gate"]["passed"]
 
 
 def synthetic_rows():
