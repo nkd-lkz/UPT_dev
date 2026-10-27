@@ -109,6 +109,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 原有 ``candidate_relative`` 为保持 128 维 critic 输入，会用 64 维相对后果替换一半 latent；这同时改变了物理信息和原始表征容量。``--concat-control-critics`` 与 ``--concat-relative-critics`` 提供容量匹配的诊断：两组 critic 都接收完整 128 维 token 和额外 128 维通道，对照通道恒为零，物理通道为候选动作相对 reference 的预测后果。actor 仍只读取原始 token，训练 replay 与更新预算保持不变。只有物理组相对零通道对照改善 held-out Q 排序并带来跨 seed 闭环收益，才能说明显式物理后果对 critic 有用。
 
+物理后果通道还可能与 base token 存在尺度差异。``--unit-concat-relative-critics`` 只归一化 68 个有效相对后果坐标的方向，critic 仍从原始候选动作读取幅度；符号反转 decoder 必须作为负对照，防止把任意放大信号误认为物理收益。若要避免物理监督同时改变 actor 的 base token，使用 ``--critic-readouts LABEL=PATH`` 指定独立 Physical Token encoder；固定 replay 还需用 ``--fixed-critic-replays`` 提供逐行匹配的物理视图。加载器要求 base 与物理 replay 的动作、控制器命令、奖励和终止哈希完全一致，actor 始终读取 base token，只有候选后果 decoder 读取 Physical Token。
+
 首轮闭环门槛应在 ``effect_probe`` 中设置 ``--parameter-scope decoders``。逐点、正确差分及符号反转差分监督此时冻结 encoder 和重建头，只更新响应与几何 decoder；三者提供给 actor 的 token 与起始 ``joint`` readout 逐参数一致，后续控制差异不能再归因于 actor 表征变化。默认的 ``all`` scope 仍可用于表征学习诊断，但必须与 decoder-only 结果分开报告。
 
 候选动作条件化 critic 只是有预算上限的开发实验，不会因为接口实现就自动成为正结果。需要在相同 warmup 状态、在线交互量和评估布局下比较原始 latent critic、原始联合 readout 的候选条件化、同数据逐点监督和配对差分监督。BC 热身仍须通过动作保真度与 validation 成功门槛，才允许在线更新；仅有预测误差改善不能触发更大训练预算。
