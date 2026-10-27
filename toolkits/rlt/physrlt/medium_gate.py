@@ -726,29 +726,41 @@ def summarize_followups(root: Path) -> list[dict]:
                 "runs": ",".join(payload["run"] for _, payload in sorted(group)),
             }
         )
+    control_names = {"fixed_positive_replay_residual": "action_fixed"}
     comparators = {
-        row["protocol"]: row for row in output if row["method"] == "action_recon"
+        row["protocol"]: row
+        for row in output
+        if row["method"] == control_names.get(row["protocol"], "action_recon")
     }
     for row in output:
         comparator = comparators.get(row["protocol"])
-        matched = (
+        matched_seeds = (
             comparator is not None
             and row["evaluated_seed_ids"] == comparator["evaluated_seed_ids"]
-            and row["online_dev_episodes"] == comparator["online_dev_episodes"]
-            and row["online_validation_episodes"]
-            == comparator["online_validation_episodes"]
         )
-        if matched and row["online_dev_episodes"]:
+        matched_dev = (
+            matched_seeds
+            and row["online_dev_episodes"]
+            and row["online_dev_episodes"] == comparator["online_dev_episodes"]
+        )
+        if matched_dev:
             row["delta_dev_vs_action_recon_pp"] = round(
                 row["online_dev_rate_pct"] - comparator["online_dev_rate_pct"], 2
             )
+            row["delta_dev_ticks_vs_action_recon"] = round(
+                row["online_dev_mean_ticks"] - comparator["online_dev_mean_ticks"],
+                2,
+            )
+        matched_validation = (
+            matched_seeds
+            and row["online_validation_episodes"]
+            and row["online_validation_episodes"]
+            == comparator["online_validation_episodes"]
+        )
+        if matched_validation:
             row["delta_validation_vs_action_recon_pp"] = round(
                 row["online_validation_rate_pct"]
                 - comparator["online_validation_rate_pct"],
-                2,
-            )
-            row["delta_dev_ticks_vs_action_recon"] = round(
-                row["online_dev_mean_ticks"] - comparator["online_dev_mean_ticks"],
                 2,
             )
     _write_table(root / "followup_comparison", output)

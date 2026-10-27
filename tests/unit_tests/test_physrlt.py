@@ -376,6 +376,17 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                 }
                 for index in range(4)
             )
+            if fixed:
+                rows.extend(
+                    {
+                        "method": "action_fixed",
+                        "stage": stage,
+                        "split": "development",
+                        "success": index < 1,
+                        "ticks": 120 + index,
+                    }
+                    for index in range(4)
+                )
         (output / "episodes.json").write_text(json.dumps(rows))
         (output / "result.json").write_text(
             json.dumps(
@@ -386,7 +397,11 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                     "residual_output": residual,
                     "deferred_online_updates": deferred,
                     "require_positive_replay": positive_gate,
-                    "fixed_replays": {"joint": "replay.pt"} if fixed else {},
+                    "fixed_replays": (
+                        {"joint": "joint.pt", "action_fixed": "action.pt"}
+                        if fixed
+                        else {}
+                    ),
                 }
             )
         )
@@ -403,6 +418,19 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                     }
                 )
             )
+        if fixed:
+            (output / "action_fixed-gate.json").write_text('{"passed":true}')
+            (output / "action_fixed-deferred.json").write_text(
+                json.dumps(
+                    {
+                        "updates": 4,
+                        "transitions": 4,
+                        "positive_transitions": 0,
+                        "updates_skipped": True,
+                        "trace_sha256": "a" * 64,
+                    }
+                )
+            )
     rows = summarize_followups(root)
     keyed = {(row["protocol"], row["method"]): row for row in rows}
     assert keyed[("direct_action", "joint")]["online_dev_successes"] == 1
@@ -413,9 +441,9 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
     assert gated["online_dev_successes"] == 4
     assert gated["zero_positive_replay_seeds"] == 1
     assert gated["updates_skipped_seeds"] == 1
-    assert (
-        keyed[("fixed_positive_replay_residual", "joint")]["online_dev_successes"] == 2
-    )
+    fixed_joint = keyed[("fixed_positive_replay_residual", "joint")]
+    assert fixed_joint["online_dev_successes"] == 2
+    assert fixed_joint["delta_dev_vs_action_recon_pp"] == 25
     assert (root / "followup_comparison.csv").is_file()
 
 
