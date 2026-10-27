@@ -147,6 +147,7 @@ def warmup(
     correction_limit: float | None = None,
     correction_axes: tuple[int, ...] | None = None,
     residual_output: bool = False,
+    critic_bottleneck_dim: int | None = None,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -160,6 +161,8 @@ def warmup(
         "outcomes",
         "mixed",
         "relative",
+        "zero_concat",
+        "relative_concat",
     }:
         raise ValueError("Unknown critic conditioning protocol")
     learner = AcceptanceLearner(
@@ -176,6 +179,7 @@ def warmup(
         correction_limit=correction_limit,
         correction_axes=correction_axes,
         residual_output=residual_output,
+        critic_bottleneck_dim=critic_bottleneck_dim,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -537,9 +541,17 @@ def run(args):
         )
     candidate_critics = set(getattr(args, "candidate_critics", []))
     relative_critics = set(getattr(args, "relative_critics", []))
-    if candidate_critics & relative_critics:
-        raise ValueError("Absolute and relative critic labels must be disjoint")
-    unknown_candidates = (candidate_critics | relative_critics) - set(args.methods)
+    concat_control_critics = set(getattr(args, "concat_control_critics", []))
+    concat_relative_critics = set(getattr(args, "concat_relative_critics", []))
+    critic_groups = (
+        candidate_critics,
+        relative_critics,
+        concat_control_critics,
+        concat_relative_critics,
+    )
+    if sum(map(len, critic_groups)) != len(set().union(*critic_groups)):
+        raise ValueError("Critic conditioning labels must be disjoint")
+    unknown_candidates = set().union(*critic_groups) - set(args.methods)
     if unknown_candidates:
         raise ValueError("Candidate critic labels must also be requested methods")
     rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
@@ -586,6 +598,13 @@ def run(args):
                 critic_conditioning = "candidate_mixed"
             elif method in relative_critics:
                 critic_conditioning = "candidate_relative"
+            elif method in concat_control_critics:
+                critic_conditioning = "candidate_zero_concat"
+            elif method in concat_relative_critics:
+                critic_conditioning = "candidate_relative_concat"
+            critic_bottleneck_dim = (
+                256 if critic_conditioning.endswith("_concat") else None
+            )
             write_json(
                 args.output / f"{method}-readout.json",
                 {
@@ -615,6 +634,7 @@ def run(args):
                     else None
                 ),
                 getattr(args, "residual_output", False),
+                critic_bottleneck_dim,
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -797,6 +817,8 @@ def main():
     )
     parser.add_argument("--candidate-critics", nargs="*", default=[])
     parser.add_argument("--relative-critics", nargs="*", default=[])
+    parser.add_argument("--concat-control-critics", nargs="*", default=[])
+    parser.add_argument("--concat-relative-critics", nargs="*", default=[])
     parser.add_argument(
         "--methods",
         nargs="+",

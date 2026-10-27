@@ -231,6 +231,37 @@ def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(sourc
         AcceptanceLearner("cpu", critic_conditioning="missing")
 
 
+def test_critic_can_receive_a_separate_augmented_token(source):
+    class Conditioner(torch.nn.Module):
+        def forward(self, token, action, reference):
+            return torch.cat((token, torch.zeros_like(token)), dim=-1)
+
+    learner = AcceptanceLearner(
+        "cpu",
+        critic_conditioner=Conditioner(),
+        critic_conditioning="candidate_zero_concat",
+        critic_bottleneck_dim=512,
+    )
+    learner.update(rows())
+    state = learner.state_dict()
+    assert state["critic_bottleneck_dim"] == 512
+    AcceptanceLearner(
+        "cpu",
+        critic_conditioner=Conditioner(),
+        critic_conditioning="candidate_zero_concat",
+        critic_bottleneck_dim=512,
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="token width differs"):
+        AcceptanceLearner(
+            "cpu",
+            critic_conditioner=Conditioner(),
+            critic_conditioning="candidate_zero_concat",
+            critic_bottleneck_dim=256,
+        ).load_state_dict(state)
+    with pytest.raises(ValueError, match="distinct critic token width"):
+        AcceptanceLearner("cpu", critic_bottleneck_dim=512)
+
+
 def test_candidate_conditioning_cannot_change_bc_warmup(source):
     class Conditioner(torch.nn.Module):
         def forward(self, token, action, reference):

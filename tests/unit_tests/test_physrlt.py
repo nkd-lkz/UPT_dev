@@ -24,6 +24,7 @@ from toolkits.rlt.physrlt.control import (
     validate_fixed_replay,
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
+from toolkits.rlt.physrlt.critic_audit import binary_auc, discounted_success_returns
 from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
@@ -82,6 +83,36 @@ def synthetic_rows():
                 }
             )
     return rows
+
+
+def test_discounted_success_returns_stop_at_tick_cap_and_terminal():
+    replay = [
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+        {"ticks": 5, "terminal": True, "reward": 5.0},
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+    ]
+    returns = discounted_success_returns(replay, gamma=0.9, episode_tick_cap=20)
+    assert returns == [0.0, 0.0, 5.0, 0.0, 0.0]
+
+
+def test_discounted_success_returns_propagate_within_successful_episode():
+    replay = [
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+        {"ticks": 5, "terminal": True, "reward": 5.0},
+        {"ticks": 10, "terminal": False, "reward": 0.0},
+    ]
+    returns = discounted_success_returns(replay, gamma=0.9)
+    assert returns == pytest.approx([5 * 0.9**10, 5.0, 0.0])
+
+
+def test_binary_auc_is_tie_aware_and_requires_both_classes():
+    assert binary_auc([0.1, 0.5, 0.2], [False, True, False]) == 1
+    assert binary_auc([0.1, 0.1], [True, False]) == 0.5
+    assert binary_auc([0.1], [True]) is None
+    with pytest.raises(ValueError, match="equal length"):
+        binary_auc([0.1], [True, False])
 
 
 def test_layout_split_ignores_seed_and_condition_names():
@@ -181,6 +212,23 @@ def test_relative_candidate_consequences_are_zero_at_reference():
     changed.square().mean().backward()
     assert torch.isfinite(candidate.grad).all()
     assert candidate.grad.abs().sum() > 0
+
+
+def test_consequence_concat_preserves_the_complete_base_token():
+    torch.manual_seed(31)
+    model = PhysicalReadout(12, 67)
+    token = torch.randn(2, 128)
+    reference = torch.randn(2, 10, 7)
+    candidate = reference + 0.1
+    control = CandidateConsequenceConditioner(model, "joint", mode="zero_concat")
+    physical = CandidateConsequenceConditioner(model, "joint", mode="relative_concat")
+    control_result = control(token, candidate, reference)
+    physical_result = physical(token, candidate, reference)
+    assert control_result.shape == physical_result.shape == (2, 256)
+    torch.testing.assert_close(control_result[:, :128], token)
+    torch.testing.assert_close(physical_result[:, :128], token)
+    assert control_result[:, 128:].count_nonzero() == 0
+    assert physical_result[:, 128:].count_nonzero() > 0
 
 
 def test_external_readout_labels_are_explicit_and_unique(tmp_path):

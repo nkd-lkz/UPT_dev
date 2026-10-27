@@ -64,6 +64,7 @@ class AcceptanceLearner:
         correction_limit: float | None = None,
         correction_axes: tuple[int, ...] | None = None,
         residual_output: bool = False,
+        critic_bottleneck_dim: int | None = None,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -75,6 +76,11 @@ class AcceptanceLearner:
         self.device, self.objective, self.beta = device, objective, beta
         if bottleneck_dim < 1 or chunk_len < 1:
             raise ValueError("Require positive token width and chunk length")
+        critic_bottleneck_dim = critic_bottleneck_dim or bottleneck_dim
+        if critic_bottleneck_dim < 1:
+            raise ValueError("Require a positive critic token width")
+        if critic_conditioner is None and critic_bottleneck_dim != bottleneck_dim:
+            raise ValueError("A distinct critic token width requires a conditioner")
         if (critic_conditioner is None) != (critic_conditioning == "latent"):
             raise ValueError(
                 "Non-latent critic conditioning requires its explicit module"
@@ -96,6 +102,7 @@ class AcceptanceLearner:
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
+        self.critic_bottleneck_dim = critic_bottleneck_dim
         self.correction_limit = correction_limit
         self.correction_axes = correction_axes
         self.residual_output = residual_output
@@ -117,7 +124,7 @@ class AcceptanceLearner:
             nn.init.zeros_(self.actor.net[-1].weight)
             nn.init.zeros_(self.actor.net[-1].bias)
         self.critic = ActionTokenQCritic(
-            bottleneck_dim=bottleneck_dim,
+            bottleneck_dim=critic_bottleneck_dim,
             action_dim=7,
             chunk_len=chunk_len,
             hidden_dim=512,
@@ -139,7 +146,12 @@ class AcceptanceLearner:
         if self.critic_conditioner is None:
             return token
         conditioned = self.critic_conditioner(token, action, reference)
-        if conditioned.shape != token.shape or not torch.isfinite(conditioned).all():
+        if (
+            conditioned.ndim != 2
+            or conditioned.shape[0] != token.shape[0]
+            or conditioned.shape[1] != self.critic_bottleneck_dim
+            or not torch.isfinite(conditioned).all()
+        ):
             raise FloatingPointError("Invalid critic conditioning token")
         return conditioned
 
@@ -349,6 +361,7 @@ class AcceptanceLearner:
             "actor_updates": self.actor_updates,
             "critic_updates": self.critic_updates,
             "critic_conditioning": self.critic_conditioning,
+            "critic_bottleneck_dim": self.critic_bottleneck_dim,
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
             "residual_output": self.residual_output,
@@ -359,6 +372,10 @@ class AcceptanceLearner:
         saved_conditioning = state.get("critic_conditioning", "latent")
         if saved_conditioning != self.critic_conditioning:
             raise ValueError("Checkpoint critic conditioning differs from the learner")
+        if state.get("critic_bottleneck_dim", self.critic_bottleneck_dim) != (
+            self.critic_bottleneck_dim
+        ):
+            raise ValueError("Checkpoint critic token width differs from the learner")
         if state.get("correction_limit") != self.correction_limit:
             raise ValueError("Checkpoint correction limit differs from the learner")
         if state.get("correction_axes") != self.correction_axes:

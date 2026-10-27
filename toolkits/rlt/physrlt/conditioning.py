@@ -69,7 +69,13 @@ class CandidateConsequenceConditioner(nn.Module):
 
     def __init__(self, model: nn.Module, method: str, mode: str = "mixed") -> None:
         super().__init__()
-        if mode not in {"outcomes", "mixed", "relative"}:
+        if mode not in {
+            "outcomes",
+            "mixed",
+            "relative",
+            "zero_concat",
+            "relative_concat",
+        }:
             raise ValueError("Unknown candidate consequence conditioning mode")
         self.model = copy.deepcopy(model).eval().requires_grad_(False)
         self.method = method
@@ -95,6 +101,13 @@ class CandidateConsequenceConditioner(nn.Module):
         physical = physical_quantities(self.model, token, actions, self.method)
         if self.mode == "outcomes":
             result = physical
+        elif self.mode == "zero_concat":
+            result = torch.cat((token, torch.zeros_like(physical)), dim=-1)
+        elif self.mode == "relative_concat":
+            reference_physical = physical_quantities(
+                self.model, token, reference, self.method
+            )
+            result = torch.cat((token, physical - reference_physical), dim=-1)
         else:
             if self.mode == "relative":
                 reference_physical = physical_quantities(
@@ -105,6 +118,11 @@ class CandidateConsequenceConditioner(nn.Module):
                 :, 0
             ]
             result = torch.cat((token[:, :64], compact), dim=-1)
-        if result.shape != token.shape or not torch.isfinite(result).all():
+        expected_width = 256 if self.mode.endswith("_concat") else 128
+        if (
+            result.ndim != 2
+            or result.shape != (len(token), expected_width)
+            or not torch.isfinite(result).all()
+        ):
             raise FloatingPointError("Invalid candidate consequence token")
         return result
