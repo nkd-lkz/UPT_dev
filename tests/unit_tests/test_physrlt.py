@@ -16,7 +16,7 @@ from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     differentiable_env_commands,
 )
-from toolkits.rlt.physrlt.control import parse_external_readouts
+from toolkits.rlt.physrlt.control import parse_external_readouts, replay_trace_sha256
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.data import (
     check_split,
@@ -810,6 +810,63 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
         assert replay[0]["prop"][0] == 9
         assert replay[0]["next_prop"][0] == 9 + limit
     assert len(result["updates"]) == int(limit == 10)
+
+
+def test_deferred_control_keeps_replay_but_skips_inline_update(monkeypatch):
+    from toolkits.rlt.physrlt import control
+
+    class Environment:
+        collection_reset_hashes = {}
+        control_reset_states = {}
+        instruction = "deferred synthetic test"
+
+        def reset(self, case):
+            self.tick = 0
+            return {"state": np.zeros(8, np.float32)}
+
+        def step(self, command):
+            self.tick += 1
+            return {"state": np.full(8, self.tick, np.float32)}, 0.0, False
+
+    class Reference:
+        def predict(self, obs, instruction, seed):
+            return {"ref": np.zeros((10, 7), np.float32)}
+
+    class Readout:
+        def encode(self, prediction, prop):
+            return {
+                "z": torch.zeros(128),
+                "ref": torch.from_numpy(prediction["ref"]),
+                "prop": torch.as_tensor(prop),
+            }
+
+    class Learner:
+        def command(self, features, deterministic):
+            return features["ref"].clone()
+
+        def update(self, replay):
+            raise AssertionError("Deferred collection must not update inline")
+
+    monkeypatch.setattr(control, "physical_reset_hash", lambda env: "reset")
+    monkeypatch.setattr(
+        control, "physical_reset_state", lambda env: np.array([0.5], np.float64)
+    )
+    replay = []
+    result = control.rollout(
+        Environment(),
+        Reference(),
+        Readout(),
+        Learner(),
+        {"id": "case", "split": "train", "state": 0, "seed": 1},
+        10,
+        replay,
+        update_online=False,
+    )
+    assert len(replay) == 1 and result["updates"] == []
+    assert replay_trace_sha256(replay) == replay_trace_sha256(copy.deepcopy(replay))
+    changed = copy.deepcopy(replay)
+    changed[0]["accepted_commands"][0, 0] = 1
+    assert replay_trace_sha256(changed) != replay_trace_sha256(replay)
 
 
 def test_control_reset_pairing_rejects_physics_drift(monkeypatch):

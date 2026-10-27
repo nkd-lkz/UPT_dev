@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import random
+import struct
 import subprocess
 import time
 from collections import deque
@@ -235,6 +236,25 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def replay_trace_sha256(replay: list[dict]) -> str:
+    """Hash executed evidence while excluding representation-specific fields."""
+    digest = hashlib.sha256()
+    for row in replay:
+        for key in ("action", "accepted_commands"):
+            value = row[key].detach().cpu().contiguous().float().numpy()
+            digest.update(value.shape.__repr__().encode())
+            digest.update(value.tobytes())
+        digest.update(
+            struct.pack(
+                "<q?d",
+                int(row["ticks"]),
+                bool(row["terminal"]),
+                float(row["reward"]),
+            )
+        )
+    return digest.hexdigest()
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -269,6 +289,7 @@ def rollout(
     *,
     execution_gain: float = 1.0,
     delay_ticks: int = 0,
+    update_online: bool = True,
 ) -> dict:
     """Execute an explicit control budget, optionally updating only small heads."""
     if not 0 < execution_gain <= 1.5 or not 0 <= delay_ticks <= 5:
@@ -344,7 +365,8 @@ def rollout(
                     "reward": chunk_reward * 5,
                 }
             )
-            updates.append(learner.update(replay))
+            if update_online:
+                updates.append(learner.update(replay))
         rewards += chunk_reward
         prediction, features = following, next_features
         if success:
@@ -551,7 +573,16 @@ def run(args):
                     if budget <= 0:
                         break
                     row = rollout_case(
-                        env, reference, readout, learner, case, budget, replay
+                        env,
+                        reference,
+                        readout,
+                        learner,
+                        case,
+                        budget,
+                        replay,
+                        update_online=not getattr(
+                            args, "deferred_online_updates", False
+                        ),
                     )
                     count += row["ticks"]
                     records.append(row | {"method": method, "stage": "online_train"})
@@ -560,6 +591,22 @@ def run(args):
                         learner.state_dict(), args.output / f"{method}-online.pt"
                     )
                     torch.save(replay, args.output / f"{method}-replay.pt")
+                if getattr(args, "deferred_online_updates", False):
+                    deferred_metrics = [learner.update(replay) for _ in replay]
+                    write_json(
+                        args.output / f"{method}-deferred.json",
+                        {
+                            "updates": len(deferred_metrics),
+                            "transitions": len(replay),
+                            "trace_sha256": replay_trace_sha256(replay),
+                            "last_update": deferred_metrics[-1]
+                            if deferred_metrics
+                            else None,
+                        },
+                    )
+                    torch.save(
+                        learner.state_dict(), args.output / f"{method}-online.pt"
+                    )
                 for case in validation_cases + dev_cases:
                     records.append(
                         rollout_case(env, reference, readout, learner, case, 520)
@@ -583,6 +630,7 @@ def run(args):
         "correction_limit": getattr(args, "correction_limit", None),
         "correction_axes": getattr(args, "correction_axes", None),
         "residual_output": getattr(args, "residual_output", False),
+        "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -610,6 +658,11 @@ def main():
         "--residual-output",
         action="store_true",
         help="Zero-initialize the actor as a bounded residual around reference",
+    )
+    parser.add_argument(
+        "--deferred-online-updates",
+        action="store_true",
+        help="Collect the bounded rollout before applying matched online updates",
     )
     parser.add_argument("--development-cases", type=Path)
     parser.add_argument(
