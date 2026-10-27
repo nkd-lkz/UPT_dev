@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
-from toolkits.rlt.physrlt.control import FrozenReadout
+from toolkits.rlt.physrlt.control import FrozenReadout, merge_replay_views
 from toolkits.rlt.pi05_baseline import configure_source
 
 
@@ -119,6 +119,11 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
         ),
         residual_output=checkpoint.get("residual_output", False),
         critic_bottleneck_dim=checkpoint.get("critic_bottleneck_dim"),
+        candidate_selection_count=checkpoint.get("candidate_selection_count", 0),
+        candidate_selection_margin=checkpoint.get("candidate_selection_margin", 0.0),
+        candidate_uncertainty_penalty=checkpoint.get(
+            "candidate_uncertainty_penalty", 0.0
+        ),
     )
     learner.load_state_dict(checkpoint)
     learner.actor.eval()
@@ -214,6 +219,9 @@ def run(args: argparse.Namespace) -> list[dict]:
     """Load immutable checkpoints and write one row per held-out replay."""
     configure_source(args.source)
     evaluations = _parse_evaluations(args.evaluations)
+    physical_evaluations = _parse_evaluations(getattr(args, "physical_evaluations", []))
+    if not set(physical_evaluations).issubset(evaluations):
+        raise ValueError("Physical evaluations require a matching base evaluation")
     methods = sorted({method for _, method in evaluations})
     rows = []
     for method in methods:
@@ -222,6 +230,12 @@ def run(args: argparse.Namespace) -> list[dict]:
             if evaluated_method != method:
                 continue
             replay = torch.load(replay_path, map_location="cpu", weights_only=True)
+            physical_path = physical_evaluations.get((label, method))
+            if physical_path is not None:
+                replay = merge_replay_views(
+                    replay,
+                    torch.load(physical_path, map_location="cpu", weights_only=True),
+                )
             rows.append(
                 {
                     "trained_run": str(args.trained_run.resolve()),
@@ -251,6 +265,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--source", type=Path, required=True)
     result.add_argument("--trained-run", type=Path, required=True)
     result.add_argument("--evaluations", nargs="+", required=True)
+    result.add_argument(
+        "--physical-evaluations",
+        nargs="*",
+        default=[],
+        help="Attach matched Physical Token replay views to base evaluations",
+    )
     result.add_argument("--output", type=Path, required=True)
     result.add_argument("--device", default="cpu")
     result.add_argument("--gamma", type=float, default=0.99)
