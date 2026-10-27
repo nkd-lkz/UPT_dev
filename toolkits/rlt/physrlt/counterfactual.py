@@ -225,9 +225,9 @@ def main() -> None:
     parser.add_argument("--offset", type=float, default=0.1)
     parser.add_argument("--split", choices=("train", "development"), default="train")
     args = parser.parse_args()
-    if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 2:
+    if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 6:
         parser.error(
-            "Paired action screen is bounded to two cases and 0.1 native translation offset"
+            "Paired action screen is bounded to six cases and 0.1 native translation offset"
         )
     run(args)
 
