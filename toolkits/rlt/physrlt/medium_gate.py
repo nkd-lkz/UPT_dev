@@ -85,6 +85,8 @@ def prepare(
     gpu: int,
     task: int = 5,
     perturbation: str = "object",
+    python_deps: Path | None = None,
+    library_path: str | None = None,
 ) -> dict:
     """Freeze one fail-fast comparison before observing its outcomes."""
     root.mkdir(parents=True, exist_ok=True)
@@ -111,18 +113,18 @@ def prepare(
     revision = subprocess.check_output(
         ["git", "-C", str(code), "rev-parse", "HEAD"], text=True
     ).strip()
-    dependency_path = (
-        "/mnt/hdd_toshiba_1/luokz/libero_pro_baseline_20261025/python_deps"
-    )
     environment = {
         "LIBERO_TYPE": "pro",
         "LIBERO_PERTURBATION": "all",
         "MUJOCO_GL": "egl",
         "PYOPENGL_PLATFORM": "egl",
         "TOKENIZERS_PARALLELISM": "false",
-        "PYTHONPATH": f"{dependency_path}:{code}",
-        "LD_LIBRARY_PATH": "/mnt/hdd_toshiba_1/luokz/libero_pro_baseline_20261025/system_libs:/usr/local/cuda-12.1/lib64",
+        "PYTHONPATH": ":".join(
+            str(path) for path in (python_deps, code) if path is not None
+        ),
     }
+    if library_path:
+        environment["LD_LIBRARY_PATH"] = library_path
     common = [
         "--source",
         str(source),
@@ -691,6 +693,15 @@ def main() -> None:
     parser.add_argument(
         "--perturbation", choices=("lan", "object", "swap", "task"), default="object"
     )
+    parser.add_argument(
+        "--python-deps",
+        type=Path,
+        help="Optional directory prepended to PYTHONPATH for LIBERO-Pro packages",
+    )
+    parser.add_argument(
+        "--library-path",
+        help="Optional explicit LD_LIBRARY_PATH captured in the immutable plan",
+    )
     args = parser.parse_args()
     if args.mode == "prepare":
         if not args.source or not args.assets or not args.python:
@@ -704,6 +715,8 @@ def main() -> None:
             args.gpu,
             args.task,
             args.perturbation,
+            args.python_deps,
+            args.library_path,
         )
     else:
         summarize(args.root)

@@ -251,6 +251,8 @@ def test_medium_gate_is_disjoint_and_pre_registered(tmp_path):
         "shuffled_joint",
         "state_action_joint",
     ]
+    assert probe["env"]["PYTHONPATH"] == str(Path.cwd())
+    assert "LD_LIBRARY_PATH" not in probe["env"]
 
 
 def test_medium_gate_summary_exposes_matched_gain(tmp_path):
