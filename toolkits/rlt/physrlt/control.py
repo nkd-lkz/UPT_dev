@@ -644,6 +644,7 @@ def run(args):
                             "skip_reason": (
                                 "no_positive_transition" if skip_updates else None
                             ),
+                            "post_update_fidelity": learner.following(replay),
                             "trace_sha256": replay_trace_sha256(replay),
                             "last_update": deferred_metrics[-1]
                             if deferred_metrics
