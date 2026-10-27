@@ -285,6 +285,28 @@ def test_critic_can_use_a_distinct_physical_token(source):
         learner.update(replay)
 
 
+def test_actor_can_use_a_distinct_physical_token(source):
+    replay = rows()
+    for row in replay:
+        row["actor_z"] = torch.cat((row["z"], row["z"] + 1))
+        row["next_actor_z"] = torch.cat((row["next_z"], row["next_z"] + 1))
+        row["critic_z"] = row["z"] + 1
+        row["next_critic_z"] = row["next_z"] + 1
+    learner = AcceptanceLearner("cpu", actor_bottleneck_dim=512)
+    before = learner.following(replay)
+    learner.update(replay, warmup=True)
+    after = learner.following(replay)
+    assert torch.isfinite(torch.tensor([before["mse"], after["mse"]])).all()
+    state = learner.state_dict()
+    assert state["actor_bottleneck_dim"] == 512
+    AcceptanceLearner("cpu", actor_bottleneck_dim=512).load_state_dict(state)
+    with pytest.raises(ValueError, match="actor token width differs"):
+        AcceptanceLearner("cpu", actor_bottleneck_dim=256).load_state_dict(state)
+    del replay[0]["next_actor_z"]
+    with pytest.raises(ValueError, match="inconsistently provides"):
+        learner.update(replay)
+
+
 def test_candidate_conditioning_cannot_change_bc_warmup(source):
     class Conditioner(torch.nn.Module):
         def forward(self, token, action, reference):

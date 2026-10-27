@@ -12,7 +12,11 @@ from pathlib import Path
 import torch
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
-from toolkits.rlt.physrlt.control import FrozenReadout, merge_replay_views
+from toolkits.rlt.physrlt.control import (
+    FrozenReadout,
+    attach_actor_view,
+    merge_replay_views,
+)
 from toolkits.rlt.pi05_baseline import configure_source
 
 
@@ -119,6 +123,7 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
         ),
         residual_output=checkpoint.get("residual_output", False),
         critic_bottleneck_dim=checkpoint.get("critic_bottleneck_dim"),
+        actor_bottleneck_dim=checkpoint.get("actor_bottleneck_dim"),
         candidate_selection_count=checkpoint.get("candidate_selection_count", 0),
         candidate_selection_margin=checkpoint.get("candidate_selection_margin", 0.0),
         candidate_uncertainty_penalty=checkpoint.get(
@@ -156,6 +161,10 @@ def audit_replay(
             batch["critic_z"] = torch.stack([row["critic_z"] for row in rows]).to(
                 learner.device
             )
+        if "actor_z" in rows[0]:
+            batch["actor_z"] = torch.stack([row["actor_z"] for row in rows]).to(
+                learner.device
+            )
         token = learner._critic_token(
             batch["z"], batch["action"], batch["ref"], batch.get("critic_z")
         )
@@ -169,7 +178,10 @@ def audit_replay(
         conditioned_elements += token.numel()
         q1, q2 = learner.critic(token, batch["action"], batch["prop"])
         raw_action, _ = learner.actor(
-            batch["z"], batch["ref"], batch["prop"], deterministic=True
+            batch.get("actor_z", batch["z"]),
+            batch["ref"],
+            batch["prop"],
+            deterministic=True,
         )
         policy_action = learner._policy_action(raw_action, batch["ref"]).clamp(-1, 1)
         policy_q = learner.critic.q1_forward(
@@ -226,6 +238,8 @@ def run(args: argparse.Namespace) -> list[dict]:
     rows = []
     for method in methods:
         learner = _learner(args.trained_run, method, args.device)
+        metadata = json.loads((args.trained_run / f"{method}-readout.json").read_text())
+        actor_conditioning = metadata.get("actor_conditioning", "base")
         for (label, evaluated_method), replay_path in evaluations.items():
             if evaluated_method != method:
                 continue
@@ -236,6 +250,7 @@ def run(args: argparse.Namespace) -> list[dict]:
                     replay,
                     torch.load(physical_path, map_location="cpu", weights_only=True),
                 )
+            replay = attach_actor_view(replay, actor_conditioning)
             rows.append(
                 {
                     "trained_run": str(args.trained_run.resolve()),

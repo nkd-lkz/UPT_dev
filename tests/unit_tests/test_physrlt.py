@@ -17,6 +17,7 @@ from toolkits.rlt.physrlt.conditioning import (
     differentiable_env_commands,
 )
 from toolkits.rlt.physrlt.control import (
+    attach_actor_view,
     deferred_update_summary,
     merge_replay_views,
     parse_external_readouts,
@@ -269,6 +270,30 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
+
+
+def test_actor_replay_view_has_a_capacity_matched_control():
+    base = [
+        {
+            "z": torch.zeros(128),
+            "next_z": torch.ones(128),
+            "critic_z": torch.full((128,), 2.0),
+            "next_critic_z": torch.full((128,), 3.0),
+        }
+    ]
+    control = attach_actor_view(base, "zero_concat")
+    physical = attach_actor_view(base, "physical_concat")
+    assert control[0]["actor_z"].shape == physical[0]["actor_z"].shape == (256,)
+    torch.testing.assert_close(control[0]["actor_z"][:128], base[0]["z"])
+    assert control[0]["actor_z"][128:].count_nonzero() == 0
+    torch.testing.assert_close(physical[0]["actor_z"][128:], base[0]["critic_z"])
+    torch.testing.assert_close(
+        physical[0]["next_actor_z"][128:], base[0]["next_critic_z"]
+    )
+    with pytest.raises(ValueError, match="lacks consequence tokens"):
+        attach_actor_view(
+            [{"z": torch.zeros(128), "next_z": torch.zeros(128)}], "physical_concat"
+        )
 
 
 def test_external_readout_labels_are_explicit_and_unique(tmp_path):

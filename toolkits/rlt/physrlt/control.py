@@ -50,13 +50,17 @@ class FrozenReadout:
         mode: str = "latent",
         anchor: Path | None = None,
         consequence: Path | None = None,
+        actor_conditioning: str = "base",
         *,
         expected_dataset: Path | None = None,
         expected_method: str | None = None,
     ):
         if mode not in {"latent", "outcomes", "mixed"}:
             raise ValueError("Unknown physical token deployment mode")
+        if actor_conditioning not in {"base", "zero_concat", "physical_concat"}:
+            raise ValueError("Unknown actor conditioning protocol")
         self.mode = mode
+        self.actor_conditioning = actor_conditioning
         self.payload = torch.load(path, map_location="cpu", weights_only=True)
         if self.payload.get("schema") != 1:
             raise ValueError("Unsupported physical readout schema")
@@ -150,6 +154,14 @@ class FrozenReadout:
         }
         if self.consequence is not None:
             result["critic_z"] = self.consequence.encode(prediction, prop)["z"]
+        if self.actor_conditioning == "zero_concat":
+            result["actor_z"] = torch.cat((result["z"], torch.zeros_like(result["z"])))
+        elif self.actor_conditioning == "physical_concat":
+            if "critic_z" not in result:
+                raise ValueError(
+                    "Physical actor conditioning requires a consequence token"
+                )
+            result["actor_z"] = torch.cat((result["z"], result["critic_z"]))
         return result
 
 
@@ -163,6 +175,7 @@ def warmup(
     correction_axes: tuple[int, ...] | None = None,
     residual_output: bool = False,
     critic_bottleneck_dim: int | None = None,
+    actor_bottleneck_dim: int | None = None,
     candidate_selection_count: int = 0,
     candidate_selection_margin: float = 0.0,
     candidate_uncertainty_penalty: float = 0.0,
@@ -199,6 +212,7 @@ def warmup(
         correction_axes=correction_axes,
         residual_output=residual_output,
         critic_bottleneck_dim=critic_bottleneck_dim,
+        actor_bottleneck_dim=actor_bottleneck_dim,
         candidate_selection_count=candidate_selection_count,
         candidate_selection_margin=candidate_selection_margin,
         candidate_uncertainty_penalty=candidate_uncertainty_penalty,
@@ -216,6 +230,8 @@ def warmup(
         }
         if "critic_z" in features:
             replay_row["next_critic_z"] = features["critic_z"].clone()
+        if "actor_z" in features:
+            replay_row["next_actor_z"] = features["actor_z"].clone()
         (train if row["split"] == "train" else validation).append(replay_row)
     initial = learner.following(validation)
     trace = []
@@ -379,6 +395,38 @@ def merge_replay_views(base: list[dict], consequence: list[dict]) -> list[dict]:
     return merged
 
 
+def attach_actor_view(replay: list[dict], mode: str) -> list[dict]:
+    """Attach a capacity-matched actor token without changing executed replay."""
+    if mode == "base":
+        return replay
+    if mode not in {"zero_concat", "physical_concat"}:
+        raise ValueError("Unknown actor conditioning protocol")
+    attached = []
+    for index, row in enumerate(replay):
+        physical = row.get("critic_z")
+        next_physical = row.get("next_critic_z")
+        if mode == "physical_concat" and (physical is None or next_physical is None):
+            raise ValueError(
+                f"Physical actor replay row {index} lacks consequence tokens"
+            )
+        if mode == "zero_concat":
+            physical = torch.zeros_like(row["z"])
+            next_physical = torch.zeros_like(row["next_z"])
+        if (
+            row["z"].shape != physical.shape
+            or row["next_z"].shape != next_physical.shape
+        ):
+            raise ValueError("Base and physical actor token shapes differ")
+        attached.append(
+            row
+            | {
+                "actor_z": torch.cat((row["z"], physical)),
+                "next_actor_z": torch.cat((row["next_z"], next_physical)),
+            }
+        )
+    return attached
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -494,6 +542,8 @@ def rollout(
             )
             if "critic_z" in features:
                 replay[-1]["next_critic_z"] = next_features["critic_z"]
+            if "actor_z" in features:
+                replay[-1]["next_actor_z"] = next_features["actor_z"]
             if update_online:
                 updates.append(learner.update(replay))
         rewards += chunk_reward
@@ -629,6 +679,8 @@ def run(args):
         getattr(args, "unit_concat_relative_critics", [])
     )
     conservative_selectors = set(getattr(args, "conservative_selectors", []))
+    actor_zero_concat = set(getattr(args, "actor_zero_concat", []))
+    actor_physical_concat = set(getattr(args, "actor_physical_concat", []))
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -643,6 +695,15 @@ def run(args):
         raise ValueError("Candidate critic labels must also be requested methods")
     if not conservative_selectors.issubset(args.methods):
         raise ValueError("Conservative selector labels must also be requested methods")
+    if actor_zero_concat & actor_physical_concat:
+        raise ValueError("Actor conditioning labels must be disjoint")
+    actor_conditioned = actor_zero_concat | actor_physical_concat
+    if not actor_conditioned.issubset(args.methods):
+        raise ValueError("Actor conditioning labels must also be requested methods")
+    if not actor_physical_concat.issubset(critic_readouts):
+        raise ValueError(
+            "Physical actor conditioning requires a separate consequence readout"
+        )
     rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
     try:
         for case in validation_cases + dev_cases:
@@ -656,6 +717,11 @@ def run(args):
         for method in args.methods:
             base_method, mode = method, "latent"
             anchor = None
+            actor_conditioning = "base"
+            if method in actor_zero_concat:
+                actor_conditioning = "zero_concat"
+            elif method in actor_physical_concat:
+                actor_conditioning = "physical_concat"
             if method in external_readouts:
                 path = external_readouts[method]
                 expected_method = None
@@ -680,6 +746,7 @@ def run(args):
                 mode=mode,
                 anchor=anchor,
                 consequence=critic_readouts.get(method),
+                actor_conditioning=actor_conditioning,
                 expected_dataset=args.dataset,
                 expected_method=expected_method,
             )
@@ -697,6 +764,7 @@ def run(args):
             critic_bottleneck_dim = (
                 256 if critic_conditioning.endswith("_concat") else None
             )
+            actor_bottleneck_dim = 256 if actor_conditioning != "base" else None
             write_json(
                 args.output / f"{method}-readout.json",
                 {
@@ -708,6 +776,7 @@ def run(args):
                         "effect_measurements_sha256"
                     ),
                     "critic_conditioning": critic_conditioning,
+                    "actor_conditioning": actor_conditioning,
                     "correction_limit": getattr(args, "correction_limit", None),
                     "correction_axes": getattr(args, "correction_axes", None),
                     "residual_output": getattr(args, "residual_output", False),
@@ -742,6 +811,7 @@ def run(args):
                 ),
                 getattr(args, "residual_output", False),
                 critic_bottleneck_dim,
+                actor_bottleneck_dim,
                 (
                     getattr(args, "candidate_selection_count", 0)
                     if method in conservative_selectors
@@ -789,6 +859,7 @@ def run(args):
                             critic_source, map_location="cpu", weights_only=True
                         )
                         replay = merge_replay_views(replay, critic_replay)
+                    replay = attach_actor_view(replay, actor_conditioning)
                     fixed_summary = validate_fixed_replay(replay)
                     write_json(
                         args.output / f"{method}-fixed-replay.json",
@@ -970,6 +1041,18 @@ def main():
     parser.add_argument("--concat-control-critics", nargs="*", default=[])
     parser.add_argument("--concat-relative-critics", nargs="*", default=[])
     parser.add_argument("--unit-concat-relative-critics", nargs="*", default=[])
+    parser.add_argument(
+        "--actor-zero-concat",
+        nargs="*",
+        default=[],
+        help="Give the actor a 256-D base-plus-zero token capacity control",
+    )
+    parser.add_argument(
+        "--actor-physical-concat",
+        nargs="*",
+        default=[],
+        help="Give the actor a 256-D semantic-plus-physical token",
+    )
     parser.add_argument("--conservative-selectors", nargs="*", default=[])
     parser.add_argument("--candidate-selection-count", type=int, default=5)
     parser.add_argument("--candidate-selection-margin", type=float, default=0.0)

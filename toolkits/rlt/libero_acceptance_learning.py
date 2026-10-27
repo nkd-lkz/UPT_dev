@@ -65,6 +65,7 @@ class AcceptanceLearner:
         correction_axes: tuple[int, ...] | None = None,
         residual_output: bool = False,
         critic_bottleneck_dim: int | None = None,
+        actor_bottleneck_dim: int | None = None,
         candidate_selection_count: int = 0,
         candidate_selection_margin: float = 0.0,
         candidate_uncertainty_penalty: float = 0.0,
@@ -80,8 +81,11 @@ class AcceptanceLearner:
         if bottleneck_dim < 1 or chunk_len < 1:
             raise ValueError("Require positive token width and chunk length")
         critic_bottleneck_dim = critic_bottleneck_dim or bottleneck_dim
+        actor_bottleneck_dim = actor_bottleneck_dim or bottleneck_dim
         if critic_bottleneck_dim < 1:
             raise ValueError("Require a positive critic token width")
+        if actor_bottleneck_dim < 1:
+            raise ValueError("Require a positive actor token width")
         if critic_conditioner is None and critic_bottleneck_dim != bottleneck_dim:
             raise ValueError("A distinct critic token width requires a conditioner")
         if (critic_conditioner is None) != (critic_conditioning == "latent"):
@@ -112,6 +116,7 @@ class AcceptanceLearner:
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
         self.critic_bottleneck_dim = critic_bottleneck_dim
+        self.actor_bottleneck_dim = actor_bottleneck_dim
         self.correction_limit = correction_limit
         self.correction_axes = correction_axes
         self.residual_output = residual_output
@@ -125,7 +130,7 @@ class AcceptanceLearner:
             else None
         )
         self.actor = ActionTokenActor(
-            bottleneck_dim=bottleneck_dim,
+            bottleneck_dim=actor_bottleneck_dim,
             action_dim=7,
             chunk_len=chunk_len,
             hidden_dim=512,
@@ -158,8 +163,13 @@ class AcceptanceLearner:
     ) -> torch.Tensor:
         """Build the critic state while preserving action gradients."""
         if self.critic_conditioner is None:
-            if physical_token is not None:
+            if (
+                physical_token is not None
+                and self.actor_bottleneck_dim == token.shape[-1]
+            ):
                 raise ValueError("Physical token requires an explicit conditioner")
+            # Actor-only dual-token ablations retain the matched physical view
+            # in replay, but the latent critic intentionally ignores it.
             return token
         conditioned = (
             self.critic_conditioner(token, action, reference, physical_token)
@@ -198,7 +208,7 @@ class AcceptanceLearner:
         """Generate a command with dropout disabled for physical execution."""
         self.actor.eval()
         raw_action, _ = self.actor(
-            row["z"][None].to(self.device),
+            row.get("actor_z", row["z"])[None].to(self.device),
             row["ref"][None].to(self.device),
             row["prop"][None].to(self.device),
             deterministic=deterministic,
@@ -272,7 +282,7 @@ class AcceptanceLearner:
         )
         if not eligible:
             raise ValueError("No complete or terminal transitions for updating")
-        optional = ("critic_z", "next_critic_z")
+        optional = ("critic_z", "next_critic_z", "actor_z", "next_actor_z")
         for key in optional:
             present = [key in row for row in eligible]
             if any(present) and not all(present):
@@ -291,7 +301,7 @@ class AcceptanceLearner:
             self.critic.train()
             with torch.no_grad():
                 next_raw_action, _ = self.target_actor(
-                    batch["next_z"],
+                    batch.get("next_actor_z", batch["next_z"]),
                     batch["next_ref"],
                     batch["next_prop"],
                     deterministic=True,
@@ -344,7 +354,7 @@ class AcceptanceLearner:
             self.actor.train()
             self.critic.requires_grad_(False)
             raw_action, _ = self.actor(
-                batch["z"],
+                batch.get("actor_z", batch["z"]),
                 batch["ref"],
                 batch["prop"],
                 deterministic=warmup and self.residual_output,
@@ -418,8 +428,15 @@ class AcceptanceLearner:
                 )
                 for key in ("z", "ref", "prop")
             }
+            if "actor_z" in rows[start]:
+                batch["actor_z"] = torch.stack(
+                    [r["actor_z"] for r in rows[start : start + 128]]
+                ).to(self.device)
             raw_mean, _ = self.actor(
-                batch["z"], batch["ref"], batch["prop"], deterministic=True
+                batch.get("actor_z", batch["z"]),
+                batch["ref"],
+                batch["prop"],
+                deterministic=True,
             )
             mean = self._policy_action(raw_mean, batch["ref"])
             errors.append((mean - batch["ref"]).square().cpu())
@@ -462,6 +479,7 @@ class AcceptanceLearner:
             "critic_updates": self.critic_updates,
             "critic_conditioning": self.critic_conditioning,
             "critic_bottleneck_dim": self.critic_bottleneck_dim,
+            "actor_bottleneck_dim": self.actor_bottleneck_dim,
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
             "residual_output": self.residual_output,
@@ -479,6 +497,10 @@ class AcceptanceLearner:
             self.critic_bottleneck_dim
         ):
             raise ValueError("Checkpoint critic token width differs from the learner")
+        if state.get("actor_bottleneck_dim", self.actor_bottleneck_dim) != (
+            self.actor_bottleneck_dim
+        ):
+            raise ValueError("Checkpoint actor token width differs from the learner")
         if state.get("correction_limit") != self.correction_limit:
             raise ValueError("Checkpoint correction limit differs from the learner")
         if state.get("correction_axes") != self.correction_axes:
