@@ -133,7 +133,13 @@ def _field_loss(
 
 def paired_objective(model, stats: dict, method: str, record: dict, mode: str):
     """Return matched pointwise or action-effect supervision for one state."""
-    if mode not in {"pointwise", "effect", "reversed_effect"}:
+    if mode not in {
+        "pointwise",
+        "effect",
+        "reversed_effect",
+        "object_effect",
+        "reversed_object_effect",
+    }:
         raise ValueError("Unknown paired supervision mode")
     token = model.encode(*_current_inputs(record["row"], stats, method))
     predictions = {
@@ -168,10 +174,16 @@ def paired_objective(model, stats: dict, method: str, record: dict, mode: str):
         field: (record["branches"][1][field] - record["branches"][-1][field])[None]
         for field in ("response", "geometry")
     }
-    if mode == "reversed_effect":
+    if mode in {"reversed_effect", "reversed_object_effect"}:
         difference_target = {
             field: -target for field, target in difference_target.items()
         }
+    if mode in {"object_effect", "reversed_object_effect"}:
+        return masked_loss(
+            difference_prediction["geometry"][..., 64:],
+            difference_target["geometry"][..., 64:] / stats["geometry_scale"][64:],
+            valid,
+        )
     return _field_loss(difference_prediction, difference_target, valid, stats)
 
 
@@ -283,7 +295,13 @@ def effect_checkpoint(
     parameter_scope: str,
 ) -> dict:
     """Build a deployable readout with explicit paired-supervision provenance."""
-    if supervision not in {"pointwise", "effect", "reversed_effect"}:
+    if supervision not in {
+        "pointwise",
+        "effect",
+        "reversed_effect",
+        "object_effect",
+        "reversed_object_effect",
+    }:
         raise ValueError("Unknown effect checkpoint supervision")
     payload = {
         key: value
@@ -375,7 +393,13 @@ def run(args: argparse.Namespace) -> dict:
         partitions = [("development", records, evaluation_records)]
     for fold, (heldout, train, test) in enumerate(partitions):
         arms = {"base": (readout.model, [])}
-        for arm in ("pointwise", "effect", "reversed_effect"):
+        for arm in (
+            "pointwise",
+            "effect",
+            "reversed_effect",
+            "object_effect",
+            "reversed_object_effect",
+        ):
             arms[arm] = fine_tune(
                 readout.model,
                 readout.payload["stats"],
@@ -389,7 +413,13 @@ def run(args: argparse.Namespace) -> dict:
         if evaluation_records is not None:
             checkpoint_root = args.output / "checkpoints"
             checkpoint_root.mkdir(exist_ok=True)
-            for arm in ("pointwise", "effect", "reversed_effect"):
+            for arm in (
+                "pointwise",
+                "effect",
+                "reversed_effect",
+                "object_effect",
+                "reversed_object_effect",
+            ):
                 torch.save(
                     effect_checkpoint(
                         readout,

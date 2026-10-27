@@ -89,6 +89,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 独立的 development split 采集完成后，同时传入 ``--evaluation-measurements`` 和 ``--evaluation-paired-result``。此时模块使用全部训练布局配对数据更新，只在未参与 readout 拟合和配对效果更新的 development 布局上评估。代码拒绝不完整记录、split 不匹配、布局重叠以及经过动作裁剪后幅度改变的干预。该结果属于更严格的后果预测证据，仍不能代替任务成功率或在线 RL 收益。
 
+均匀选择执行时刻可能让 paired-action 数据主要覆盖自由空间运动，使零物体变化成为很强的基线。接触阶段筛选必须在采集命令中显式记录时刻，并保留独立布局评估。``object_effect`` 与 ``reversed_object_effect`` 只用候选动作之间的实测物体位移差更新 geometry decoder，前者使用正确方向，后者使用符号反转负对照；encoder、重建头和 response decoder 保持不变。只有正确方向同时优于原联合 effect、反向对照和零变化基线，才允许进入闭环实验。
+
 完成独立 development 评估时，程序还会在 ``checkpoints/`` 下保存逐点监督、正确差分监督和符号反转差分监督三类 readout。每个 checkpoint 都记录 transition 数据哈希、配对测量哈希、监督组别、更新数和 seed。通过 ``control`` 的 ``--external-readouts LABEL=PATH`` 显式指定文件；同时出现在 ``--candidate-critics`` 中的 label 不改变 actor 输入，而是针对 replay 动作、target 动作和 actor 候选动作分别调用冻结后果解码器，并将当前 latent 与预测后果压缩为 128 维 critic 状态。环境仍执行二值夹爪命令；只有冻结后果模型内部使用有界 straight-through 近似向 actor 传递梯度。控制结果会记录 readout 哈希及条件化协议。
 
 列入 ``--relative-critics`` 的 label 改为向 critic 提供“候选动作预测后果减去冻结 reference 动作预测后果”。同一个冻结 decoder 分别计算两个动作，可消除与动作无关的绝对值偏差，并让部署接口更贴合配对差分监督；critic 仍单独读取候选动作，actor 结构不变。绝对后果与相对后果 label 不能重叠。只有在同一相对接口下比较逐点 decoder 和配对差分 decoder，才能把差异归因于 effect 监督。

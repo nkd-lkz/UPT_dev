@@ -719,6 +719,8 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
             "pointwise",
             "effect",
             "reversed_effect",
+            "object_effect",
+            "reversed_object_effect",
         }
         for arm in fold["arms"].values():
             assert arm["summary"]["10"]["paired_states"] == 1
@@ -783,7 +785,13 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
     assert transfer["evaluation_paired_states"] == 2
     assert len(transfer["folds"]) == 1
     assert transfer["folds"][0]["heldout_paired_case"] == "development"
-    for arm in ("pointwise", "effect", "reversed_effect"):
+    for arm in (
+        "pointwise",
+        "effect",
+        "reversed_effect",
+        "object_effect",
+        "reversed_object_effect",
+    ):
         checkpoint = tmp_path / "effect-transfer/checkpoints" / f"{arm}.pt"
         assert checkpoint.is_file()
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
