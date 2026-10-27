@@ -240,6 +240,12 @@ def run(args: argparse.Namespace) -> list[dict]:
         learner = _learner(args.trained_run, method, args.device)
         metadata = json.loads((args.trained_run / f"{method}-readout.json").read_text())
         actor_conditioning = metadata.get("actor_conditioning", "base")
+        actor_readout = None
+        if actor_conditioning == "physical_outcomes_concat":
+            actor_readout = FrozenReadout(
+                Path(metadata["checkpoint"]),
+                consequence=Path(metadata["consequence_checkpoint"]),
+            )
         for (label, evaluated_method), replay_path in evaluations.items():
             if evaluated_method != method:
                 continue
@@ -250,7 +256,7 @@ def run(args: argparse.Namespace) -> list[dict]:
                     replay,
                     torch.load(physical_path, map_location="cpu", weights_only=True),
                 )
-            replay = attach_actor_view(replay, actor_conditioning)
+            replay = attach_actor_view(replay, actor_conditioning, actor_readout)
             rows.append(
                 {
                     "trained_run": str(args.trained_run.resolve()),

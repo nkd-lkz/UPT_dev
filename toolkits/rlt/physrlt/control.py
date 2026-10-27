@@ -57,7 +57,12 @@ class FrozenReadout:
     ):
         if mode not in {"latent", "outcomes", "mixed"}:
             raise ValueError("Unknown physical token deployment mode")
-        if actor_conditioning not in {"base", "zero_concat", "physical_concat"}:
+        if actor_conditioning not in {
+            "base",
+            "zero_concat",
+            "physical_concat",
+            "physical_outcomes_concat",
+        }:
             raise ValueError("Unknown actor conditioning protocol")
         self.mode = mode
         self.actor_conditioning = actor_conditioning
@@ -162,6 +167,18 @@ class FrozenReadout:
                     "Physical actor conditioning requires a consequence token"
                 )
             result["actor_z"] = torch.cat((result["z"], result["critic_z"]))
+        elif self.actor_conditioning == "physical_outcomes_concat":
+            if self.consequence is None:
+                raise ValueError(
+                    "Physical actor outcomes require a consequence readout"
+                )
+            physical = physical_quantities(
+                self.consequence.model,
+                result["critic_z"][None],
+                result["ref"][None],
+                self.consequence.payload["method"],
+            )[0]
+            result["actor_z"] = torch.cat((result["z"], physical))
         return result
 
 
@@ -395,23 +412,49 @@ def merge_replay_views(base: list[dict], consequence: list[dict]) -> list[dict]:
     return merged
 
 
-def attach_actor_view(replay: list[dict], mode: str) -> list[dict]:
+def attach_actor_view(
+    replay: list[dict], mode: str, readout: FrozenReadout | None = None
+) -> list[dict]:
     """Attach a capacity-matched actor token without changing executed replay."""
     if mode == "base":
         return replay
-    if mode not in {"zero_concat", "physical_concat"}:
+    if mode not in {
+        "zero_concat",
+        "physical_concat",
+        "physical_outcomes_concat",
+    }:
         raise ValueError("Unknown actor conditioning protocol")
     attached = []
     for index, row in enumerate(replay):
         physical = row.get("critic_z")
         next_physical = row.get("next_critic_z")
-        if mode == "physical_concat" and (physical is None or next_physical is None):
+        if mode in {"physical_concat", "physical_outcomes_concat"} and (
+            physical is None or next_physical is None
+        ):
             raise ValueError(
                 f"Physical actor replay row {index} lacks consequence tokens"
             )
         if mode == "zero_concat":
             physical = torch.zeros_like(row["z"])
             next_physical = torch.zeros_like(row["next_z"])
+        elif mode == "physical_outcomes_concat":
+            if readout is None or readout.consequence is None:
+                raise ValueError(
+                    "Physical actor outcomes require a consequence readout"
+                )
+            consequence = readout.consequence
+            physical = physical_quantities(
+                consequence.model,
+                physical[None],
+                row["ref"][None],
+                consequence.payload["method"],
+            )[0]
+            next_physical = physical_quantities(
+                consequence.model,
+                next_physical[None],
+                row["next_ref"][None],
+                consequence.payload["method"],
+            )[0]
         if (
             row["z"].shape != physical.shape
             or row["next_z"].shape != next_physical.shape
@@ -681,6 +724,9 @@ def run(args):
     conservative_selectors = set(getattr(args, "conservative_selectors", []))
     actor_zero_concat = set(getattr(args, "actor_zero_concat", []))
     actor_physical_concat = set(getattr(args, "actor_physical_concat", []))
+    actor_physical_outcomes_concat = set(
+        getattr(args, "actor_physical_outcomes_concat", [])
+    )
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -695,12 +741,18 @@ def run(args):
         raise ValueError("Candidate critic labels must also be requested methods")
     if not conservative_selectors.issubset(args.methods):
         raise ValueError("Conservative selector labels must also be requested methods")
-    if actor_zero_concat & actor_physical_concat:
+    actor_groups = (
+        actor_zero_concat,
+        actor_physical_concat,
+        actor_physical_outcomes_concat,
+    )
+    if sum(map(len, actor_groups)) != len(set().union(*actor_groups)):
         raise ValueError("Actor conditioning labels must be disjoint")
-    actor_conditioned = actor_zero_concat | actor_physical_concat
+    actor_conditioned = set().union(*actor_groups)
     if not actor_conditioned.issubset(args.methods):
         raise ValueError("Actor conditioning labels must also be requested methods")
-    if not actor_physical_concat.issubset(critic_readouts):
+    actor_physical = actor_physical_concat | actor_physical_outcomes_concat
+    if not actor_physical.issubset(critic_readouts):
         raise ValueError(
             "Physical actor conditioning requires a separate consequence readout"
         )
@@ -722,6 +774,8 @@ def run(args):
                 actor_conditioning = "zero_concat"
             elif method in actor_physical_concat:
                 actor_conditioning = "physical_concat"
+            elif method in actor_physical_outcomes_concat:
+                actor_conditioning = "physical_outcomes_concat"
             if method in external_readouts:
                 path = external_readouts[method]
                 expected_method = None
@@ -859,7 +913,7 @@ def run(args):
                             critic_source, map_location="cpu", weights_only=True
                         )
                         replay = merge_replay_views(replay, critic_replay)
-                    replay = attach_actor_view(replay, actor_conditioning)
+                    replay = attach_actor_view(replay, actor_conditioning, readout)
                     fixed_summary = validate_fixed_replay(replay)
                     write_json(
                         args.output / f"{method}-fixed-replay.json",
@@ -1052,6 +1106,12 @@ def main():
         nargs="*",
         default=[],
         help="Give the actor a 256-D semantic-plus-physical token",
+    )
+    parser.add_argument(
+        "--actor-physical-outcomes-concat",
+        nargs="*",
+        default=[],
+        help="Append predicted reference-action physical outcomes to the actor token",
     )
     parser.add_argument("--conservative-selectors", nargs="*", default=[])
     parser.add_argument("--candidate-selection-count", type=int, default=5)

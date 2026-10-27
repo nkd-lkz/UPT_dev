@@ -6,6 +6,7 @@ import copy
 import json
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -279,17 +280,27 @@ def test_actor_replay_view_has_a_capacity_matched_control():
             "next_z": torch.ones(128),
             "critic_z": torch.full((128,), 2.0),
             "next_critic_z": torch.full((128,), 3.0),
+            "ref": torch.zeros(10, 7),
+            "next_ref": torch.ones(10, 7) * 0.1,
         }
     ]
     control = attach_actor_view(base, "zero_concat")
     physical = attach_actor_view(base, "physical_concat")
+    readout = SimpleNamespace(
+        consequence=SimpleNamespace(
+            model=PhysicalReadout(12, 67), payload={"method": "joint"}
+        )
+    )
+    outcomes = attach_actor_view(base, "physical_outcomes_concat", readout)
     assert control[0]["actor_z"].shape == physical[0]["actor_z"].shape == (256,)
+    assert outcomes[0]["actor_z"].shape == (256,)
     torch.testing.assert_close(control[0]["actor_z"][:128], base[0]["z"])
     assert control[0]["actor_z"][128:].count_nonzero() == 0
     torch.testing.assert_close(physical[0]["actor_z"][128:], base[0]["critic_z"])
     torch.testing.assert_close(
         physical[0]["next_actor_z"][128:], base[0]["next_critic_z"]
     )
+    assert outcomes[0]["actor_z"][128:].count_nonzero() > 0
     with pytest.raises(ValueError, match="lacks consequence tokens"):
         attach_actor_view(
             [{"z": torch.zeros(128), "next_z": torch.zeros(128)}], "physical_concat"
@@ -1179,6 +1190,20 @@ def test_structured_physics_token_remains_causal(tmp_path):
             readout.encode(altered, altered["prop"])["z"], original
         )
         assert original.shape == (128,)
+    checkpoint = tmp_path / "probes/joint-seed3/readout.pt"
+    readout = FrozenReadout(
+        checkpoint,
+        consequence=checkpoint,
+        actor_conditioning="physical_outcomes_concat",
+    )
+    original = readout.encode(rows[0], rows[0]["prop"])["actor_z"]
+    changed = copy.deepcopy(rows[0])
+    changed["response"][:] = 1e9
+    changed["geometry"][:] = 1e9
+    torch.testing.assert_close(
+        readout.encode(changed, changed["prop"])["actor_z"], original
+    )
+    assert original.shape == (256,)
 
 
 def test_outcome_token_masks_unsupervised_response_decoder_rows(tmp_path):

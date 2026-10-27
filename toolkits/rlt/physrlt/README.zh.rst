@@ -117,6 +117,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 ``--actor-zero-concat`` 与 ``--actor-physical-concat`` 用于检验 grounded readout 是否必须直接进入动作生成路径，而不只是进入 critic。两组 actor 输入均为 256 维：容量对照将完整 128 维 base token 与零向量拼接，物理组将同一 base token 与独立的 128 维 Physical Token 拼接；两组的实际 replay、actor／critic 更新次数和 base token 完全匹配。只有物理组跨多个优化 seed 优于零通道对照，才能支持物理表征收益；若只优于原 128 维 actor，无法排除模型容量增加带来的影响。
 
+``--actor-physical-outcomes-concat`` 保持同一个 256 维接口，但将受物理监督的 encoder latent 替换为冻结 decoder 对 reference 动作预测的显式归一化后果，以区分“监督塑造的 latent”和类似 WAM 的预测后果表征。部署时只使用当前观测、本体状态、reference chunk 与冻结模型预测；实测未来响应和特权几何仍只作为训练标签。只有同时比较零通道对照、physical latent 与 explicit outcomes，才能把收益归因于显式物理量。
+
 首轮闭环门槛应在 ``effect_probe`` 中设置 ``--parameter-scope decoders``。逐点、正确差分及符号反转差分监督此时冻结 encoder 和重建头，只更新响应与几何 decoder；三者提供给 actor 的 token 与起始 ``joint`` readout 逐参数一致，后续控制差异不能再归因于 actor 表征变化。默认的 ``all`` scope 仍可用于表征学习诊断，但必须与 decoder-only 结果分开报告。
 
 候选动作条件化 critic 只是有预算上限的开发实验，不会因为接口实现就自动成为正结果。需要在相同 warmup 状态、在线交互量和评估布局下比较原始 latent critic、原始联合 readout 的候选条件化、同数据逐点监督和配对差分监督。BC 热身仍须通过动作保真度与 validation 成功门槛，才允许在线更新；仅有预测误差改善不能触发更大训练预算。
