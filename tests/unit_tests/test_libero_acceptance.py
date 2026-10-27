@@ -382,6 +382,64 @@ def test_zero_initialized_residual_actor_starts_at_reference(source):
         AcceptanceLearner("cpu", residual_output=True)
 
 
+def test_conservative_candidate_selection_can_back_off_actor_correction(source):
+    class FixedActor(torch.nn.Module):
+        def forward(self, token, reference, prop, deterministic):
+            return reference + 0.1, None
+
+    class ReferenceCritic(torch.nn.Module):
+        def forward(self, token, action, prop):
+            value = -action.square().sum((-2, -1))
+            return value, value - 0.01
+
+    learner = AcceptanceLearner(
+        "cpu",
+        candidate_selection_count=5,
+        candidate_selection_margin=0.0,
+        candidate_uncertainty_penalty=1.0,
+    )
+    learner.actor = FixedActor()
+    learner.critic = ReferenceCritic()
+    learner.critic_updates = 1
+    row = {
+        "z": torch.zeros(256),
+        "ref": torch.zeros(8, 7),
+        "prop": torch.zeros(8),
+    }
+    torch.testing.assert_close(
+        learner.command(row, deterministic=True), row["ref"], rtol=0, atol=0
+    )
+    assert learner.last_command_diagnostics["reason"] == "reference_fallback"
+    assert learner.last_command_diagnostics["selected_scale"] == 0
+
+    action = learner.command(row, deterministic=False)
+    torch.testing.assert_close(action, torch.full_like(row["ref"], 0.1))
+    assert learner.last_command_diagnostics["reason"] == "stochastic_command"
+
+
+def test_candidate_selection_checkpoint_contract_is_explicit(source):
+    learner = AcceptanceLearner(
+        "cpu",
+        candidate_selection_count=5,
+        candidate_selection_margin=0.01,
+        candidate_uncertainty_penalty=0.5,
+    )
+    state = learner.state_dict()
+    AcceptanceLearner(
+        "cpu",
+        candidate_selection_count=5,
+        candidate_selection_margin=0.01,
+        candidate_uncertainty_penalty=0.5,
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="candidate-selection contract differs"):
+        AcceptanceLearner("cpu").load_state_dict(state)
+    for count in (-1, 1):
+        with pytest.raises(ValueError, match="at least two"):
+            AcceptanceLearner("cpu", candidate_selection_count=count)
+    with pytest.raises(ValueError, match="penalties must be nonnegative"):
+        AcceptanceLearner("cpu", candidate_selection_margin=-0.1)
+
+
 def test_command_mapping_matches_official_conversion(source):
     import numpy as np
     from AlphaBrain.training.reinforcement_learning.common.rollout import (

@@ -163,6 +163,9 @@ def warmup(
     correction_axes: tuple[int, ...] | None = None,
     residual_output: bool = False,
     critic_bottleneck_dim: int | None = None,
+    candidate_selection_count: int = 0,
+    candidate_selection_margin: float = 0.0,
+    candidate_uncertainty_penalty: float = 0.0,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -196,6 +199,9 @@ def warmup(
         correction_axes=correction_axes,
         residual_output=residual_output,
         critic_bottleneck_dim=critic_bottleneck_dim,
+        candidate_selection_count=candidate_selection_count,
+        candidate_selection_margin=candidate_selection_margin,
+        candidate_uncertainty_penalty=candidate_uncertainty_penalty,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -428,7 +434,7 @@ def rollout(
     start = time.monotonic()
     prediction = reference.predict(obs, env.instruction, case["seed"] * 1000)
     features = readout.encode(prediction, obs["state"]) if readout else None
-    updates = []
+    updates, selection_diagnostics = [], []
     while ticks < limit:
         begin = time.monotonic()
         action = (
@@ -436,6 +442,9 @@ def rollout(
             if learner
             else torch.from_numpy(prediction["ref"])
         )
+        diagnostic = getattr(learner, "last_command_diagnostics", None)
+        if diagnostic and diagnostic.get("enabled"):
+            selection_diagnostics.append(diagnostic)
         commands = env_commands(action.numpy())
         commands[:, :3] = (commands[:, :3] * execution_gain).clip(-1, 1)
         accepted = np.zeros_like(commands)
@@ -508,6 +517,25 @@ def rollout(
         "memory": False,
         "execution_gain": execution_gain,
         "delay_ticks": delay_ticks,
+        "candidate_selection_calls": len(selection_diagnostics),
+        "candidate_nonreference_fraction": (
+            sum(row["selected_scale"] > 0 for row in selection_diagnostics)
+            / len(selection_diagnostics)
+            if selection_diagnostics
+            else None
+        ),
+        "candidate_scale_mean": (
+            sum(row["selected_scale"] for row in selection_diagnostics)
+            / len(selection_diagnostics)
+            if selection_diagnostics
+            else None
+        ),
+        "candidate_score_improvement_mean": (
+            sum(row["score_improvement"] for row in selection_diagnostics)
+            / len(selection_diagnostics)
+            if selection_diagnostics
+            else None
+        ),
     }
 
 
@@ -600,6 +628,7 @@ def run(args):
     unit_concat_relative_critics = set(
         getattr(args, "unit_concat_relative_critics", [])
     )
+    conservative_selectors = set(getattr(args, "conservative_selectors", []))
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -612,6 +641,8 @@ def run(args):
     unknown_candidates = set().union(*critic_groups) - set(args.methods)
     if unknown_candidates:
         raise ValueError("Candidate critic labels must also be requested methods")
+    if not conservative_selectors.issubset(args.methods):
+        raise ValueError("Conservative selector labels must also be requested methods")
     rollout_case = partial(rollout, execution_gain=getattr(args, "execution_gain", 1.0))
     try:
         for case in validation_cases + dev_cases:
@@ -680,6 +711,16 @@ def run(args):
                     "correction_limit": getattr(args, "correction_limit", None),
                     "correction_axes": getattr(args, "correction_axes", None),
                     "residual_output": getattr(args, "residual_output", False),
+                    "conservative_selector": method in conservative_selectors,
+                    "candidate_selection_count": getattr(
+                        args, "candidate_selection_count", 0
+                    ),
+                    "candidate_selection_margin": getattr(
+                        args, "candidate_selection_margin", 0.0
+                    ),
+                    "candidate_uncertainty_penalty": getattr(
+                        args, "candidate_uncertainty_penalty", 0.0
+                    ),
                     "consequence_checkpoint": (
                         str(critic_readouts[method])
                         if method in critic_readouts
@@ -701,6 +742,13 @@ def run(args):
                 ),
                 getattr(args, "residual_output", False),
                 critic_bottleneck_dim,
+                (
+                    getattr(args, "candidate_selection_count", 0)
+                    if method in conservative_selectors
+                    else 0
+                ),
+                getattr(args, "candidate_selection_margin", 0.0),
+                getattr(args, "candidate_uncertainty_penalty", 0.0),
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -839,6 +887,12 @@ def run(args):
         "residual_output": getattr(args, "residual_output", False),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "require_positive_replay": getattr(args, "require_positive_replay", False),
+        "conservative_selectors": getattr(args, "conservative_selectors", []),
+        "candidate_selection_count": getattr(args, "candidate_selection_count", 0),
+        "candidate_selection_margin": getattr(args, "candidate_selection_margin", 0.0),
+        "candidate_uncertainty_penalty": getattr(
+            args, "candidate_uncertainty_penalty", 0.0
+        ),
         "fixed_replays": {
             key: str(value)
             for key, value in parse_external_readouts(
@@ -916,6 +970,10 @@ def main():
     parser.add_argument("--concat-control-critics", nargs="*", default=[])
     parser.add_argument("--concat-relative-critics", nargs="*", default=[])
     parser.add_argument("--unit-concat-relative-critics", nargs="*", default=[])
+    parser.add_argument("--conservative-selectors", nargs="*", default=[])
+    parser.add_argument("--candidate-selection-count", type=int, default=5)
+    parser.add_argument("--candidate-selection-margin", type=float, default=0.0)
+    parser.add_argument("--candidate-uncertainty-penalty", type=float, default=1.0)
     parser.add_argument(
         "--methods",
         nargs="+",

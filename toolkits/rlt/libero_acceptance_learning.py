@@ -65,6 +65,9 @@ class AcceptanceLearner:
         correction_axes: tuple[int, ...] | None = None,
         residual_output: bool = False,
         critic_bottleneck_dim: int | None = None,
+        candidate_selection_count: int = 0,
+        candidate_selection_margin: float = 0.0,
+        candidate_uncertainty_penalty: float = 0.0,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -99,6 +102,12 @@ class AcceptanceLearner:
                 or any(axis not in range(7) for axis in correction_axes)
             ):
                 raise ValueError("Correction axes must be unique action dimensions")
+        if candidate_selection_count != 0 and candidate_selection_count < 2:
+            raise ValueError(
+                "Candidate selection requires zero or at least two choices"
+            )
+        if candidate_selection_margin < 0 or candidate_uncertainty_penalty < 0:
+            raise ValueError("Candidate selection penalties must be nonnegative")
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
@@ -106,6 +115,10 @@ class AcceptanceLearner:
         self.correction_limit = correction_limit
         self.correction_axes = correction_axes
         self.residual_output = residual_output
+        self.candidate_selection_count = candidate_selection_count
+        self.candidate_selection_margin = candidate_selection_margin
+        self.candidate_uncertainty_penalty = candidate_uncertainty_penalty
+        self.last_command_diagnostics: dict | None = None
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
             if critic_conditioner is not None
@@ -192,9 +205,65 @@ class AcceptanceLearner:
         )
         reference = row["ref"][None].to(self.device)
         action = self._policy_action(raw_action, reference)
+        self.last_command_diagnostics = {
+            "enabled": False,
+            "reason": "not_configured",
+        }
+        if self.candidate_selection_count:
+            self.last_command_diagnostics["reason"] = (
+                "stochastic_command" if not deterministic else "critic_not_updated"
+            )
+        if self.candidate_selection_count and deterministic and self.critic_updates > 0:
+            action = self._select_candidate(row, reference, action)
         if not torch.isfinite(action).all():
             raise FloatingPointError("Nonfinite actor command")
         return action[0].float().cpu().clamp(-1, 1)
+
+    @torch.no_grad()
+    def _select_candidate(
+        self,
+        row: dict,
+        reference: torch.Tensor,
+        actor_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Back off an actor correction unless its conservative Q gain is credible."""
+        scales = torch.linspace(
+            0,
+            1,
+            self.candidate_selection_count,
+            device=self.device,
+            dtype=actor_action.dtype,
+        )
+        candidates = reference + scales[:, None, None] * (actor_action - reference)
+        token = row["z"][None].to(self.device).expand(len(scales), -1)
+        references = reference.expand(len(scales), -1, -1)
+        prop = row["prop"][None].to(self.device).expand(len(scales), -1)
+        physical = row.get("critic_z")
+        if physical is not None:
+            physical = physical[None].to(self.device).expand(len(scales), -1)
+        self.critic.eval()
+        q1, q2 = self.critic(
+            self._critic_token(token, candidates, references, physical),
+            candidates,
+            prop,
+        )
+        disagreement = (q1 - q2).abs()
+        scores = (
+            torch.minimum(q1, q2) - self.candidate_uncertainty_penalty * disagreement
+        )
+        best = int(scores.argmax())
+        improvement = float(scores[best] - scores[0])
+        selected = best if improvement > self.candidate_selection_margin else 0
+        self.last_command_diagnostics = {
+            "enabled": True,
+            "reason": "selected" if selected else "reference_fallback",
+            "selected_index": selected,
+            "selected_scale": float(scales[selected]),
+            "score_improvement": improvement,
+            "reference_score": float(scores[0]),
+            "selected_disagreement": float(disagreement[selected]),
+        }
+        return candidates[selected : selected + 1]
 
     def update(self, replay: list[dict], *, warmup: bool = False) -> dict:
         """Update from pre-action reference labels; terminal tails remain in TD."""
@@ -396,6 +465,9 @@ class AcceptanceLearner:
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
             "residual_output": self.residual_output,
+            "candidate_selection_count": self.candidate_selection_count,
+            "candidate_selection_margin": self.candidate_selection_margin,
+            "candidate_uncertainty_penalty": self.candidate_uncertainty_penalty,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -413,6 +485,14 @@ class AcceptanceLearner:
             raise ValueError("Checkpoint correction axes differ from the learner")
         if state.get("residual_output", False) != self.residual_output:
             raise ValueError("Checkpoint residual-output mode differs from the learner")
+        selection_contract = (
+            "candidate_selection_count",
+            "candidate_selection_margin",
+            "candidate_uncertainty_penalty",
+        )
+        for name in selection_contract:
+            if state.get(name, 0) != getattr(self, name):
+                raise ValueError("Checkpoint candidate-selection contract differs")
         for name in (
             "actor",
             "critic",
