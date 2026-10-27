@@ -101,6 +101,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 ``--deferred-online-updates`` 会先完成有界在线 rollout，再按合格 transition 数执行等量更新。它与 ``--residual-output`` 配合时，不同表征会在 critic 分化前从同一初始 policy 分布采集数据。每次运行还会对提议动作、控制器接受命令、奖励和终止字段计算哈希，避免意外的数据分布差异被忽略。该诊断用于区分表征价值与即时 on-policy 漂移，不是默认的 online RLT 调度。
 
+稀疏成功奖励还需要区分“有学习证据”和“全零回报”。``--require-positive-replay`` 在匹配 replay 没有任何正奖励 transition 时跳过 deferred actor／critic 更新，使 policy 保持 zero-residual reference，而不是跟随只见过零回报的随机初始化 critic 漂移。它属于独立协议，必须重跑相同协议的 action-reconstruction 对照，不能直接与未门控实验比较。
+
 首轮闭环门槛应在 ``effect_probe`` 中设置 ``--parameter-scope decoders``。逐点、正确差分及符号反转差分监督此时冻结 encoder 和重建头，只更新响应与几何 decoder；三者提供给 actor 的 token 与起始 ``joint`` readout 逐参数一致，后续控制差异不能再归因于 actor 表征变化。默认的 ``all`` scope 仍可用于表征学习诊断，但必须与 decoder-only 结果分开报告。
 
 候选动作条件化 critic 只是有预算上限的开发实验，不会因为接口实现就自动成为正结果。需要在相同 warmup 状态、在线交互量和评估布局下比较原始 latent critic、原始联合 readout 的候选条件化、同数据逐点监督和配对差分监督。BC 热身仍须通过动作保真度与 validation 成功门槛，才允许在线更新；仅有预测误差改善不能触发更大训练预算。

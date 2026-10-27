@@ -590,7 +590,10 @@ def summarize_followups(root: Path) -> list[dict]:
         seed = int(result["seed"])
         residual = bool(result.get("residual_output", False))
         deferred = bool(result.get("deferred_online_updates", False))
-        if deferred:
+        positive_gate = bool(result.get("require_positive_replay", False))
+        if deferred and positive_gate:
+            protocol = "positive_gated_deferred_residual"
+        elif deferred:
             protocol = "deferred_residual"
         elif residual:
             protocol = "zero_residual"

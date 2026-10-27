@@ -286,6 +286,11 @@ def deferred_update_summary(metrics: list[dict], replay: list[dict]) -> dict:
     }
 
 
+def skip_deferred_updates(replay: list[dict], require_positive: bool) -> bool:
+    """Prevent unsupported actor drift when sparse replay has no success."""
+    return require_positive and not any(float(row["reward"]) > 0 for row in replay)
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -623,12 +628,22 @@ def run(args):
                     )
                     torch.save(replay, args.output / f"{method}-replay.pt")
                 if getattr(args, "deferred_online_updates", False):
-                    deferred_metrics = [learner.update(replay) for _ in replay]
+                    skip_updates = skip_deferred_updates(
+                        replay,
+                        getattr(args, "require_positive_replay", False),
+                    )
+                    deferred_metrics = (
+                        [] if skip_updates else [learner.update(replay) for _ in replay]
+                    )
                     update_summary = deferred_update_summary(deferred_metrics, replay)
                     write_json(
                         args.output / f"{method}-deferred.json",
                         {
                             **update_summary,
+                            "updates_skipped": skip_updates,
+                            "skip_reason": (
+                                "no_positive_transition" if skip_updates else None
+                            ),
                             "trace_sha256": replay_trace_sha256(replay),
                             "last_update": deferred_metrics[-1]
                             if deferred_metrics
@@ -662,6 +677,7 @@ def run(args):
         "correction_axes": getattr(args, "correction_axes", None),
         "residual_output": getattr(args, "residual_output", False),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
+        "require_positive_replay": getattr(args, "require_positive_replay", False),
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -694,6 +710,11 @@ def main():
         "--deferred-online-updates",
         action="store_true",
         help="Collect the bounded rollout before applying matched online updates",
+    )
+    parser.add_argument(
+        "--require-positive-replay",
+        action="store_true",
+        help="Keep the residual at reference when sparse replay has no success",
     )
     parser.add_argument("--development-cases", type=Path)
     parser.add_argument(

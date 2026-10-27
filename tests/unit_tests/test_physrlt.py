@@ -20,6 +20,7 @@ from toolkits.rlt.physrlt.control import (
     deferred_update_summary,
     parse_external_readouts,
     replay_trace_sha256,
+    skip_deferred_updates,
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.data import (
@@ -353,11 +354,12 @@ def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
 def test_followup_summary_separates_actor_update_protocols(tmp_path):
     root = tmp_path / "medium"
     settings = (
-        ("control_direct_seed31", False, False, 1),
-        ("control_residual_seed31", True, False, 3),
-        ("control_deferred_seed31", True, True, 2),
+        ("control_direct_seed31", False, False, False, 1),
+        ("control_residual_seed31", True, False, False, 3),
+        ("control_deferred_seed31", True, True, False, 2),
+        ("control_gated_seed31", True, True, True, 4),
     )
-    for name, residual, deferred, successes in settings:
+    for name, residual, deferred, positive_gate, successes in settings:
         output = root / "physical" / name
         output.mkdir(parents=True)
         rows = []
@@ -381,6 +383,7 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                     "seed": 31,
                     "residual_output": residual,
                     "deferred_online_updates": deferred,
+                    "require_positive_replay": positive_gate,
                 }
             )
         )
@@ -401,6 +404,8 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
     assert keyed[("zero_residual", "joint")]["online_dev_successes"] == 3
     assert keyed[("deferred_residual", "joint")]["online_dev_successes"] == 2
     assert keyed[("deferred_residual", "joint")]["matched_collection_seeds"] == 0
+    gated = keyed[("positive_gated_deferred_residual", "joint")]
+    assert gated["online_dev_successes"] == 4
     assert (root / "followup_comparison.csv").is_file()
 
 
@@ -956,6 +961,9 @@ def test_deferred_update_summary_keeps_reward_and_drift_diagnostics():
     assert summary["reward_sum"] == 5
     assert summary["metrics"]["critic_loss"]["mean"] == 3
     assert summary["metrics"]["correction_rms"]["max"] == 0.03
+    assert skip_deferred_updates(replay, True) is False
+    assert skip_deferred_updates([{"reward": 0.0}], True) is True
+    assert skip_deferred_updates([{"reward": 0.0}], False) is False
 
 
 def test_control_reset_pairing_rejects_physics_drift(monkeypatch):
