@@ -163,6 +163,7 @@ def warmup(
         "relative",
         "zero_concat",
         "relative_concat",
+        "relative_unit_concat",
     }:
         raise ValueError("Unknown critic conditioning protocol")
     learner = AcceptanceLearner(
@@ -543,11 +544,15 @@ def run(args):
     relative_critics = set(getattr(args, "relative_critics", []))
     concat_control_critics = set(getattr(args, "concat_control_critics", []))
     concat_relative_critics = set(getattr(args, "concat_relative_critics", []))
+    unit_concat_relative_critics = set(
+        getattr(args, "unit_concat_relative_critics", [])
+    )
     critic_groups = (
         candidate_critics,
         relative_critics,
         concat_control_critics,
         concat_relative_critics,
+        unit_concat_relative_critics,
     )
     if sum(map(len, critic_groups)) != len(set().union(*critic_groups)):
         raise ValueError("Critic conditioning labels must be disjoint")
@@ -602,6 +607,8 @@ def run(args):
                 critic_conditioning = "candidate_zero_concat"
             elif method in concat_relative_critics:
                 critic_conditioning = "candidate_relative_concat"
+            elif method in unit_concat_relative_critics:
+                critic_conditioning = "candidate_relative_unit_concat"
             critic_bottleneck_dim = (
                 256 if critic_conditioning.endswith("_concat") else None
             )
@@ -819,6 +826,7 @@ def main():
     parser.add_argument("--relative-critics", nargs="*", default=[])
     parser.add_argument("--concat-control-critics", nargs="*", default=[])
     parser.add_argument("--concat-relative-critics", nargs="*", default=[])
+    parser.add_argument("--unit-concat-relative-critics", nargs="*", default=[])
     parser.add_argument(
         "--methods",
         nargs="+",

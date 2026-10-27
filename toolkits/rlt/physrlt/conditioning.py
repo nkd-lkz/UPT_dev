@@ -75,6 +75,7 @@ class CandidateConsequenceConditioner(nn.Module):
             "relative",
             "zero_concat",
             "relative_concat",
+            "relative_unit_concat",
         }:
             raise ValueError("Unknown candidate consequence conditioning mode")
         self.model = copy.deepcopy(model).eval().requires_grad_(False)
@@ -108,6 +109,25 @@ class CandidateConsequenceConditioner(nn.Module):
                 self.model, token, reference, self.method
             )
             result = torch.cat((token, physical - reference_physical), dim=-1)
+        elif self.mode == "relative_unit_concat":
+            reference_physical = physical_quantities(
+                self.model, token, reference, self.method
+            )
+            # The critic already receives the candidate action and therefore
+            # its magnitude. Normalize the active consequence coordinates so
+            # their direction is not hidden by the unit-scale base token.
+            active = (physical - reference_physical)[:, :68]
+            scale = active.square().mean(-1, keepdim=True).sqrt()
+            normalized = torch.where(
+                scale > 1e-6, active / scale.clamp_min(1e-6), torch.zeros_like(active)
+            )
+            result = torch.cat(
+                (
+                    token,
+                    torch.nn.functional.pad(normalized, (0, 128 - active.shape[-1])),
+                ),
+                dim=-1,
+            )
         else:
             if self.mode == "relative":
                 reference_physical = physical_quantities(

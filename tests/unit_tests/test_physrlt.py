@@ -222,6 +222,9 @@ def test_consequence_concat_preserves_the_complete_base_token():
     candidate = reference + 0.1
     control = CandidateConsequenceConditioner(model, "joint", mode="zero_concat")
     physical = CandidateConsequenceConditioner(model, "joint", mode="relative_concat")
+    unit_physical = CandidateConsequenceConditioner(
+        model, "joint", mode="relative_unit_concat"
+    )
     control_result = control(token, candidate, reference)
     physical_result = physical(token, candidate, reference)
     assert control_result.shape == physical_result.shape == (2, 256)
@@ -229,6 +232,12 @@ def test_consequence_concat_preserves_the_complete_base_token():
     torch.testing.assert_close(physical_result[:, :128], token)
     assert control_result[:, 128:].count_nonzero() == 0
     assert physical_result[:, 128:].count_nonzero() > 0
+    unit_result = unit_physical(token, candidate, reference)
+    torch.testing.assert_close(unit_result[:, :128], token)
+    torch.testing.assert_close(unit_result[:, 128:196].square().mean(-1), torch.ones(2))
+    assert unit_result[:, 196:].count_nonzero() == 0
+    unchanged = unit_physical(token, reference, reference)
+    assert unchanged[:, 128:].count_nonzero() == 0
 
 
 def test_external_readout_labels_are_explicit_and_unique(tmp_path):
