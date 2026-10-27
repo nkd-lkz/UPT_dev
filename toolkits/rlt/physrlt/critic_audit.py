@@ -87,7 +87,14 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
     )
     metadata = json.loads((run / f"{method}-readout.json").read_text())
     conditioning = checkpoint.get("critic_conditioning", "latent")
-    readout = FrozenReadout(Path(metadata["checkpoint"]))
+    readout = FrozenReadout(
+        Path(metadata["checkpoint"]),
+        consequence=(
+            Path(metadata["consequence_checkpoint"])
+            if metadata.get("consequence_checkpoint")
+            else None
+        ),
+    )
     conditioner = None
     if conditioning != "latent":
         if not conditioning.startswith("candidate_"):
@@ -140,8 +147,16 @@ def audit_replay(
             name: torch.stack([row[name] for row in rows]).to(learner.device)
             for name in ("z", "ref", "prop", "action")
         }
-        token = learner._critic_token(batch["z"], batch["action"], batch["ref"])
-        reference_token = learner._critic_token(batch["z"], batch["ref"], batch["ref"])
+        if "critic_z" in rows[0]:
+            batch["critic_z"] = torch.stack([row["critic_z"] for row in rows]).to(
+                learner.device
+            )
+        token = learner._critic_token(
+            batch["z"], batch["action"], batch["ref"], batch.get("critic_z")
+        )
+        reference_token = learner._critic_token(
+            batch["z"], batch["ref"], batch["ref"], batch.get("critic_z")
+        )
         base_squares += float(batch["z"].square().sum())
         conditioned_squares += float(token.square().sum())
         action_signal_squares += float((token - reference_token).square().sum())
@@ -153,12 +168,16 @@ def audit_replay(
         )
         policy_action = learner._policy_action(raw_action, batch["ref"]).clamp(-1, 1)
         policy_q = learner.critic.q1_forward(
-            learner._critic_token(batch["z"], policy_action, batch["ref"]),
+            learner._critic_token(
+                batch["z"], policy_action, batch["ref"], batch.get("critic_z")
+            ),
             policy_action,
             batch["prop"],
         )
         reference_q = learner.critic.q1_forward(
-            learner._critic_token(batch["z"], batch["ref"], batch["ref"]),
+            learner._critic_token(
+                batch["z"], batch["ref"], batch["ref"], batch.get("critic_z")
+            ),
             batch["ref"],
             batch["prop"],
         )

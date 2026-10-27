@@ -262,6 +262,29 @@ def test_critic_can_receive_a_separate_augmented_token(source):
         AcceptanceLearner("cpu", critic_bottleneck_dim=512)
 
 
+def test_critic_can_use_a_distinct_physical_token(source):
+    class Conditioner(torch.nn.Module):
+        def forward(self, token, action, reference, physical_token=None):
+            assert physical_token is not None
+            return torch.cat((token, physical_token), dim=-1)
+
+    replay = rows()
+    for row in replay:
+        row["critic_z"] = row["z"] + 1
+        row["next_critic_z"] = row["next_z"] + 1
+    learner = AcceptanceLearner(
+        "cpu",
+        critic_conditioner=Conditioner(),
+        critic_conditioning="dual_token",
+        critic_bottleneck_dim=512,
+    )
+    result = learner.update(replay)
+    assert result["critic_updates"] == 1
+    del replay[0]["next_critic_z"]
+    with pytest.raises(ValueError, match="inconsistently provides"):
+        learner.update(replay)
+
+
 def test_candidate_conditioning_cannot_change_bc_warmup(source):
     class Conditioner(torch.nn.Module):
         def forward(self, token, action, reference):

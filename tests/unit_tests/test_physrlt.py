@@ -18,6 +18,7 @@ from toolkits.rlt.physrlt.conditioning import (
 )
 from toolkits.rlt.physrlt.control import (
     deferred_update_summary,
+    merge_replay_views,
     parse_external_readouts,
     replay_trace_sha256,
     skip_deferred_updates,
@@ -238,6 +239,36 @@ def test_consequence_concat_preserves_the_complete_base_token():
     assert unit_result[:, 196:].count_nonzero() == 0
     unchanged = unit_physical(token, reference, reference)
     assert unchanged[:, 128:].count_nonzero() == 0
+    separate_source = unit_physical(token, candidate, reference, token + 1)
+    torch.testing.assert_close(separate_source[:, :128], token)
+    assert not torch.allclose(separate_source[:, 128:], unit_result[:, 128:])
+
+
+def test_fixed_replay_views_require_the_same_executed_trace():
+    base = [
+        {
+            "z": torch.zeros(128),
+            "ref": torch.zeros(10, 7),
+            "prop": torch.zeros(8),
+            "action": torch.zeros(10, 7),
+            "accepted_commands": torch.zeros(10, 7),
+            "next_z": torch.ones(128),
+            "next_ref": torch.zeros(10, 7),
+            "next_prop": torch.zeros(8),
+            "ticks": 10,
+            "terminal": False,
+            "reward": 0.0,
+        }
+    ]
+    physical = copy.deepcopy(base)
+    physical[0]["z"] += 2
+    merged = merge_replay_views(base, physical)
+    torch.testing.assert_close(merged[0]["z"], base[0]["z"])
+    torch.testing.assert_close(merged[0]["critic_z"], physical[0]["z"])
+    assert "critic_z" not in base[0]
+    physical[0]["action"][0, 0] = 0.1
+    with pytest.raises(ValueError, match="traces differ"):
+        merge_replay_views(base, physical)
 
 
 def test_external_readout_labels_are_explicit_and_unique(tmp_path):

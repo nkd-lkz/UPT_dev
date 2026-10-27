@@ -93,25 +93,31 @@ class CandidateConsequenceConditioner(nn.Module):
         token: torch.Tensor,
         actions: torch.Tensor,
         reference: torch.Tensor,
+        physical_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return a 128-D candidate-aware critic token."""
         if token.ndim != 2 or token.shape[-1] != 128:
             raise ValueError("Candidate conditioning requires a 128-D base token")
+        consequence_token = physical_token if physical_token is not None else token
+        if consequence_token.shape != token.shape:
+            raise ValueError("Physical and base tokens must share shape")
         if reference.shape != actions.shape:
             raise ValueError("Reference and candidate action chunks must match")
-        physical = physical_quantities(self.model, token, actions, self.method)
+        physical = physical_quantities(
+            self.model, consequence_token, actions, self.method
+        )
         if self.mode == "outcomes":
             result = physical
         elif self.mode == "zero_concat":
             result = torch.cat((token, torch.zeros_like(physical)), dim=-1)
         elif self.mode == "relative_concat":
             reference_physical = physical_quantities(
-                self.model, token, reference, self.method
+                self.model, consequence_token, reference, self.method
             )
             result = torch.cat((token, physical - reference_physical), dim=-1)
         elif self.mode == "relative_unit_concat":
             reference_physical = physical_quantities(
-                self.model, token, reference, self.method
+                self.model, consequence_token, reference, self.method
             )
             # The critic already receives the candidate action and therefore
             # its magnitude. Normalize the active consequence coordinates so
@@ -131,7 +137,7 @@ class CandidateConsequenceConditioner(nn.Module):
         else:
             if self.mode == "relative":
                 reference_physical = physical_quantities(
-                    self.model, token, reference, self.method
+                    self.model, consequence_token, reference, self.method
                 )
                 physical = physical - reference_physical
             compact = torch.nn.functional.adaptive_avg_pool1d(physical[:, None], 64)[

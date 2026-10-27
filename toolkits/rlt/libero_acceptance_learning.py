@@ -141,11 +141,18 @@ class AcceptanceLearner:
         token: torch.Tensor,
         action: torch.Tensor,
         reference: torch.Tensor,
+        physical_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build the critic state while preserving action gradients."""
         if self.critic_conditioner is None:
+            if physical_token is not None:
+                raise ValueError("Physical token requires an explicit conditioner")
             return token
-        conditioned = self.critic_conditioner(token, action, reference)
+        conditioned = (
+            self.critic_conditioner(token, action, reference, physical_token)
+            if physical_token is not None
+            else self.critic_conditioner(token, action, reference)
+        )
         if (
             conditioned.ndim != 2
             or conditioned.shape[0] != token.shape[0]
@@ -196,11 +203,20 @@ class AcceptanceLearner:
         )
         if not eligible:
             raise ValueError("No complete or terminal transitions for updating")
+        optional = ("critic_z", "next_critic_z")
+        for key in optional:
+            present = [key in row for row in eligible]
+            if any(present) and not all(present):
+                raise ValueError(f"Replay inconsistently provides {key}")
         rows = random.choices(eligible, k=128)
         batch = {
             key: torch.stack([r[key] for r in rows]).to(self.device)
             for key in ("z", "ref", "prop", "action", "next_z", "next_ref", "next_prop")
         }
+        for key in optional:
+            present = [key in row for row in rows]
+            if all(present):
+                batch[key] = torch.stack([row[key] for row in rows]).to(self.device)
         metrics = {}
         if not warmup:
             self.critic.train()
@@ -216,7 +232,12 @@ class AcceptanceLearner:
                     next_raw_action + noise, batch["next_ref"]
                 ).clamp(-1, 1)
                 q1, q2 = self.target_critic(
-                    self._critic_token(batch["next_z"], next_action, batch["next_ref"]),
+                    self._critic_token(
+                        batch["next_z"],
+                        next_action,
+                        batch["next_ref"],
+                        batch.get("next_critic_z"),
+                    ),
                     next_action,
                     batch["next_prop"],
                 )
@@ -227,7 +248,12 @@ class AcceptanceLearner:
                     torch.minimum(q1, q2),
                 )
             q1, q2 = self.critic(
-                self._critic_token(batch["z"], batch["action"], batch["ref"]),
+                self._critic_token(
+                    batch["z"],
+                    batch["action"],
+                    batch["ref"],
+                    batch.get("critic_z"),
+                ),
                 batch["action"],
                 batch["prop"],
             )
@@ -264,7 +290,12 @@ class AcceptanceLearner:
             )
             bc = (raw_action - bc_target).square().sum((-2, -1)).mean()
             q = self.critic.q1_forward(
-                self._critic_token(batch["z"], action.clamp(-1, 1), batch["ref"]),
+                self._critic_token(
+                    batch["z"],
+                    action.clamp(-1, 1),
+                    batch["ref"],
+                    batch.get("critic_z"),
+                ),
                 action.clamp(-1, 1),
                 batch["prop"],
             ).mean()

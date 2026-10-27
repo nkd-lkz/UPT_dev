@@ -49,6 +49,7 @@ class FrozenReadout:
         path: Path,
         mode: str = "latent",
         anchor: Path | None = None,
+        consequence: Path | None = None,
         *,
         expected_dataset: Path | None = None,
         expected_method: str | None = None,
@@ -84,6 +85,11 @@ class FrozenReadout:
             if anchor is not None
             else None
         )
+        self.consequence = (
+            FrozenReadout(consequence, expected_dataset=expected_dataset)
+            if consequence is not None
+            else None
+        )
         if (
             self.anchor is not None
             and Path(self.anchor.payload["dataset"]).resolve()
@@ -105,7 +111,9 @@ class FrozenReadout:
     ) -> CandidateConsequenceConditioner:
         """Build a frozen, action-conditioned consequence view for a critic."""
         return CandidateConsequenceConditioner(
-            self.model, self.payload["method"], mode=mode
+            (self.consequence or self).model,
+            (self.consequence or self).payload["method"],
+            mode=mode,
         )
 
     @torch.no_grad()
@@ -135,7 +143,14 @@ class FrozenReadout:
         if self.anchor is not None:
             prior = self.anchor.encode(prediction, prop)["z"][None]
             z = torch.cat((prior, z), dim=-1) @ projection(256)
-        return {"z": z[0], "ref": data["ref"][0].clamp(-1, 1), "prop": data["prop"][0]}
+        result = {
+            "z": z[0],
+            "ref": data["ref"][0].clamp(-1, 1),
+            "prop": data["prop"][0],
+        }
+        if self.consequence is not None:
+            result["critic_z"] = self.consequence.encode(prediction, prop)["z"]
+        return result
 
 
 def warmup(
@@ -193,6 +208,8 @@ def warmup(
             "next_ref": features["ref"].clone(),
             "next_prop": features["prop"].clone(),
         }
+        if "critic_z" in features:
+            replay_row["next_critic_z"] = features["critic_z"].clone()
         (train if row["split"] == "train" else validation).append(replay_row)
     initial = learner.following(validation)
     trace = []
@@ -330,6 +347,32 @@ def validate_fixed_replay(replay: list[dict]) -> dict:
     }
 
 
+def merge_replay_views(base: list[dict], consequence: list[dict]) -> list[dict]:
+    """Attach a physical-token view to an identical executed replay."""
+    base_summary = validate_fixed_replay(base)
+    consequence_summary = validate_fixed_replay(consequence)
+    if (
+        len(base) != len(consequence)
+        or base_summary["trace_sha256"] != consequence_summary["trace_sha256"]
+    ):
+        raise ValueError("Base and physical replay traces differ")
+    merged = []
+    for base_row, consequence_row in zip(base, consequence):
+        if (
+            base_row["z"].shape != consequence_row["z"].shape
+            or base_row["next_z"].shape != consequence_row["next_z"].shape
+        ):
+            raise ValueError("Base and physical replay token shapes differ")
+        merged.append(
+            base_row
+            | {
+                "critic_z": consequence_row["z"].clone(),
+                "next_critic_z": consequence_row["next_z"].clone(),
+            }
+        )
+    return merged
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -440,6 +483,8 @@ def rollout(
                     "reward": chunk_reward * 5,
                 }
             )
+            if "critic_z" in features:
+                replay[-1]["next_critic_z"] = next_features["critic_z"]
             if update_online:
                 updates.append(learner.update(replay))
         rewards += chunk_reward
@@ -533,6 +578,10 @@ def run(args):
     records = []
     external_readouts = parse_external_readouts(getattr(args, "external_readouts", []))
     fixed_replays = parse_external_readouts(getattr(args, "fixed_replays", []))
+    critic_readouts = parse_external_readouts(getattr(args, "critic_readouts", []))
+    fixed_critic_replays = parse_external_readouts(
+        getattr(args, "fixed_critic_replays", [])
+    )
     if fixed_replays and (
         set(fixed_replays) != set(args.methods)
         or not getattr(args, "deferred_online_updates", False)
@@ -540,6 +589,10 @@ def run(args):
         raise ValueError(
             "Fixed replay requires deferred updates and one explicit replay per method"
         )
+    if not set(critic_readouts).issubset(args.methods):
+        raise ValueError("Critic readout labels must also be requested methods")
+    if not set(fixed_critic_replays).issubset(fixed_replays):
+        raise ValueError("Fixed critic replay requires the same fixed base method")
     candidate_critics = set(getattr(args, "candidate_critics", []))
     relative_critics = set(getattr(args, "relative_critics", []))
     concat_control_critics = set(getattr(args, "concat_control_critics", []))
@@ -595,6 +648,7 @@ def run(args):
                 path,
                 mode=mode,
                 anchor=anchor,
+                consequence=critic_readouts.get(method),
                 expected_dataset=args.dataset,
                 expected_method=expected_method,
             )
@@ -626,6 +680,11 @@ def run(args):
                     "correction_limit": getattr(args, "correction_limit", None),
                     "correction_axes": getattr(args, "correction_axes", None),
                     "residual_output": getattr(args, "residual_output", False),
+                    "consequence_checkpoint": (
+                        str(critic_readouts[method])
+                        if method in critic_readouts
+                        else None
+                    ),
                 },
             )
             learner, fidelity = warmup(
@@ -676,12 +735,28 @@ def run(args):
                 if method in fixed_replays:
                     source = fixed_replays[method]
                     replay = torch.load(source, map_location="cpu", weights_only=True)
+                    critic_source = fixed_critic_replays.get(method)
+                    if critic_source is not None:
+                        critic_replay = torch.load(
+                            critic_source, map_location="cpu", weights_only=True
+                        )
+                        replay = merge_replay_views(replay, critic_replay)
                     fixed_summary = validate_fixed_replay(replay)
                     write_json(
                         args.output / f"{method}-fixed-replay.json",
                         {
                             "source": str(source),
                             "source_sha256": file_sha256(source),
+                            "critic_source": (
+                                str(critic_source)
+                                if critic_source is not None
+                                else None
+                            ),
+                            "critic_source_sha256": (
+                                file_sha256(critic_source)
+                                if critic_source is not None
+                                else None
+                            ),
                             **fixed_summary,
                         },
                     )
@@ -821,6 +896,20 @@ def main():
         default=[],
         metavar="LABEL=PATH",
         help="Use one immutable positive replay per method across optimizer seeds",
+    )
+    parser.add_argument(
+        "--critic-readouts",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Use a separate physical-token encoder for candidate consequences",
+    )
+    parser.add_argument(
+        "--fixed-critic-replays",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Attach matched physical-token views to immutable base replay",
     )
     parser.add_argument("--candidate-critics", nargs="*", default=[])
     parser.add_argument("--relative-critics", nargs="*", default=[])
