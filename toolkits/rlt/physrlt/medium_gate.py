@@ -598,6 +598,15 @@ def summarize_followups(root: Path) -> list[dict]:
             protocol = "direct_action"
         for gate_path in sorted(run.glob("*-gate.json")):
             method = gate_path.name.removesuffix("-gate.json")
+            trace = None
+            deferred_path = run / f"{method}-deferred.json"
+            if deferred_path.exists():
+                deferred_payload = json.loads(deferred_path.read_text())
+                trace = deferred_payload.get("trace_sha256")
+                if not trace or deferred_payload.get("transitions", 0) < 1:
+                    raise ValueError(
+                        f"Invalid deferred replay audit for {run.name}/{method}"
+                    )
             key = (protocol, method, seed)
             if key in attempts:
                 raise ValueError(
@@ -608,7 +617,20 @@ def summarize_followups(root: Path) -> list[dict]:
                 "gate": bool(json.loads(gate_path.read_text())["passed"]),
                 "rows": selected,
                 "run": run.name,
+                "trace": trace,
             }
+
+    trace_counts: dict[tuple[str, int, str], int] = defaultdict(int)
+    traces_by_seed: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for (protocol, _, seed), payload in attempts.items():
+        if payload["trace"] is not None:
+            trace_counts[(protocol, seed, payload["trace"])] += 1
+            traces_by_seed[(protocol, seed)].add(payload["trace"])
+    mismatched = {
+        key: values for key, values in traces_by_seed.items() if len(values) > 1
+    }
+    if mismatched:
+        raise ValueError(f"Deferred collection traces differ: {mismatched}")
 
     grouped: dict[tuple[str, str], list[tuple[int, dict]]] = defaultdict(list)
     for (protocol, method, seed), payload in attempts.items():
@@ -675,6 +697,11 @@ def summarize_followups(root: Path) -> list[dict]:
                 "online_validation_successes": validation[0],
                 "online_validation_episodes": validation[1],
                 "online_validation_rate_pct": validation[2],
+                "matched_collection_seeds": sum(
+                    payload["trace"] is not None
+                    and trace_counts[(protocol, seed, payload["trace"])] >= 2
+                    for seed, payload in group
+                ),
                 "runs": ",".join(payload["run"] for _, payload in sorted(group)),
             }
         )

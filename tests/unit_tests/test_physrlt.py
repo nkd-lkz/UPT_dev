@@ -381,12 +381,47 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
             )
         )
         (output / "joint-gate.json").write_text('{"passed":true}')
+        if deferred:
+            (output / "joint-deferred.json").write_text(
+                json.dumps(
+                    {
+                        "updates": 4,
+                        "transitions": 4,
+                        "trace_sha256": "a" * 64,
+                    }
+                )
+            )
     rows = summarize_followups(root)
     keyed = {(row["protocol"], row["method"]): row for row in rows}
     assert keyed[("direct_action", "joint")]["online_dev_successes"] == 1
     assert keyed[("zero_residual", "joint")]["online_dev_successes"] == 3
     assert keyed[("deferred_residual", "joint")]["online_dev_successes"] == 2
+    assert keyed[("deferred_residual", "joint")]["matched_collection_seeds"] == 0
     assert (root / "followup_comparison.csv").is_file()
+
+
+def test_followup_summary_rejects_unmatched_deferred_collection(tmp_path):
+    root = tmp_path / "medium"
+    for method, trace in (("action_recon", "a" * 64), ("joint", "b" * 64)):
+        output = root / "physical" / f"control_{method}_seed31"
+        output.mkdir(parents=True)
+        (output / "episodes.json").write_text("[]")
+        (output / "result.json").write_text(
+            json.dumps(
+                {
+                    "complete": True,
+                    "seed": 31,
+                    "residual_output": True,
+                    "deferred_online_updates": True,
+                }
+            )
+        )
+        (output / f"{method}-gate.json").write_text('{"passed":true}')
+        (output / f"{method}-deferred.json").write_text(
+            json.dumps({"transitions": 4, "trace_sha256": trace})
+        )
+    with pytest.raises(ValueError, match="Deferred collection traces differ"):
+        summarize_followups(root)
 
 
 def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):
