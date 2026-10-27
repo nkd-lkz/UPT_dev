@@ -307,6 +307,38 @@ def test_actor_can_use_a_distinct_physical_token(source):
         learner.update(replay)
 
 
+def test_actor_physical_gate_starts_from_zero_channel(source):
+    torch.manual_seed(41)
+    learner = AcceptanceLearner(
+        "cpu",
+        actor_bottleneck_dim=512,
+        actor_physical_gate=True,
+    )
+    row = rows()[0]
+    row["actor_z"] = torch.cat((row["z"], torch.randn_like(row["z"])))
+    first = learner.command(row, deterministic=True)
+    row["actor_z"][256:] = torch.randn(256) * 100
+    second = learner.command(row, deterministic=True)
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    assert learner.actor.physical_gate().item() == 0
+
+    state = learner.state_dict()
+    assert state["actor_physical_gate"] is True
+    AcceptanceLearner(
+        "cpu",
+        actor_bottleneck_dim=512,
+        actor_physical_gate=True,
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="physical-gate contract differs"):
+        AcceptanceLearner("cpu", actor_bottleneck_dim=512).load_state_dict(state)
+    with pytest.raises(ValueError, match="matching the base width"):
+        AcceptanceLearner(
+            "cpu",
+            actor_bottleneck_dim=256,
+            actor_physical_gate=True,
+        )
+
+
 def test_candidate_conditioning_cannot_change_bc_warmup(source):
     class Conditioner(torch.nn.Module):
         def forward(self, token, action, reference):

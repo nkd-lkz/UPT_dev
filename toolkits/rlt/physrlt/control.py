@@ -193,6 +193,7 @@ def warmup(
     residual_output: bool = False,
     critic_bottleneck_dim: int | None = None,
     actor_bottleneck_dim: int | None = None,
+    actor_physical_gate: bool = False,
     candidate_selection_count: int = 0,
     candidate_selection_margin: float = 0.0,
     candidate_uncertainty_penalty: float = 0.0,
@@ -230,6 +231,7 @@ def warmup(
         residual_output=residual_output,
         critic_bottleneck_dim=critic_bottleneck_dim,
         actor_bottleneck_dim=actor_bottleneck_dim,
+        actor_physical_gate=actor_physical_gate,
         candidate_selection_count=candidate_selection_count,
         candidate_selection_margin=candidate_selection_margin,
         candidate_uncertainty_penalty=candidate_uncertainty_penalty,
@@ -727,6 +729,7 @@ def run(args):
     actor_physical_outcomes_concat = set(
         getattr(args, "actor_physical_outcomes_concat", [])
     )
+    actor_physical_gates = set(getattr(args, "actor_physical_gates", []))
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -751,6 +754,8 @@ def run(args):
     actor_conditioned = set().union(*actor_groups)
     if not actor_conditioned.issubset(args.methods):
         raise ValueError("Actor conditioning labels must also be requested methods")
+    if not actor_physical_gates.issubset(actor_conditioned):
+        raise ValueError("Actor physical gates require an appended actor channel")
     actor_physical = actor_physical_concat | actor_physical_outcomes_concat
     if not actor_physical.issubset(critic_readouts):
         raise ValueError(
@@ -831,6 +836,7 @@ def run(args):
                     ),
                     "critic_conditioning": critic_conditioning,
                     "actor_conditioning": actor_conditioning,
+                    "actor_physical_gate": method in actor_physical_gates,
                     "correction_limit": getattr(args, "correction_limit", None),
                     "correction_axes": getattr(args, "correction_axes", None),
                     "residual_output": getattr(args, "residual_output", False),
@@ -866,6 +872,7 @@ def run(args):
                 getattr(args, "residual_output", False),
                 critic_bottleneck_dim,
                 actor_bottleneck_dim,
+                method in actor_physical_gates,
                 (
                     getattr(args, "candidate_selection_count", 0)
                     if method in conservative_selectors
@@ -1010,6 +1017,7 @@ def run(args):
         "correction_limit": getattr(args, "correction_limit", None),
         "correction_axes": getattr(args, "correction_axes", None),
         "residual_output": getattr(args, "residual_output", False),
+        "actor_physical_gates": getattr(args, "actor_physical_gates", []),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "require_positive_replay": getattr(args, "require_positive_replay", False),
         "conservative_selectors": getattr(args, "conservative_selectors", []),
@@ -1112,6 +1120,12 @@ def main():
         nargs="*",
         default=[],
         help="Append predicted reference-action physical outcomes to the actor token",
+    )
+    parser.add_argument(
+        "--actor-physical-gates",
+        nargs="*",
+        default=[],
+        help="Learn a zero-initialized scalar gate for an appended actor channel",
     )
     parser.add_argument("--conservative-selectors", nargs="*", default=[])
     parser.add_argument("--candidate-selection-count", type=int, default=5)

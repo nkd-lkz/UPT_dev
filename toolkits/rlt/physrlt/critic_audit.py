@@ -124,6 +124,7 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
         residual_output=checkpoint.get("residual_output", False),
         critic_bottleneck_dim=checkpoint.get("critic_bottleneck_dim"),
         actor_bottleneck_dim=checkpoint.get("actor_bottleneck_dim"),
+        actor_physical_gate=checkpoint.get("actor_physical_gate", False),
         candidate_selection_count=checkpoint.get("candidate_selection_count", 0),
         candidate_selection_margin=checkpoint.get("candidate_selection_margin", 0.0),
         candidate_uncertainty_penalty=checkpoint.get(
@@ -224,6 +225,11 @@ def audit_replay(
         "conditioned_token_rms": (conditioned_squares / conditioned_elements) ** 0.5,
         "action_conditioning_signal_rms": (action_signal_squares / conditioned_elements)
         ** 0.5,
+        "actor_physical_gate": (
+            float(learner.actor.physical_gate().detach().cpu())
+            if learner.actor_physical_gate
+            else None
+        ),
     }
 
 

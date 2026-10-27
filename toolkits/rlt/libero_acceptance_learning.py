@@ -11,6 +11,27 @@ import torch
 from torch import nn
 
 
+class _GatedActor(nn.Module):
+    """Admit an appended physical channel from an exact zero-channel start."""
+
+    def __init__(self, actor: nn.Module, base_dim: int) -> None:
+        super().__init__()
+        self.actor = actor
+        self.base_dim = base_dim
+        self.gate_logit = nn.Parameter(torch.zeros(()))
+
+    def forward(self, token: torch.Tensor, *args, **kwargs):
+        if token.shape[-1] != 2 * self.base_dim:
+            raise ValueError("Gated actor requires equal base and physical channels")
+        base, physical = token.split(self.base_dim, dim=-1)
+        token = torch.cat((base, self.physical_gate() * physical), dim=-1)
+        return self.actor(token, *args, **kwargs)
+
+    def physical_gate(self) -> torch.Tensor:
+        """Return the bounded scalar applied to the physical channel."""
+        return self.gate_logit.tanh()
+
+
 def td_target(
     rewards: torch.Tensor,
     ticks: torch.Tensor,
@@ -66,6 +87,7 @@ class AcceptanceLearner:
         residual_output: bool = False,
         critic_bottleneck_dim: int | None = None,
         actor_bottleneck_dim: int | None = None,
+        actor_physical_gate: bool = False,
         candidate_selection_count: int = 0,
         candidate_selection_margin: float = 0.0,
         candidate_uncertainty_penalty: float = 0.0,
@@ -86,6 +108,10 @@ class AcceptanceLearner:
             raise ValueError("Require a positive critic token width")
         if actor_bottleneck_dim < 1:
             raise ValueError("Require a positive actor token width")
+        if actor_physical_gate and actor_bottleneck_dim != 2 * bottleneck_dim:
+            raise ValueError(
+                "Gated actor requires one physical channel matching the base width"
+            )
         if critic_conditioner is None and critic_bottleneck_dim != bottleneck_dim:
             raise ValueError("A distinct critic token width requires a conditioner")
         if (critic_conditioner is None) != (critic_conditioning == "latent"):
@@ -117,6 +143,7 @@ class AcceptanceLearner:
         self.critic_conditioning = critic_conditioning
         self.critic_bottleneck_dim = critic_bottleneck_dim
         self.actor_bottleneck_dim = actor_bottleneck_dim
+        self.actor_physical_gate = actor_physical_gate
         self.correction_limit = correction_limit
         self.correction_axes = correction_axes
         self.residual_output = residual_output
@@ -129,7 +156,7 @@ class AcceptanceLearner:
             if critic_conditioner is not None
             else None
         )
-        self.actor = ActionTokenActor(
+        actor = ActionTokenActor(
             bottleneck_dim=actor_bottleneck_dim,
             action_dim=7,
             chunk_len=chunk_len,
@@ -139,8 +166,13 @@ class AcceptanceLearner:
             prop_dim=8,
         ).to(device)
         if self.residual_output:
-            nn.init.zeros_(self.actor.net[-1].weight)
-            nn.init.zeros_(self.actor.net[-1].bias)
+            nn.init.zeros_(actor.net[-1].weight)
+            nn.init.zeros_(actor.net[-1].bias)
+        self.actor = (
+            _GatedActor(actor, bottleneck_dim).to(device)
+            if actor_physical_gate
+            else actor
+        )
         self.critic = ActionTokenQCritic(
             bottleneck_dim=critic_bottleneck_dim,
             action_dim=7,
@@ -400,6 +432,8 @@ class AcceptanceLearner:
                 .sqrt()
                 .item(),
             )
+            if self.actor_physical_gate:
+                metrics["actor_physical_gate"] = self.actor.physical_gate().item()
             with torch.no_grad():
                 for model, target_model in (
                     (self.actor, self.target_actor),
@@ -480,6 +514,7 @@ class AcceptanceLearner:
             "critic_conditioning": self.critic_conditioning,
             "critic_bottleneck_dim": self.critic_bottleneck_dim,
             "actor_bottleneck_dim": self.actor_bottleneck_dim,
+            "actor_physical_gate": self.actor_physical_gate,
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
             "residual_output": self.residual_output,
@@ -501,6 +536,8 @@ class AcceptanceLearner:
             self.actor_bottleneck_dim
         ):
             raise ValueError("Checkpoint actor token width differs from the learner")
+        if state.get("actor_physical_gate", False) != self.actor_physical_gate:
+            raise ValueError("Checkpoint actor physical-gate contract differs")
         if state.get("correction_limit") != self.correction_limit:
             raise ValueError("Checkpoint correction limit differs from the learner")
         if state.get("correction_axes") != self.correction_axes:
