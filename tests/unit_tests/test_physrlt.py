@@ -346,10 +346,14 @@ def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
     assert keyed["Paired-effect Physical Token"]["success_rate_pct"] == 100
 
 
-def test_followup_summary_separates_direct_and_zero_residual_protocols(tmp_path):
+def test_followup_summary_separates_actor_update_protocols(tmp_path):
     root = tmp_path / "medium"
-    for residual, successes in ((False, 1), (True, 3)):
-        name = "control_residual_seed31" if residual else "control_direct_seed31"
+    settings = (
+        ("control_direct_seed31", False, False, 1),
+        ("control_residual_seed31", True, False, 3),
+        ("control_deferred_seed31", True, True, 2),
+    )
+    for name, residual, deferred, successes in settings:
         output = root / "physical" / name
         output.mkdir(parents=True)
         rows = []
@@ -372,6 +376,7 @@ def test_followup_summary_separates_direct_and_zero_residual_protocols(tmp_path)
                     "state": "complete",
                     "seed": 31,
                     "residual_output": residual,
+                    "deferred_online_updates": deferred,
                 }
             )
         )
@@ -380,6 +385,7 @@ def test_followup_summary_separates_direct_and_zero_residual_protocols(tmp_path)
     keyed = {(row["protocol"], row["method"]): row for row in rows}
     assert keyed[("direct_action", "joint")]["online_dev_successes"] == 1
     assert keyed[("zero_residual", "joint")]["online_dev_successes"] == 3
+    assert keyed[("deferred_residual", "joint")]["online_dev_successes"] == 2
     assert (root / "followup_comparison.csv").is_file()
 
 

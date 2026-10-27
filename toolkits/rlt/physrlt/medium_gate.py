@@ -589,7 +589,13 @@ def summarize_followups(root: Path) -> list[dict]:
         episodes = json.loads((run / "episodes.json").read_text())
         seed = int(result["seed"])
         residual = bool(result.get("residual_output", False))
-        protocol = "zero_residual" if residual else "direct_action"
+        deferred = bool(result.get("deferred_online_updates", False))
+        if deferred:
+            protocol = "deferred_residual"
+        elif residual:
+            protocol = "zero_residual"
+        else:
+            protocol = "direct_action"
         for gate_path in sorted(run.glob("*-gate.json")):
             method = gate_path.name.removesuffix("-gate.json")
             key = (protocol, method, seed)
