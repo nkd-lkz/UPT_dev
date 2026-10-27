@@ -118,6 +118,21 @@ def measured_snapshot(environment, object_keys: list[str] | None = None) -> dict
     }
 
 
+def measured_response_snapshot(environment) -> torch.Tensor:
+    """Read deployable joint, end-effector and gripper positions only."""
+    raw = environment.env.current_raw_obs[0]
+    response = np.concatenate(
+        (
+            np.asarray(raw["robot0_joint_pos"], dtype=np.float32),
+            np.asarray(raw["robot0_eef_pos"], dtype=np.float32),
+            np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32),
+        )
+    )
+    if response.shape != (12,) or not np.isfinite(response).all():
+        raise FloatingPointError("Expected finite 12-dimensional robot response")
+    return torch.from_numpy(response)
+
+
 def physical_reset_state(environment) -> np.ndarray:
     """Copy the numeric simulator state without process or case metadata."""
     state = environment.env.env.get_sim_state()[0]

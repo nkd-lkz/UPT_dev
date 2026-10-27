@@ -32,6 +32,7 @@ from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
     masked_loss,
+    measured_response_snapshot,
     metric_depth,
     transition_targets,
 )
@@ -60,6 +61,10 @@ from toolkits.rlt.physrlt.probe import (
     response_indices,
     run,
     tensor_data,
+)
+from toolkits.rlt.physrlt.response_adaptation import (
+    TranslationCalibrator,
+    control_correction,
 )
 from toolkits.rlt.pi05_baseline import env_commands
 
@@ -116,6 +121,45 @@ def test_gain_probe_does_not_pass_without_development_pairs():
         for gain, score in ((1.0, 1.0), (0.7, 0.7))
     ]
     assert not summarize_gain_probe(records, 0.7)["development_gate"]["passed"]
+
+
+def test_translation_calibrator_is_causal_bounded_and_has_negative_control():
+    commands = torch.zeros(10, 7)
+    commands[:, 0] = 0.1
+    low_response = torch.zeros(12)
+    low_response[7] = 0.006
+    adaptive = TranslationCalibrator(0.01)
+    reversed_control = TranslationCalibrator(0.01, reversed_control=True)
+    assert adaptive.correction() == reversed_control.correction() == 1.0
+    for calibrator in (adaptive, reversed_control):
+        calibrator.observe(commands, low_response)
+        assert calibrator.correction() == 1.0
+        calibrator.observe(commands, low_response)
+    assert adaptive.correction() == pytest.approx(1.3)
+    assert reversed_control.correction() == pytest.approx(0.8)
+
+
+def test_response_controls_separate_feedback_from_fixed_action_scaling():
+    calibrator = TranslationCalibrator(0.01)
+    assert control_correction("reference", calibrator, 0.7) == 1
+    assert control_correction("adaptive", calibrator, 0.7) == 1
+    assert control_correction("fixed_high", calibrator, 1.0) == 1.3
+    assert control_correction("oracle", calibrator, 0.85) == pytest.approx(1 / 0.85)
+    assert control_correction("oracle", calibrator, 1.5) == 0.8
+    with pytest.raises(ValueError, match="Unknown"):
+        control_correction("missing", calibrator, 0.7)
+
+
+def test_measured_response_snapshot_uses_deployable_robot_state_only():
+    raw = {
+        "robot0_joint_pos": np.arange(7, dtype=np.float32),
+        "robot0_eef_pos": np.arange(3, dtype=np.float32) + 7,
+        "robot0_gripper_qpos": np.arange(2, dtype=np.float32) + 10,
+    }
+    environment = SimpleNamespace(env=SimpleNamespace(current_raw_obs=[raw]))
+    torch.testing.assert_close(
+        measured_response_snapshot(environment), torch.arange(12).float()
+    )
 
 
 def synthetic_rows():
