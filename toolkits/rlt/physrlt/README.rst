@@ -120,3 +120,36 @@ This candidate-aware critic is a bounded development test, not a new result by c
 Each supervisor now claims the shared research GPU lease before launching, and the child inherits it until exit. The progress watchdog accepts episode/effect artifacts as well as stdout. Earlier pilot-v3 supervisors loaded the stdout-only watchdog before this correction and stopped healthy partial runs; the completed protocol-v2 episodes remain valid development data. ``prepare-control-recovery`` repeats only the incomplete mixed-token arm and the blocked reference stress screen at a new output directory. A process interruption is not an algorithmic negative result.
 
 The old pilot-v4 supervisor also interrupted the task-0 anchor run. ``prepare-anchor-recovery`` recovers its response and joint arms only; the completed task-3 run and task-0 reconstruction/geometry arms remain available. Recovery always uses a new directory and preserves the original failure record.
+
+Run a Medium-Difficulty Gate
+----------------------------
+
+Use one nonzero, non-saturated LIBERO-Pro cell before increasing seeds or tasks. ``medium_gate`` prepares task 5 with the object perturbation by default, matching the 40% frozen-reference cell in the baseline audit. It reserves states 0--5 for training, 6--9 for validation, 30--31 for paired-effect development, and 32--35 for closed-loop development. States 10--29 remain untouched until the configuration passes the development rule.
+
+Prepare the immutable cases and reviewed queue, then validate the generated commands before launching it:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.medium_gate prepare \
+     --root <experiment-root> \
+     --source <alphabrain-source> \
+     --assets <pi05-checkpoint> \
+     --python <libero-python> \
+     --code "$PWD" \
+     --gpu 2
+
+   python -m toolkits.rlt.experiment_queue \
+     --plan <experiment-root>/plan.json \
+     --output <experiment-root>/queue \
+     --check
+
+The plan first reproduces the frozen π₀.₅ and AlphaBrain RLT controls with 400 encoder updates, 1,500 actor BC updates and 1,040 online control ticks. It then compares a matched action-reconstruction readout, a physical latent, a pointwise consequence decoder and a paired-effect decoder under the same bounded residual actor. The paired-effect arm advances only when it gains a development success over the pointwise arm, or ties its successes while reducing capped mean ticks by at least 5% without a validation regression.
+
+After the queue finishes, build the common table from recorded episodes:
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.medium_gate summarize \
+     --root <experiment-root>
+
+``comparison.csv`` and ``comparison.md`` retain pending and negative rows as well as gains. A positive one-seed development gate authorizes seeds 47 and 59; it does not authorize a paper claim. Freeze the configuration before evaluating states 10--29 once.

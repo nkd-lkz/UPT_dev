@@ -104,3 +104,36 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 目前各 supervisor 在启动前申请共享研究 GPU 锁，子进程继承并持有到退出；进度检查同时读取回合／效果结果和终端日志。早先 pilot-v3 的守护进程启动时仍使用只检查 stdout 的旧逻辑，误停了仍在产出结果的实验；其中已完成、协议正确的回合仍属于有效开发数据。prepare-control-recovery 在新目录仅补跑未完成的 mixed-token 对照和被阻塞的 reference 扰动筛查。进程中断不能解释为算法负结果。
 
 旧 pilot-v4 守护进程也中断了 task 0 的 anchor 实验。prepare-anchor-recovery 只补跑其中响应和联合两组；已经完成的 task 3 及 task 0 的重建／几何两组结果仍保留。所有补跑使用新目录，不覆盖原始失败记录。
+
+在中等难度任务上筛选
+----------------------
+
+扩大 seed 或任务之前，先选择一个成功率非零且未饱和的 LIBERO-Pro 单元。``medium_gate`` 默认使用 task 5 的 object 扰动，对应 baseline 审计中冻结 reference 成功率为 40% 的单元。状态 0—5 用于训练，6—9 用于验证，30—31 用于配对后果开发，32—35 用于闭环开发；配置通过开发门槛前，不读取状态 10—29。
+
+先生成不可变的初态和实验队列，再检查生成的命令：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.medium_gate prepare \
+     --root <experiment-root> \
+     --source <alphabrain-source> \
+     --assets <pi05-checkpoint> \
+     --python <libero-python> \
+     --code "$PWD" \
+     --gpu 2
+
+   python -m toolkits.rlt.experiment_queue \
+     --plan <experiment-root>/plan.json \
+     --output <experiment-root>/queue \
+     --check
+
+该计划先在 400 步 encoder 更新、1,500 步 actor BC 更新和 1,040 个在线控制步的相同预算下复现冻结 π₀.₅ 与 AlphaBrain RLT 对照，再让 reference 约束的 residual actor 比较动作重建 readout、物理 latent、逐点后果 decoder 和配对后果 decoder。配对后果组只有在开发集上比逐点组多成功一次，或成功数相同且 capped mean ticks 至少降低 5%、验证表现不退化时，才进入下一阶段。
+
+队列结束后，从原始 episode 记录生成统一结果表：
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.medium_gate summarize \
+     --root <experiment-root>
+
+``comparison.csv`` 与 ``comparison.md`` 会同时保留待完成、负结果和提升结果。单 seed 开发门槛通过后才能增加 seed 47 和 59；这一结果本身不能作为论文结论。正式读取状态 10—29 前，必须先冻结配置。

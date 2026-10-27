@@ -3,7 +3,9 @@
 """Physical readout causality, units, split isolation and experiment contracts."""
 
 import copy
+import json
 from argparse import Namespace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -28,6 +30,8 @@ from toolkits.rlt.physrlt.effect_probe import (
 from toolkits.rlt.physrlt.effect_probe import (
     run as run_effect_probe,
 )
+from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
+from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
@@ -216,6 +220,81 @@ def test_small_experiment_writes_auditable_results(tmp_path):
     assert "NOT control improvement" in results[0]["interpretation"]
     assert (tmp_path / "probe/table.csv").is_file()
     assert (tmp_path / "probe/joint-seed3/readout.pt").is_file()
+
+
+def test_medium_gate_is_disjoint_and_pre_registered(tmp_path):
+    plan = prepare_medium_gate(
+        tmp_path / "medium",
+        tmp_path,
+        tmp_path,
+        tmp_path / "python",
+        Path.cwd(),
+        2,
+    )
+    inputs = tmp_path / "medium/inputs"
+    physical = json.loads((inputs / "physical.json").read_text())
+    control = json.loads((inputs / "control_development.json").read_text())
+    assert {row["state"] for row in physical} == {*range(10), 30, 31}
+    assert {row["state"] for row in control} == {32, 33, 34, 35}
+    assert not ({row["state"] for row in physical} & {row["state"] for row in control})
+    assert plan["benchmark_cell"] == "task5-object"
+    assert plan["budgets"]["online_control_ticks"] == 1040
+    assert plan["matched_attribution"]["effect_axis0"] == "pointwise_axis0"
+    names = [job["name"] for job in plan["jobs"]]
+    assert names[-1] == "physical-control"
+    assert "baseline-actor-eval" in names
+
+
+def test_medium_gate_summary_exposes_matched_gain(tmp_path):
+    root = tmp_path / "medium"
+    root.mkdir()
+    (root / "plan.json").write_text('{"benchmark_cell":"task5-object"}')
+    for relative, successes in (
+        ("baseline/reference_eval", 2),
+        ("baseline/actor_eval", 3),
+    ):
+        output = root / relative
+        output.mkdir(parents=True)
+        episodes = [
+            {"success": index < successes, "ticks": 100 + index} for index in range(4)
+        ]
+        (output / "episodes.json").write_text(json.dumps({"episodes": episodes}))
+    output = root / "physical/control_seed31"
+    output.mkdir(parents=True)
+    records = []
+    for method, successes, ticks in (
+        ("action_recon", 2, 200),
+        ("joint", 2, 180),
+        ("pointwise_axis0", 2, 200),
+        ("effect_axis0", 3, 220),
+    ):
+        records.extend(
+            {
+                "method": method,
+                "stage": "online_frozen_eval",
+                "split": "development",
+                "success": index < successes,
+                "ticks": ticks,
+            }
+            for index in range(4)
+        )
+        records.extend(
+            {
+                "method": method,
+                "stage": "online_frozen_eval",
+                "split": "validation",
+                "success": index < 3,
+                "ticks": ticks,
+            }
+            for index in range(4)
+        )
+    (output / "episodes.json").write_text(json.dumps(records))
+    rows = summarize_medium_gate(root)
+    keyed = {row["method"]: row for row in rows}
+    assert keyed["Physical latent"]["status"] == "advance"
+    assert keyed["Paired-effect Physical Token"]["delta_vs_matched_pp"] == 25
+    assert keyed["Paired-effect Physical Token"]["status"] == "advance"
+    assert (root / "comparison.csv").is_file()
 
 
 def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):
