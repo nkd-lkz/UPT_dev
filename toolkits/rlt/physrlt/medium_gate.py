@@ -349,6 +349,7 @@ def prepare(
                 "--methods",
                 "action_recon",
                 "joint",
+                "shuffled_joint",
                 "state_action_joint",
             ],
             dependencies=("physical-collection",),

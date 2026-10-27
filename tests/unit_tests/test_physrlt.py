@@ -243,6 +243,14 @@ def test_medium_gate_is_disjoint_and_pre_registered(tmp_path):
     names = [job["name"] for job in plan["jobs"]]
     assert names[-1] == "physical-control"
     assert "baseline-actor-eval" in names
+    probe = next(job for job in plan["jobs"] if job["name"] == "physical-probes")
+    methods = probe["argv"][probe["argv"].index("--methods") + 1 :]
+    assert methods == [
+        "action_recon",
+        "joint",
+        "shuffled_joint",
+        "state_action_joint",
+    ]
 
 
 def test_medium_gate_summary_exposes_matched_gain(tmp_path):
