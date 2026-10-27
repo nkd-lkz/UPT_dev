@@ -33,6 +33,7 @@ from toolkits.rlt.physrlt.effect_probe import (
 )
 from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
+from toolkits.rlt.physrlt.medium_gate import summarize_followups
 from toolkits.rlt.physrlt.model import PhysicalReadout
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
@@ -343,6 +344,43 @@ def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
     keyed = {row["method"]: row for row in rows}
     assert keyed["Physical latent"]["success_rate_pct"] == 100
     assert keyed["Paired-effect Physical Token"]["success_rate_pct"] == 100
+
+
+def test_followup_summary_separates_direct_and_zero_residual_protocols(tmp_path):
+    root = tmp_path / "medium"
+    for residual, successes in ((False, 1), (True, 3)):
+        name = "control_residual_seed31" if residual else "control_direct_seed31"
+        output = root / "physical" / name
+        output.mkdir(parents=True)
+        rows = []
+        for stage in ("warmup", "online_frozen_eval"):
+            rows.extend(
+                {
+                    "method": "joint",
+                    "stage": stage,
+                    "split": "development",
+                    "success": index < successes,
+                    "ticks": 100 + index,
+                }
+                for index in range(4)
+            )
+        (output / "episodes.json").write_text(json.dumps(rows))
+        (output / "result.json").write_text(
+            json.dumps(
+                {
+                    "complete": True,
+                    "state": "complete",
+                    "seed": 31,
+                    "residual_output": residual,
+                }
+            )
+        )
+        (output / "joint-gate.json").write_text('{"passed":true}')
+    rows = summarize_followups(root)
+    keyed = {(row["protocol"], row["method"]): row for row in rows}
+    assert keyed[("direct_action", "joint")]["online_dev_successes"] == 1
+    assert keyed[("zero_residual", "joint")]["online_dev_successes"] == 3
+    assert (root / "followup_comparison.csv").is_file()
 
 
 def test_response_redundancy_ablation_keeps_gripper_and_matched_capacity(tmp_path):

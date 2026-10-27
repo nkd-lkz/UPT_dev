@@ -559,6 +559,123 @@ def _physical_episodes(root: Path) -> list[dict]:
     return rows
 
 
+def _write_table(path: Path, rows: list[dict]) -> None:
+    """Write matching CSV and Markdown tables for a stable row schema."""
+    if not rows:
+        return
+    with path.with_suffix(".csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    headings = list(rows[0])
+    lines = [
+        "| " + " | ".join(headings) + " |",
+        "| " + " | ".join("---" for _ in headings) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(str(row[key]) for key in headings) + " |" for row in rows
+    )
+    path.with_suffix(".md").write_text("\n".join(lines) + "\n")
+
+
+def summarize_followups(root: Path) -> list[dict]:
+    """Aggregate completed small controls without merging actor protocols."""
+    attempts: dict[tuple[str, str, int], dict] = {}
+    for result_path in sorted((root / "physical").glob("control_*/result.json")):
+        run = result_path.parent
+        result = json.loads(result_path.read_text())
+        if not result.get("complete"):
+            continue
+        episodes = json.loads((run / "episodes.json").read_text())
+        seed = int(result["seed"])
+        residual = bool(result.get("residual_output", False))
+        protocol = "zero_residual" if residual else "direct_action"
+        for gate_path in sorted(run.glob("*-gate.json")):
+            method = gate_path.name.removesuffix("-gate.json")
+            key = (protocol, method, seed)
+            if key in attempts:
+                raise ValueError(
+                    f"Duplicate completed control for {protocol}/{method}/seed{seed}"
+                )
+            selected = [row for row in episodes if row.get("method") == method]
+            attempts[key] = {
+                "gate": bool(json.loads(gate_path.read_text())["passed"]),
+                "rows": selected,
+                "run": run.name,
+            }
+
+    grouped: dict[tuple[str, str], list[tuple[int, dict]]] = defaultdict(list)
+    for (protocol, method, seed), payload in attempts.items():
+        grouped[(protocol, method)].append((seed, payload))
+
+    def metrics(
+        rows: list[dict],
+    ) -> tuple[int | str, int | str, float | str, float | str]:
+        if not rows:
+            return "", "", "", ""
+        successes, episodes_count, mean_ticks = _aggregate(rows)
+        return (
+            successes,
+            episodes_count,
+            round(100 * successes / episodes_count, 2),
+            round(mean_ticks, 2),
+        )
+
+    output = []
+    for (protocol, method), group in sorted(grouped.items()):
+        warmup_dev, online_dev, online_validation = [], [], []
+        for _, payload in group:
+            for row in payload["rows"]:
+                destination = None
+                if row.get("stage") == "warmup" and row.get("split") == "development":
+                    destination = warmup_dev
+                elif (
+                    row.get("stage") == "online_frozen_eval"
+                    and row.get("split") == "development"
+                ):
+                    destination = online_dev
+                elif (
+                    row.get("stage") == "online_frozen_eval"
+                    and row.get("split") == "validation"
+                ):
+                    destination = online_validation
+                if destination is not None:
+                    destination.append(row)
+        warmup = metrics(warmup_dev)
+        development = metrics(online_dev)
+        validation = metrics(online_validation)
+        output.append(
+            {
+                "protocol": protocol,
+                "method": method,
+                "attempted_seeds": len(group),
+                "gate_passed_seeds": sum(payload["gate"] for _, payload in group),
+                "evaluated_seeds": len(
+                    {
+                        seed
+                        for seed, payload in group
+                        if any(
+                            row.get("stage") == "online_frozen_eval"
+                            for row in payload["rows"]
+                        )
+                    }
+                ),
+                "warmup_dev_successes": warmup[0],
+                "warmup_dev_episodes": warmup[1],
+                "online_dev_successes": development[0],
+                "online_dev_episodes": development[1],
+                "online_dev_rate_pct": development[2],
+                "online_dev_mean_ticks": development[3],
+                "online_validation_successes": validation[0],
+                "online_validation_episodes": validation[1],
+                "online_validation_rate_pct": validation[2],
+                "runs": ",".join(payload["run"] for _, payload in sorted(group)),
+            }
+        )
+    _write_table(root / "followup_comparison", output)
+    return output
+
+
 def summarize(root: Path) -> list[dict]:
     """Publish a single table that keeps pending and negative outcomes visible."""
     plan = json.loads((root / "plan.json").read_text())
@@ -677,6 +794,7 @@ def summarize(root: Path) -> list[dict]:
         "| " + " | ".join(str(row[key]) for key in headings) + " |" for row in result
     )
     (root / "comparison.md").write_text("\n".join(lines) + "\n")
+    summarize_followups(root)
     return result
 
 
