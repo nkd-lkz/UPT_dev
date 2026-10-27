@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
+from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, td_eligible
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
@@ -291,6 +291,40 @@ def skip_deferred_updates(replay: list[dict], require_positive: bool) -> bool:
     return require_positive and not any(float(row["reward"]) > 0 for row in replay)
 
 
+def validate_fixed_replay(replay: list[dict]) -> dict:
+    """Validate an immutable replay before using it across optimization seeds."""
+    if not replay:
+        raise ValueError("Fixed replay must contain transitions")
+    tensor_fields = (
+        "z",
+        "ref",
+        "prop",
+        "action",
+        "accepted_commands",
+        "next_z",
+        "next_ref",
+        "next_prop",
+    )
+    for index, row in enumerate(replay):
+        required = set(tensor_fields) | {"ticks", "terminal", "reward"}
+        missing = required - set(row)
+        if missing:
+            raise ValueError(f"Fixed replay row {index} lacks {sorted(missing)}")
+        if not all(
+            isinstance(row[name], torch.Tensor) and torch.isfinite(row[name]).all()
+            for name in tensor_fields
+        ):
+            raise ValueError(f"Fixed replay row {index} has invalid tensors")
+        if not td_eligible(row, chunk_len=10):
+            raise ValueError(f"Fixed replay row {index} is not TD eligible")
+    return {
+        "transitions": len(replay),
+        "positive_transitions": sum(float(row["reward"]) > 0 for row in replay),
+        "reward_sum": sum(float(row["reward"]) for row in replay),
+        "trace_sha256": replay_trace_sha256(replay),
+    }
+
+
 def paired_reset_delta(environment, case_id: str) -> float:
     """Require every control arm to start from the same current-run physics state.
 
@@ -493,6 +527,14 @@ def run(args):
     env.control_reset_states = {}
     records = []
     external_readouts = parse_external_readouts(getattr(args, "external_readouts", []))
+    fixed_replays = parse_external_readouts(getattr(args, "fixed_replays", []))
+    if fixed_replays and (
+        set(fixed_replays) != set(args.methods)
+        or not getattr(args, "deferred_online_updates", False)
+    ):
+        raise ValueError(
+            "Fixed replay requires deferred updates and one explicit replay per method"
+        )
     candidate_critics = set(getattr(args, "candidate_critics", []))
     relative_critics = set(getattr(args, "relative_critics", []))
     if candidate_critics & relative_critics:
@@ -604,29 +646,45 @@ def run(args):
                 write_json(args.output / "episodes.json", records)
             if gate and args.online_ticks:
                 replay, count = [], 0
-                for case in train_cases:
-                    budget = min(520, args.online_ticks - count)
-                    if budget <= 0:
-                        break
-                    row = rollout_case(
-                        env,
-                        reference,
-                        readout,
-                        learner,
-                        case,
-                        budget,
-                        replay,
-                        update_online=not getattr(
-                            args, "deferred_online_updates", False
-                        ),
-                    )
-                    count += row["ticks"]
-                    records.append(row | {"method": method, "stage": "online_train"})
-                    write_json(args.output / "episodes.json", records)
-                    torch.save(
-                        learner.state_dict(), args.output / f"{method}-online.pt"
+                if method in fixed_replays:
+                    source = fixed_replays[method]
+                    replay = torch.load(source, map_location="cpu", weights_only=True)
+                    fixed_summary = validate_fixed_replay(replay)
+                    write_json(
+                        args.output / f"{method}-fixed-replay.json",
+                        {
+                            "source": str(source),
+                            "source_sha256": file_sha256(source),
+                            **fixed_summary,
+                        },
                     )
                     torch.save(replay, args.output / f"{method}-replay.pt")
+                else:
+                    for case in train_cases:
+                        budget = min(520, args.online_ticks - count)
+                        if budget <= 0:
+                            break
+                        row = rollout_case(
+                            env,
+                            reference,
+                            readout,
+                            learner,
+                            case,
+                            budget,
+                            replay,
+                            update_online=not getattr(
+                                args, "deferred_online_updates", False
+                            ),
+                        )
+                        count += row["ticks"]
+                        records.append(
+                            row | {"method": method, "stage": "online_train"}
+                        )
+                        write_json(args.output / "episodes.json", records)
+                        torch.save(
+                            learner.state_dict(), args.output / f"{method}-online.pt"
+                        )
+                        torch.save(replay, args.output / f"{method}-replay.pt")
                 if getattr(args, "deferred_online_updates", False):
                     skip_updates = skip_deferred_updates(
                         replay,
@@ -679,6 +737,12 @@ def run(args):
         "residual_output": getattr(args, "residual_output", False),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "require_positive_replay": getattr(args, "require_positive_replay", False),
+        "fixed_replays": {
+            key: str(value)
+            for key, value in parse_external_readouts(
+                getattr(args, "fixed_replays", [])
+            ).items()
+        },
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -723,6 +787,13 @@ def main():
         nargs="*",
         default=[],
         metavar="LABEL=PATH",
+    )
+    parser.add_argument(
+        "--fixed-replays",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Use one immutable positive replay per method across optimizer seeds",
     )
     parser.add_argument("--candidate-critics", nargs="*", default=[])
     parser.add_argument("--relative-critics", nargs="*", default=[])

@@ -21,6 +21,7 @@ from toolkits.rlt.physrlt.control import (
     parse_external_readouts,
     replay_trace_sha256,
     skip_deferred_updates,
+    validate_fixed_replay,
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.data import (
@@ -354,12 +355,13 @@ def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
 def test_followup_summary_separates_actor_update_protocols(tmp_path):
     root = tmp_path / "medium"
     settings = (
-        ("control_direct_seed31", False, False, False, 1),
-        ("control_residual_seed31", True, False, False, 3),
-        ("control_deferred_seed31", True, True, False, 2),
-        ("control_gated_seed31", True, True, True, 4),
+        ("control_direct_seed31", False, False, False, False, 1),
+        ("control_residual_seed31", True, False, False, False, 3),
+        ("control_deferred_seed31", True, True, False, False, 2),
+        ("control_gated_seed31", True, True, True, False, 4),
+        ("control_fixed_seed31", True, True, True, True, 2),
     )
-    for name, residual, deferred, positive_gate, successes in settings:
+    for name, residual, deferred, positive_gate, fixed, successes in settings:
         output = root / "physical" / name
         output.mkdir(parents=True)
         rows = []
@@ -384,6 +386,7 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
                     "residual_output": residual,
                     "deferred_online_updates": deferred,
                     "require_positive_replay": positive_gate,
+                    "fixed_replays": {"joint": "replay.pt"} if fixed else {},
                 }
             )
         )
@@ -410,6 +413,9 @@ def test_followup_summary_separates_actor_update_protocols(tmp_path):
     assert gated["online_dev_successes"] == 4
     assert gated["zero_positive_replay_seeds"] == 1
     assert gated["updates_skipped_seeds"] == 1
+    assert (
+        keyed[("fixed_positive_replay_residual", "joint")]["online_dev_successes"] == 2
+    )
     assert (root / "followup_comparison.csv").is_file()
 
 
@@ -951,6 +957,13 @@ def test_deferred_control_keeps_replay_but_skips_inline_update(monkeypatch):
     changed = copy.deepcopy(replay)
     changed[0]["accepted_commands"][0, 0] = 1
     assert replay_trace_sha256(changed) != replay_trace_sha256(replay)
+    summary = validate_fixed_replay(replay)
+    assert summary["transitions"] == 1
+    assert summary["trace_sha256"] == replay_trace_sha256(replay)
+    invalid = copy.deepcopy(replay)
+    invalid[0]["ticks"] = 3
+    with pytest.raises(ValueError, match="not TD eligible"):
+        validate_fixed_replay(invalid)
 
 
 def test_deferred_update_summary_keeps_reward_and_drift_diagnostics():
