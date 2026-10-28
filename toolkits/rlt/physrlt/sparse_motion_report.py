@@ -112,10 +112,18 @@ def aggregate(paths: list[Path]) -> dict:
                 "reversed_improvement_vs_zero_pct": reversed_row[
                     "improvement_pct_mean"
                 ],
-                "passed": (
+                "sparse_candidate_passed": (
                     flow["improvement_pct_min"] > 5
-                    and flow["rmse_mm_mean"] < final["rmse_mm_mean"]
                     and flow["rmse_mm_mean"] < reversed_row["rmse_mm_mean"]
+                ),
+                "flow_advantage_observed": (
+                    flow["rmse_mm_mean"] < final["rmse_mm_mean"]
+                ),
+                "flow_advantage_gt_2pct": (
+                    100
+                    * (final["rmse_mm_mean"] - flow["rmse_mm_mean"])
+                    / final["rmse_mm_mean"]
+                    > 2
                 ),
             }
         )
