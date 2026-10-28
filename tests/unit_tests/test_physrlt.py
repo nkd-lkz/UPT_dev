@@ -83,6 +83,7 @@ from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
 from toolkits.rlt.physrlt.sparse_motion_report import aggregate
+from toolkits.rlt.physrlt.tick_selection import select_ticks
 from toolkits.rlt.pi05_baseline import env_commands
 
 
@@ -942,6 +943,32 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
     ] == pytest.approx(0.375)
     assert keyed[("1", "physical")]["updates_skipped"] is True
     assert keyed[("1", "physical")]["skip_reason"] == "no_positive_transition"
+
+
+def test_tick_selection_reads_training_geometry_only():
+    rows = []
+    for split, cases in (("train", 3), ("development", 1)):
+        for case in range(cases):
+            for tick, motion in ((10, 0.01), (20, 0.02), (30, 0.03)):
+                if split == "development":
+                    motion = 1.0 if tick == 10 else 0.0
+                geometry = torch.zeros(2, 70)
+                geometry[-1, 64] = motion
+                rows.append(
+                    {
+                        "split": split,
+                        "case_id": f"{split}-{case}",
+                        "start_tick": tick,
+                        "horizon_mask": torch.ones(2, dtype=torch.bool),
+                        "geometry": geometry,
+                    }
+                )
+    result = select_ticks(
+        {"rows": rows}, count=2, minimum_cases=2, minimum_spacing=10
+    )
+    assert result["selected_ticks"] == [20, 30]
+    assert result["training_cases"] == 3
+    assert result["role"].startswith("train-only")
 
 
 def test_followup_summary_separates_actor_update_protocols(tmp_path):
