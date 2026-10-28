@@ -29,6 +29,7 @@ from toolkits.rlt.physrlt.control import (
     validate_fixed_replay,
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
+from toolkits.rlt.physrlt.control_report import summarize as summarize_control_runs
 from toolkits.rlt.physrlt.critic_audit import binary_auc, discounted_success_returns
 from toolkits.rlt.physrlt.data import (
     check_split,
@@ -875,6 +876,67 @@ def test_medium_gate_summary_reads_parallel_control_shards(tmp_path):
     keyed = {row["method"]: row for row in rows}
     assert keyed["Physical latent"]["success_rate_pct"] == 100
     assert keyed["Paired-effect Physical Token"]["success_rate_pct"] == 100
+
+
+def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
+    runs = []
+    for axis, skipped in ((0, False), (1, True)):
+        run = tmp_path / f"axis{axis}"
+        run.mkdir()
+        rows = []
+        for method in ("zero", "physical"):
+            rows.extend(
+                {
+                    "method": method,
+                    "stage": "warmup",
+                    "split": "development",
+                    "success": index == 0,
+                    "ticks": 100 + index,
+                }
+                for index in range(2)
+            )
+            rows.extend(
+                {
+                    "method": method,
+                    "stage": "online_frozen_eval",
+                    "split": "validation",
+                    "success": index < axis + 1,
+                    "ticks": 120 + index,
+                }
+                for index in range(2)
+            )
+            (run / f"{method}-gate.json").write_text('{"passed": true}')
+            (run / f"{method}-deferred.json").write_text(
+                json.dumps(
+                    {
+                        "positive_transitions": 0 if skipped else 3,
+                        "updates": 0 if skipped else 20,
+                        "updates_skipped": skipped,
+                        "skip_reason": "no_positive_transition" if skipped else None,
+                    }
+                )
+            )
+        (run / "episodes.json").write_text(json.dumps(rows))
+        (run / "result.json").write_text(
+            json.dumps(
+                {
+                    "complete": True,
+                    "state": "complete",
+                    "seed": 31,
+                    "correction_axes": [axis],
+                    "online_tick_cap": 1040,
+                }
+            )
+        )
+        runs.append(run)
+    result = summarize_control_runs(runs)
+    assert len(result["rows"]) == 4
+    keyed = {(row["correction_axes"], row["method"]): row for row in result["rows"]}
+    assert keyed[("0", "physical")]["online_validation_episodes"] == 2
+    assert keyed[("0", "physical")]["online_validation_success_rate_pct"] == 50
+    assert keyed[("1", "physical")]["online_validation_success_rate_pct"] == 100
+    assert keyed[("1", "physical")]["updates_skipped"] is True
+    assert keyed[("1", "physical")]["skip_reason"] == "no_positive_transition"
 
 
 def test_followup_summary_separates_actor_update_protocols(tmp_path):
