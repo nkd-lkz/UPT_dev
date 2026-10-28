@@ -233,6 +233,7 @@ class TranslationCalibrator:
         alpha: float = 0.5,
         minimum_observations: int = 2,
         correction_bounds: tuple[float, float] = (0.8, 1.3),
+        gain_deadband: tuple[float, float] = (0.8, 1.2),
         reversed_control: bool = False,
     ) -> None:
         if (
@@ -246,6 +247,7 @@ class TranslationCalibrator:
         self.alpha = alpha
         self.minimum_observations = minimum_observations
         self.bounds = correction_bounds
+        self.deadband = gain_deadband
         self.reversed_control = reversed_control
         self.ema: float | None = None
         self.observations = 0
@@ -311,13 +313,20 @@ class AxisTranslationCalibrator:
         *,
         minimum_observations: int = 2,
         correction_bounds: tuple[float, float] = (0.8, 1.3),
+        gain_deadband: tuple[float, float] = (0.8, 1.2),
         reversed_control: bool = False,
         prior_energy: float = 1e-3,
     ) -> None:
-        if prior_energy <= 0:
-            raise ValueError("Axis calibration requires positive prior energy")
+        if (
+            prior_energy <= 0
+            or minimum_observations < 1
+            or not 0 < correction_bounds[0] <= 1 <= correction_bounds[1]
+            or not 0 < gain_deadband[0] < 1 < gain_deadband[1]
+        ):
+            raise ValueError("Invalid axis-calibration contract")
         self.minimum_observations = minimum_observations
         self.bounds = correction_bounds
+        self.deadband = gain_deadband
         self.reversed_control = reversed_control
         self.numerator = torch.full((3,), prior_energy)
         self.denominator = torch.full((3,), prior_energy)
@@ -351,7 +360,12 @@ class AxisTranslationCalibrator:
         if self.observations < self.minimum_observations:
             return np.ones(3)
         gain = self.gain()
-        correction = gain if self.reversed_control else 1 / np.maximum(gain, 0.1)
+        actionable = np.where(
+            (gain >= self.deadband[0]) & (gain <= self.deadband[1]), 1.0, gain
+        )
+        correction = (
+            actionable if self.reversed_control else 1 / np.maximum(actionable, 0.1)
+        )
         return np.clip(correction, *self.bounds)
 
 

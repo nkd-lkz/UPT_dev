@@ -158,7 +158,7 @@ def test_vector_calibrator_removes_the_known_issued_scale():
 def test_axis_calibrator_separates_anisotropic_execution_response():
     nominal = torch.tensor([0.1, 0.2, 0.3])
     issued_scale = np.array([1.3, 1.0, 0.8])
-    physical_gain = torch.tensor([0.5, 1.0, 1.2])
+    physical_gain = torch.tensor([0.5, 1.0, 1.3])
     measured = nominal * torch.as_tensor(issued_scale) * physical_gain
     adaptive = AxisTranslationCalibrator(prior_energy=1e-8)
     reversed_control = AxisTranslationCalibrator(
@@ -171,8 +171,16 @@ def test_axis_calibrator_separates_anisotropic_execution_response():
                 physical_gain,
                 atol=1e-6,
             )
-    np.testing.assert_allclose(adaptive.correction(), [1.3, 1.0, 1 / 1.2])
-    np.testing.assert_allclose(reversed_control.correction(), [0.8, 1.0, 1.2])
+    np.testing.assert_allclose(adaptive.correction(), [1.3, 1.0, 0.8])
+    np.testing.assert_allclose(reversed_control.correction(), [0.8, 1.0, 1.3])
+
+
+def test_axis_calibrator_deadband_preserves_nominal_axes():
+    calibrator = AxisTranslationCalibrator(prior_energy=1e-8)
+    nominal = torch.ones(3)
+    for _ in range(2):
+        calibrator.observe(nominal, torch.tensor([0.79, 0.81, 1.19]), np.ones(3))
+    np.testing.assert_allclose(calibrator.correction(), [1 / 0.79, 1, 1])
 
 
 def test_response_controls_separate_feedback_from_fixed_action_scaling():

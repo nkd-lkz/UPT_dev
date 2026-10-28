@@ -57,6 +57,8 @@ Passing ``--nominal-dataset`` replaces the global nominal score with a command- 
 
 ``--nominal-model diagonal`` replaces the flexible ridge with three fitted command-to-displacement coefficients. It is less expressive, but it must recover an absolute validation gain between 0.75 and 1.25 on every axis. This physically constrained control tests whether per-axis response adaptation beats uniform action scaling when only one execution axis changes.
 
+The causal calibrator accumulates excitation instead of forgetting earlier chunks. A validation-declared 0.8--1.2 deadband keeps nominal axes unchanged; only a sufficiently large, persistent response deviation can alter an axis. This prevents low-motion or contact phases from turning measurement noise into three-axis action amplification.
+
 After the offline ablation, use ``prepare-response-check`` to create a separate closed-loop screen. All three arms share the training seed, validation/development layouts and 1,500 actor BC updates. ``online-ticks`` is fixed to zero so Q+BC cannot amplify an unverified target difference. This screen checks whether redundant response supervision changes BC control; it is not a final success-rate experiment.
 
 ``balanced_joint`` retains all three response views but computes arm-joint, end-effector and gripper errors separately before averaging the three groups. It tests whether dimension-wise averaging overweights the seven joint coordinates. This remains multi-view auxiliary supervision; it does not present FK-related quantities as independent physical information.
