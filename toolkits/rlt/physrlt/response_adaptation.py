@@ -380,6 +380,10 @@ def control_correction(
     """Return the declared response-calibration control factor."""
     if method == "oracle":
         return float(np.clip(1 / execution_gain, 0.8, 1.3))
+    if method == "delayed_oracle":
+        if calibrator.observations < calibrator.minimum_observations:
+            return 1.0
+        return float(np.clip(1 / execution_gain, 0.8, 1.3))
     if method == "fixed_high":
         return 1.3
     if method == "delayed_high":
@@ -409,6 +413,7 @@ def rollout(
         "fixed_high",
         "delayed_high",
         "oracle",
+        "delayed_oracle",
     }:
         raise ValueError("Unknown response-adaptation method")
     calibrator = TranslationCalibrator(
@@ -436,6 +441,12 @@ def rollout(
             )
         elif method == "oracle":
             correction = np.clip(1 / execution_gains, 0.8, 1.3)
+        elif method == "delayed_oracle":
+            correction = (
+                np.ones(3)
+                if axis_calibrator.observations < axis_calibrator.minimum_observations
+                else np.clip(1 / execution_gains, 0.8, 1.3)
+            )
         elif method == "fixed_high":
             correction = np.full(3, 1.3)
         elif method == "delayed_high":
@@ -565,6 +576,7 @@ def run(args: argparse.Namespace) -> None:
         "fixed_high",
         "delayed_high",
         "oracle",
+        "delayed_oracle",
     }
     if (
         not methods

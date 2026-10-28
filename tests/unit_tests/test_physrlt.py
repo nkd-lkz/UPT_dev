@@ -189,8 +189,11 @@ def test_response_controls_separate_feedback_from_fixed_action_scaling():
     assert control_correction("adaptive", calibrator, 0.7) == 1
     assert control_correction("fixed_high", calibrator, 1.0) == 1.3
     assert control_correction("delayed_high", calibrator, 0.7) == 1
+    assert control_correction("delayed_oracle", calibrator, 0.7) == 1
     calibrator.observations = 2
     assert control_correction("delayed_high", calibrator, 0.7) == 1.3
+    assert control_correction("delayed_oracle", calibrator, 0.7) == 1.3
+    assert control_correction("delayed_oracle", calibrator, 1.5) == 0.8
     assert control_correction("oracle", calibrator, 0.85) == pytest.approx(1 / 0.85)
     assert control_correction("oracle", calibrator, 1.5) == 0.8
     with pytest.raises(ValueError, match="Unknown"):
