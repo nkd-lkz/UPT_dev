@@ -14,6 +14,11 @@ from pathlib import Path
 from toolkits.rlt.pi05_baseline import write_json
 
 
+def _mean_optional(values: list[float | None]) -> float | None:
+    available = [value for value in values if value is not None]
+    return statistics.mean(available) if available else None
+
+
 def aggregate(paths: list[Path]) -> dict:
     """Group matched runs and report every arm across all supplied seeds."""
     if not paths:
@@ -62,9 +67,9 @@ def aggregate(paths: list[Path]) -> dict:
                     "rmse_mm_std": statistics.pstdev(rmse),
                     "improvement_pct_mean": statistics.mean(improvements),
                     "improvement_pct_min": min(improvements),
-                    "event_auc_mean": statistics.mean(auc),
-                    "effect_cosine_mean": statistics.mean(
-                        value["effect_cosine"] for value in values
+                    "event_auc_mean": _mean_optional(auc),
+                    "effect_cosine_mean": _mean_optional(
+                        [value["effect_cosine"] for value in values]
                     ),
                     "sign_reversed_prediction_rmse_mm": statistics.mean(
                         value["sign_reversed_prediction_rmse_m"] * 1000
