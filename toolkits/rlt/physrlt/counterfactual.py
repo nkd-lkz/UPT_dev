@@ -79,7 +79,7 @@ def run(args: argparse.Namespace) -> None:
     ]
     readouts = {
         name: FrozenReadout(args.probes / f"{name}-seed31/readout.pt")
-        for name in ("joint", "shuffled_joint", "state_action_joint")
+        for name in args.readout_methods
     }
     env = LiberoProEnvironment()
     records, measurements = [], []
@@ -223,6 +223,11 @@ def main() -> None:
     parser.add_argument("--ticks", nargs="+", type=int, default=[40, 100, 160])
     parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--offset", type=float, default=0.1)
+    parser.add_argument(
+        "--readout-methods",
+        nargs="+",
+        default=("joint", "shuffled_joint", "state_action_joint"),
+    )
     parser.add_argument(
         "--split",
         choices=("train", "development", "confirmation"),

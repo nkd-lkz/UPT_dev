@@ -80,6 +80,7 @@ from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
 from toolkits.rlt.physrlt.sparse_motion import SparseObjectMotionHead
+from toolkits.rlt.physrlt.sparse_motion_report import aggregate
 from toolkits.rlt.pi05_baseline import env_commands
 
 
@@ -373,6 +374,39 @@ def test_sparse_object_motion_head_exposes_stable_gated_outputs():
     event_logit, conditional, expected = direct(token, commands, horizon=10)
     assert event_logit is None
     torch.testing.assert_close(conditional, expected)
+
+
+def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
+    paths = []
+    for seed, rmse in ((31, 0.008), (47, 0.007)):
+        payload = {
+            "state": "complete",
+            "axis": 1,
+            "readout_method": "flow_joint",
+            "evaluation_split": "confirmation",
+            "evaluation_dataset_sha256": "same",
+            "seed": seed,
+            "results": {
+                "gated_pair": {
+                    "zero_motion_rmse_m": 0.01,
+                    "rmse_m": rmse,
+                    "improvement_vs_zero_pct": 100 * (0.01 - rmse) / 0.01,
+                    "event_auc": 0.9,
+                    "effect_cosine": 0.5,
+                    "sign_reversed_prediction_rmse_m": 0.012,
+                }
+            },
+        }
+        path = tmp_path / f"seed{seed}.json"
+        path.write_text(json.dumps(payload))
+        paths.append(path)
+    result = aggregate(paths)
+    assert result["source_runs"] == 2
+    assert result["rows"][0]["rmse_mm_mean"] == pytest.approx(7.5)
+    assert result["rows"][0]["improvement_pct_min"] == pytest.approx(20)
+    assert result["rows"][0]["all_seeds_beat_zero"]
+    with pytest.raises(ValueError, match="repeats"):
+        aggregate([paths[0], paths[0]])
 
 
 def synthetic_rows():
