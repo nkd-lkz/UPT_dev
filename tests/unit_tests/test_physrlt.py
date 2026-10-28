@@ -54,6 +54,10 @@ from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize_followups
 from toolkits.rlt.physrlt.model import PhysicalReadout
+from toolkits.rlt.physrlt.object_motion_probe import (
+    dominant_object,
+    fit_feature,
+)
 from toolkits.rlt.physrlt.probe import (
     crossfitted_response_residual,
     execution_response_loss,
@@ -75,6 +79,7 @@ from toolkits.rlt.physrlt.response_adaptation import (
 from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
+from toolkits.rlt.physrlt.sparse_motion import SparseObjectMotionHead
 from toolkits.rlt.pi05_baseline import env_commands
 
 
@@ -306,6 +311,68 @@ def test_flow_path_feature_uses_fixed_generation_points_and_width():
         )
     with pytest.raises(ValueError, match="at least four"):
         flow_path_features(hidden[:3])
+
+
+def test_sparse_object_motion_probe_selects_training_object_and_crossfits():
+    def records(split: str) -> list[dict]:
+        result = []
+        for case in range(3):
+            for index in range(4):
+                moving = index % 2 == 0
+                value = 0.004 * (1 + 0.1 * case) if moving else 0.0
+                effect = torch.tensor([value, value / 2, 0.0])
+                branches = {}
+                for sign in (-1, 1):
+                    geometry = torch.zeros(2, 70)
+                    geometry[1, 64:67] = sign * effect / 2
+                    branches[sign] = {"geometry": geometry}
+                prop = torch.zeros(8)
+                prop[0] = float(moving)
+                feature_value = float(moving) + case * 0.1
+                result.append(
+                    {
+                        "case_id": f"{split}-{case}",
+                        "branches": branches,
+                        "row": {
+                            "prop": prop,
+                            "ref": torch.zeros(10, 7),
+                            "action_feature": torch.full((512,), feature_value),
+                            "flow_feature": torch.full((512,), feature_value),
+                            "prefix_feature": torch.full((512,), feature_value),
+                            "object_keys": ["active_pos", "static_pos"],
+                        },
+                    }
+                )
+        return result
+
+    train = records("train")
+    evaluation = records("development")
+    assert dominant_object(train) == 0
+    summary = fit_feature(train, evaluation, "flow_path", 0)
+    assert summary["evaluation_pairs"] == 12
+    assert summary["evaluation_moving_pairs"] == 6
+    assert summary["gated_rmse_m"] < summary["zero_motion_rmse_m"]
+    assert summary["event_auc"] == 1
+
+
+def test_sparse_object_motion_head_exposes_stable_gated_outputs():
+    token = torch.randn(2, 128)
+    commands = torch.randn(2, 10, 7)
+    gated = SparseObjectMotionHead(gated=True)
+    event_logit, conditional, expected = gated(token, commands, horizon=3)
+    assert event_logit.shape == (2,)
+    assert conditional.shape == (2, 3)
+    assert expected.shape == (2, 3)
+    torch.testing.assert_close(
+        expected, event_logit.sigmoid()[:, None] * conditional
+    )
+    expected.square().mean().backward()
+    assert all(parameter.grad is not None for parameter in gated.parameters())
+
+    direct = SparseObjectMotionHead(gated=False)
+    event_logit, conditional, expected = direct(token, commands, horizon=10)
+    assert event_logit is None
+    torch.testing.assert_close(conditional, expected)
 
 
 def synthetic_rows():
