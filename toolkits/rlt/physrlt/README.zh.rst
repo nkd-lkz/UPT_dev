@@ -49,7 +49,11 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 ``sparse_motion`` 将上述诊断实现为冻结 physical readout 上的小型可训练头。模型显式区分“物体是否运动”和“发生运动时的条件位移”，并可加入配对候选动作的几何效果监督。直接回归、事件门控、逐点监督、配对监督及符号反转配对五组严格共享训练与 development 初态、优化预算和目标物体。该结果只属于离线候选动作后果证据；冻结预测头尚未通过预先声明的独立闭环评测前，不能计为 policy 或 online RL 收益。
 
+打开评估结果前，先固定配对干预时刻。``tick_selection`` 只读取 train 布局的物体位移，按预先声明的布局覆盖数筛选候选，并限制相邻时刻的最小间隔；将输出的 ``selected_ticks`` 传给 ``counterfactual --ticks``。该结果记录测量数据的采集协议，不代表表征或控制性能有所提升。
+
 独立 confirmation 通过后，可以用 ``control --sparse-motion-heads LABEL=PATH`` 将冻结预测头给出的“候选动作相对 reference 的运动事件与位移”附加到 critic。``--sparse-zero-controls LABEL`` 保留相同的 256 维 critic 容量，但将物理通道替换为零。加载时会核对 sparse head 与当前 physical readout checkpoint 的摘要；版本不一致时在 rollout 前直接失败。
+
+每轮有限预算的闭环筛选结束后，运行 ``control_report --runs PATH ...``，将不同修正轴、方法、split 分母、平均 ticks、正 replay 数量及跳过更新的原因写入同一份 CSV 和 JSON。该工具只接受完整且不可变的 run，并始终分开 validation 与 development；它负责忠实汇总协议，不负责挑选最优方法，也不会把不同轴合并成成功率结论。
 
 离线消融完成后，使用 ``prepare-response-check`` 建立独立闭环筛选。三组共享训练 seed、验证／开发初态和 1,500 步 actor BC；``online-ticks`` 固定为 0，不用 Q＋BC 放大尚未确认的目标差异。该筛选只判断冗余响应目标是否影响 BC 控制，不是正式成功率实验。
 
