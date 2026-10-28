@@ -78,3 +78,35 @@ class PhysicalReadout(nn.Module):
             "response": torch.stack(response, dim=1),
             "geometry": torch.stack(geometry, dim=1),
         }
+
+
+class SparseObjectMotionHead(nn.Module):
+    """Predict a motion event and conditional 3-D object displacement."""
+
+    def __init__(self, gated: bool) -> None:
+        super().__init__()
+        self.gated = gated
+        self.network = nn.Sequential(
+            nn.Linear(128 + 70 + 1, 128),
+            nn.SiLU(),
+            nn.Linear(128, 4 if gated else 3),
+        )
+
+    def forward(
+        self, token: torch.Tensor, commands: torch.Tensor, horizon: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Return event logit, conditional motion, and expected displacement."""
+        if commands.ndim != 3 or commands.shape[-2:] != (10, 7):
+            raise ValueError("Sparse motion requires 10 x 7 command chunks")
+        if horizon not in HORIZONS:
+            raise ValueError("Sparse motion requires a supervised horizon")
+        prefix = commands.clone()
+        prefix[:, horizon:] = 0
+        time = token.new_full((len(token), 1), horizon / 10)
+        output = self.network(torch.cat((token, prefix.flatten(1), time), -1))
+        if not self.gated:
+            return None, output, output
+        event_logit = output[:, 0]
+        conditional = output[:, 1:]
+        expected = event_logit.sigmoid()[:, None] * conditional
+        return event_logit, conditional, expected

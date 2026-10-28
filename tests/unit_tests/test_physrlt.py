@@ -15,6 +15,7 @@ import torch
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
+    SparseMotionConditioner,
     differentiable_env_commands,
 )
 from toolkits.rlt.physrlt.control import (
@@ -53,7 +54,7 @@ from toolkits.rlt.physrlt.gain_probe import (
 from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize_followups
-from toolkits.rlt.physrlt.model import PhysicalReadout
+from toolkits.rlt.physrlt.model import PhysicalReadout, SparseObjectMotionHead
 from toolkits.rlt.physrlt.object_motion_probe import (
     dominant_object,
     fit_feature,
@@ -79,7 +80,6 @@ from toolkits.rlt.physrlt.response_adaptation import (
 from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
-from toolkits.rlt.physrlt.sparse_motion import SparseObjectMotionHead
 from toolkits.rlt.physrlt.sparse_motion_report import aggregate
 from toolkits.rlt.pi05_baseline import env_commands
 
@@ -374,6 +374,25 @@ def test_sparse_object_motion_head_exposes_stable_gated_outputs():
     event_logit, conditional, expected = direct(token, commands, horizon=10)
     assert event_logit is None
     torch.testing.assert_close(conditional, expected)
+
+
+def test_sparse_motion_conditioner_is_relative_and_has_zero_control():
+    token = torch.randn(2, 128)
+    reference = torch.zeros(2, 10, 7)
+    candidate = reference.clone()
+    candidate[:, :, 1] = 0.2
+    head = SparseObjectMotionHead(gated=True)
+    conditioned = SparseMotionConditioner(head)(token, candidate, reference)
+    control = SparseMotionConditioner(head, zero_channel=True)(
+        token, candidate, reference
+    )
+    assert conditioned.shape == control.shape == (2, 256)
+    torch.testing.assert_close(conditioned[:, :128], token)
+    torch.testing.assert_close(control[:, :128], token)
+    assert conditioned[:, 128:].abs().sum() > 0
+    assert control[:, 128:].count_nonzero() == 0
+    matched = SparseMotionConditioner(head)(token, reference, reference)
+    assert matched[:, 128:].count_nonzero() == 0
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):

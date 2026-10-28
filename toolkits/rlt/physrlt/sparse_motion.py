@@ -15,6 +15,7 @@ from torch import nn
 from toolkits.rlt.physrlt.control import FrozenReadout
 from toolkits.rlt.physrlt.critic_audit import binary_auc
 from toolkits.rlt.physrlt.effect_probe import file_sha256, paired_records
+from toolkits.rlt.physrlt.model import SparseObjectMotionHead
 from toolkits.rlt.physrlt.object_motion_probe import dominant_object, object_effect
 from toolkits.rlt.physrlt.probe import dataset_sha256, inputs
 from toolkits.rlt.pi05_baseline import write_json
@@ -27,34 +28,6 @@ ARMS = (
     "reversed_gated_pair",
 )
 OBJECT_SCALE_M = 0.01
-
-
-class SparseObjectMotionHead(nn.Module):
-    """Predict a motion event and conditional 3-D displacement for one object."""
-
-    def __init__(self, gated: bool) -> None:
-        super().__init__()
-        self.gated = gated
-        self.network = nn.Sequential(
-            nn.Linear(128 + 70 + 1, 128),
-            nn.SiLU(),
-            nn.Linear(128, 4 if gated else 3),
-        )
-
-    def forward(
-        self, token: torch.Tensor, commands: torch.Tensor, horizon: int
-    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
-        """Return event logit, conditional motion, and expected displacement."""
-        prefix = commands.clone()
-        prefix[:, horizon:] = 0
-        time = token.new_full((len(token), 1), horizon / 10)
-        output = self.network(torch.cat((token, prefix.flatten(1), time), -1))
-        if not self.gated:
-            return None, output, output
-        event_logit = output[:, 0]
-        conditional = output[:, 1:]
-        expected = event_logit.sigmoid()[:, None] * conditional
-        return event_logit, conditional, expected
 
 
 def _token(readout: FrozenReadout, record: dict) -> torch.Tensor:

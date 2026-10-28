@@ -9,6 +9,8 @@ import copy
 import torch
 from torch import nn
 
+from toolkits.rlt.physrlt.data import HORIZONS
+from toolkits.rlt.physrlt.model import SparseObjectMotionHead
 from toolkits.rlt.physrlt.probe import response_indices
 
 
@@ -151,4 +153,65 @@ class CandidateConsequenceConditioner(nn.Module):
             or not torch.isfinite(result).all()
         ):
             raise FloatingPointError("Invalid candidate consequence token")
+        return result
+
+
+class SparseMotionConditioner(nn.Module):
+    """Expose candidate-relative sparse object motion to a matched critic."""
+
+    def __init__(
+        self,
+        head: SparseObjectMotionHead,
+        *,
+        zero_channel: bool = False,
+    ) -> None:
+        super().__init__()
+        self.head = copy.deepcopy(head).eval().requires_grad_(False)
+        self.zero_channel = zero_channel
+
+    def train(self, mode: bool = True):
+        """Keep the frozen sparse predictor in evaluation mode."""
+        super().train(False)
+        self.head.eval()
+        return self
+
+    @staticmethod
+    def _quantities(
+        head: SparseObjectMotionHead,
+        token: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        commands = differentiable_env_commands(actions)
+        event_logit, conditional, expected = head(token, commands, HORIZONS[-1])
+        probability = (
+            event_logit.sigmoid()[:, None]
+            if event_logit is not None
+            else token.new_ones((len(token), 1))
+        )
+        return torch.cat((probability, conditional, expected), dim=-1)
+
+    def forward(
+        self,
+        token: torch.Tensor,
+        actions: torch.Tensor,
+        reference: torch.Tensor,
+        physical_token: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Append a fixed-width candidate-minus-reference consequence channel."""
+        if token.ndim != 2 or token.shape[-1] != 128:
+            raise ValueError("Sparse conditioning requires a 128-D base token")
+        consequence_token = physical_token if physical_token is not None else token
+        if consequence_token.shape != token.shape or actions.shape != reference.shape:
+            raise ValueError("Sparse conditioning inputs have incompatible shapes")
+        candidate = self._quantities(self.head, consequence_token, actions)
+        baseline = self._quantities(self.head, consequence_token, reference)
+        relative = candidate - baseline
+        if self.zero_channel:
+            relative = torch.zeros_like(relative)
+        result = torch.cat(
+            (token, torch.nn.functional.pad(relative, (0, 128 - relative.shape[-1]))),
+            dim=-1,
+        )
+        if result.shape != (len(token), 256) or not torch.isfinite(result).all():
+            raise FloatingPointError("Invalid sparse candidate consequence token")
         return result
