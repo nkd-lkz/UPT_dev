@@ -235,8 +235,8 @@ def _load_records(
 
 
 def run(args: argparse.Namespace) -> dict:
-    torch.set_num_threads(args.cpu_threads)
     """Train matched heads and retain checkpoints plus disjoint evaluation."""
+    torch.set_num_threads(args.cpu_threads)
     if args.output.exists():
         raise FileExistsError("Sparse-motion output must be a new directory")
     if not 1 <= args.steps <= 2000:
@@ -253,7 +253,7 @@ def run(args: argparse.Namespace) -> dict:
         evaluation_dataset,
         args.evaluation_measurements,
         args.evaluation_result,
-        "development",
+        args.evaluation_split,
     )
     if train_meta["axis"] != evaluation_meta["axis"]:
         raise ValueError("Training and evaluation intervention axes differ")
@@ -313,12 +313,13 @@ def run(args: argparse.Namespace) -> dict:
         "train_pairs": len(train),
         "evaluation_pairs": len(evaluation),
         "axis": train_meta["axis"],
+        "evaluation_split": args.evaluation_split,
         "object_index_selected_on_train_only": object_index,
         "object_key": train[0]["row"]["object_keys"][object_index],
         "results": results,
         "interpretation": (
-            "offline sparse candidate-effect prediction on disjoint development "
-            "layouts; not policy or online-RL evidence"
+            "offline sparse candidate-effect prediction on disjoint "
+            f"{args.evaluation_split} layouts; not policy or online-RL evidence"
         ),
     }
     write_json(args.output / "result.json", result)
@@ -340,6 +341,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--cpu-threads", type=int, choices=range(1, 9), default=1)
+    parser.add_argument(
+        "--evaluation-split",
+        choices=("development", "confirmation"),
+        default="development",
+    )
     parser.add_argument("--evaluation-dataset", type=Path)
     parser.add_argument("--motion-threshold-m", type=float, default=0.002)
     args = parser.parse_args()
