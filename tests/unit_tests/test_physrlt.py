@@ -68,6 +68,9 @@ from toolkits.rlt.physrlt.response_adaptation import (
     control_correction,
     response_context,
 )
+from toolkits.rlt.physrlt.response_adaptation import (
+    run as run_response_adaptation,
+)
 from toolkits.rlt.pi05_baseline import env_commands
 
 
@@ -162,6 +165,14 @@ def test_response_controls_separate_feedback_from_fixed_action_scaling():
     assert control_correction("oracle", calibrator, 1.5) == 0.8
     with pytest.raises(ValueError, match="Unknown"):
         control_correction("missing", calibrator, 0.7)
+
+
+def test_response_adaptation_rejects_the_wrong_environment_before_loading(
+    monkeypatch,
+):
+    monkeypatch.delenv("LIBERO_TYPE", raising=False)
+    with pytest.raises(RuntimeError, match="LIBERO_TYPE=pro"):
+        run_response_adaptation(SimpleNamespace())
 
 
 def test_nominal_response_regressor_uses_train_and_validation_only(tmp_path):

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -126,11 +127,7 @@ class NominalResponseRegressor:
             if nonzero.any()
             else float("nan")
         )
-        if (
-            validation_rmse >= zero_rmse
-            or not np.isfinite(cosine)
-            or cosine <= 0
-        ):
+        if validation_rmse >= zero_rmse or not np.isfinite(cosine) or cosine <= 0:
             raise RuntimeError(
                 "Conditional nominal displacement did not beat its zero-motion control"
             )
@@ -357,6 +354,8 @@ def rollout(
 
 def run(args: argparse.Namespace) -> None:
     """Evaluate matched calibration variants on declared development layouts."""
+    if os.environ.get("LIBERO_TYPE") != "pro":
+        raise RuntimeError("Response adaptation requires LIBERO_TYPE=pro")
     args.output.mkdir(parents=True, exist_ok=True)
     if (args.output / "result.json").exists():
         raise FileExistsError("Completed response-adaptation screens are immutable")
