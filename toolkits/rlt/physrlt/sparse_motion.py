@@ -238,6 +238,13 @@ def run(args: argparse.Namespace) -> dict:
     if readout.payload["method"] not in {"joint", "flow_joint"}:
         raise ValueError("Sparse motion requires a joint physical readout")
     object_index = dominant_object(train)
+    object_key = train[0]["row"]["object_keys"][object_index]
+    if any(
+        len(record["row"]["object_keys"]) <= object_index
+        or record["row"]["object_keys"][object_index] != object_key
+        for record in train + evaluation
+    ):
+        raise ValueError("Sparse-motion object identity changed across splits")
     args.output.mkdir(parents=True)
     results = {}
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -288,7 +295,7 @@ def run(args: argparse.Namespace) -> dict:
         "axis": train_meta["axis"],
         "evaluation_split": args.evaluation_split,
         "object_index_selected_on_train_only": object_index,
-        "object_key": train[0]["row"]["object_keys"][object_index],
+        "object_key": object_key,
         "results": results,
         "interpretation": (
             "offline sparse candidate-effect prediction on disjoint "
