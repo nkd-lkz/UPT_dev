@@ -341,11 +341,9 @@ def run(args: argparse.Namespace) -> dict:
     records = paired_records(
         dataset, measurements, result_meta["axis"], result_meta["offset"]
     )
-    readout = FrozenReadout(
-        args.checkpoint,
-        expected_dataset=args.dataset,
-        expected_method="joint",
-    )
+    readout = FrozenReadout(args.checkpoint, expected_dataset=args.dataset)
+    if readout.payload["method"] not in {"joint", "flow_joint"}:
+        raise ValueError("Paired-effect fitting requires a joint physical readout")
     evaluation_measurements = getattr(args, "evaluation_measurements", None)
     evaluation_paired_result = getattr(args, "evaluation_paired_result", None)
     if bool(evaluation_measurements) != bool(evaluation_paired_result):
