@@ -63,6 +63,8 @@ from toolkits.rlt.physrlt.probe import (
     tensor_data,
 )
 from toolkits.rlt.physrlt.response_adaptation import (
+    AxisTranslationCalibrator,
+    DiagonalResponseRegressor,
     NominalResponseRegressor,
     TranslationCalibrator,
     control_correction,
@@ -153,6 +155,22 @@ def test_vector_calibrator_removes_the_known_issued_scale():
     assert calibrator.correction() == pytest.approx(1.3)
 
 
+def test_axis_calibrator_separates_anisotropic_execution_response():
+    nominal = torch.tensor([0.1, 0.2, 0.3])
+    issued_scale = np.array([1.3, 1.0, 0.8])
+    physical_gain = torch.tensor([0.5, 1.0, 1.2])
+    measured = nominal * torch.as_tensor(issued_scale) * physical_gain
+    adaptive = AxisTranslationCalibrator()
+    reversed_control = AxisTranslationCalibrator(reversed_control=True)
+    for calibrator in (adaptive, reversed_control):
+        for _ in range(2):
+            np.testing.assert_allclose(
+                calibrator.observe(nominal, measured, issued_scale), physical_gain
+            )
+    np.testing.assert_allclose(adaptive.correction(), [1.3, 1.0, 1 / 1.2])
+    np.testing.assert_allclose(reversed_control.correction(), [0.8, 1.0, 1.2])
+
+
 def test_response_controls_separate_feedback_from_fixed_action_scaling():
     calibrator = TranslationCalibrator(0.01)
     assert control_correction("reference", calibrator, 0.7) == 1
@@ -213,6 +231,36 @@ def test_nominal_response_regressor_uses_train_and_validation_only(tmp_path):
     assert prediction[1:].abs().max() < 1e-6
     assert metadata["validation_rmse"] < metadata["zero_motion_validation_rmse"]
     assert metadata["validation_cosine"] > 0
+
+
+def test_diagonal_response_regressor_fits_physical_gain_without_development(tmp_path):
+    rows = []
+    physical_gain = torch.tensor([0.01, 0.02, 0.03])
+    for split, count in (("train", 30), ("validation", 12)):
+        for index in range(count):
+            commands = torch.zeros(10, 7)
+            commands[:, :3] = torch.tensor([0.1, 0.2, 0.3]) + index * 1e-3
+            displacement = commands[:, :3].sum(0) * physical_gain
+            response = torch.zeros(2, 12)
+            response[1, 7:10] = displacement
+            rows.append(
+                {
+                    "split": split,
+                    "commands": commands,
+                    "response": response,
+                    "horizon_mask": torch.tensor([True, True]),
+                }
+            )
+    poisoned = copy.deepcopy(rows[0])
+    poisoned.update(split="development")
+    poisoned["response"][1, 7:10] = 1e6
+    dataset = tmp_path / "transitions.pt"
+    torch.save({"rows": rows + [poisoned]}, dataset)
+    model, metadata = DiagonalResponseRegressor.fit(dataset)
+    prediction = model.predict(rows[0]["commands"], torch.zeros(8))
+    torch.testing.assert_close(prediction, rows[0]["response"][1, 7:10])
+    assert metadata["development_rows_read"] == 0
+    assert metadata["validation_gain"] == pytest.approx([1, 1, 1])
 
 
 def test_measured_response_snapshot_uses_deployable_robot_state_only():

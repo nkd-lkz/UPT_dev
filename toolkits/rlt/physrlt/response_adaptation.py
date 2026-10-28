@@ -150,6 +150,79 @@ class NominalResponseRegressor:
         return design @ self.weight
 
 
+class DiagonalResponseRegressor:
+    """Fit a physical diagonal map from translation command to displacement."""
+
+    def __init__(self, gain: torch.Tensor):
+        self.gain = gain
+
+    @classmethod
+    def fit(cls, dataset_path: Path) -> tuple[DiagonalResponseRegressor, dict]:
+        """Fit on training layouts and audit absolute gain on validation layouts."""
+        dataset = torch.load(dataset_path, map_location="cpu", weights_only=True)
+        selected = {
+            split: [
+                row
+                for row in dataset["rows"]
+                if row["split"] == split and row["horizon_mask"][1]
+            ]
+            for split in ("train", "validation")
+        }
+        if len(selected["train"]) < 20 or len(selected["validation"]) < 10:
+            raise ValueError(
+                "Diagonal response fitting needs separate train and validation rows"
+            )
+
+        def tensors(rows: list[dict]) -> tuple[torch.Tensor, torch.Tensor]:
+            commands = torch.stack([row["commands"][:10, :3].sum(0) for row in rows])
+            response = torch.stack([row["response"][1][7:10] for row in rows])
+            return commands.float(), response.float()
+
+        train_commands, train_response = tensors(selected["train"])
+        gain = (train_commands * train_response).sum(0) / train_commands.square().sum(
+            0
+        ).clamp_min(1e-8)
+        validation_commands, validation_response = tensors(selected["validation"])
+        predicted = validation_commands * gain
+        validation_rmse = float(
+            (predicted - validation_response).square().mean().sqrt()
+        )
+        zero_rmse = float(validation_response.square().mean().sqrt())
+        cosine = float(
+            torch.nn.functional.cosine_similarity(
+                predicted, validation_response, dim=1
+            ).mean()
+        )
+        validation_gain = (predicted * validation_response).sum(
+            0
+        ) / predicted.square().sum(0).clamp_min(1e-8)
+        if (
+            validation_rmse >= zero_rmse
+            or cosine <= 0
+            or not torch.all((validation_gain >= 0.75) & (validation_gain <= 1.25))
+        ):
+            raise RuntimeError(
+                "Diagonal nominal response failed its validation calibration gate"
+            )
+        model = cls(gain)
+        return model, {
+            "dataset": str(dataset_path),
+            "train_rows": len(selected["train"]),
+            "validation_rows": len(selected["validation"]),
+            "diagonal_gain": gain.tolist(),
+            "validation_rmse": validation_rmse,
+            "zero_motion_validation_rmse": zero_rmse,
+            "validation_cosine": cosine,
+            "validation_gain": validation_gain.tolist(),
+            "development_rows_read": 0,
+        }
+
+    def predict(self, commands: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+        """Apply the fitted diagonal physical response; proprioception is unused."""
+        del proprio
+        return commands[:10, :3].sum(0).float() * self.gain
+
+
 class TranslationCalibrator:
     """Estimate an actuation correction from preceding completed chunks."""
 
@@ -230,6 +303,64 @@ class TranslationCalibrator:
         return observed_gain
 
 
+class AxisTranslationCalibrator:
+    """Estimate independent translation-axis gains from completed chunks."""
+
+    def __init__(
+        self,
+        *,
+        alpha: float = 0.5,
+        minimum_observations: int = 2,
+        correction_bounds: tuple[float, float] = (0.8, 1.3),
+        reversed_control: bool = False,
+    ) -> None:
+        self.alpha = alpha
+        self.minimum_observations = minimum_observations
+        self.bounds = correction_bounds
+        self.reversed_control = reversed_control
+        self.numerator = torch.zeros(3)
+        self.denominator = torch.zeros(3)
+        self.observations = 0
+
+    def observe(
+        self,
+        nominal_displacement: torch.Tensor,
+        measured_displacement: torch.Tensor,
+        issued_scale: np.ndarray,
+    ) -> np.ndarray:
+        """Update diagonal gains after a measured response becomes available."""
+        expected = nominal_displacement.float() * torch.as_tensor(issued_scale)
+        measured = measured_displacement.float()
+        if not torch.isfinite(expected).all() or not torch.isfinite(measured).all():
+            return np.full(3, np.nan)
+        numerator = expected * measured
+        denominator = expected.square()
+        if self.observations == 0:
+            self.numerator = numerator
+            self.denominator = denominator
+        else:
+            self.numerator = self.alpha * numerator + (1 - self.alpha) * self.numerator
+            self.denominator = (
+                self.alpha * denominator + (1 - self.alpha) * self.denominator
+            )
+        self.observations += 1
+        return self.gain()
+
+    def gain(self) -> np.ndarray:
+        """Return the current diagonal gain estimate for logging."""
+        gain = self.numerator / self.denominator.clamp_min(1e-8)
+        gain = torch.where(self.denominator > 1e-6, gain, torch.ones_like(gain))
+        return gain.numpy(force=True)
+
+    def correction(self) -> np.ndarray:
+        """Return a bounded per-axis correction from preceding observations."""
+        if self.observations < self.minimum_observations:
+            return np.ones(3)
+        gain = self.gain()
+        correction = gain if self.reversed_control else 1 / np.maximum(gain, 0.1)
+        return np.clip(correction, *self.bounds)
+
+
 def control_correction(
     method: str, calibrator: TranslationCalibrator, execution_gain: float
 ) -> float:
@@ -252,10 +383,10 @@ def rollout(
     reference,
     case: dict,
     method: str,
-    execution_gain: float,
+    execution_gain: float | np.ndarray,
     nominal_score: float,
     limit: int,
-    nominal_model: NominalResponseRegressor | None = None,
+    nominal_model: NominalResponseRegressor | DiagonalResponseRegressor | None = None,
 ) -> dict:
     """Run a frozen reference with causal, oracle or deliberately wrong scaling."""
     if method not in {
@@ -270,6 +401,10 @@ def rollout(
     calibrator = TranslationCalibrator(
         nominal_score, reversed_control=method == "reversed"
     )
+    axis_calibrator = AxisTranslationCalibrator(reversed_control=method == "reversed")
+    execution_gains = np.broadcast_to(
+        np.asarray(execution_gain, dtype=np.float32), (3,)
+    ).copy()
     obs = env.reset(case)
     for _ in range(9):
         obs, _, _ = env.step(np.array([0, 0, 0, 0, 0, 0, -1], np.float32))
@@ -282,7 +417,20 @@ def rollout(
             obs, env.instruction, seed=case["seed"] * 1000 + ticks
         )
         commands = prediction["commands"].copy()
-        correction = control_correction(method, calibrator, execution_gain)
+        if nominal_model is None:
+            correction = control_correction(
+                method, calibrator, float(execution_gains[0])
+            )
+        elif method == "oracle":
+            correction = np.clip(1 / execution_gains, 0.8, 1.3)
+        elif method == "fixed_high":
+            correction = np.full(3, 1.3)
+        elif method == "delayed_high":
+            correction = np.full(3, 1.0 if axis_calibrator.observations < 2 else 1.3)
+        elif method in {"adaptive", "reversed"}:
+            correction = axis_calibrator.correction()
+        else:
+            correction = np.ones(3)
         issued = commands.copy()
         issued_translation = issued[:, :3] * correction
         issued_clip_fraction = float(np.mean(np.abs(issued_translation) > 1))
@@ -295,7 +443,7 @@ def rollout(
             else None
         )
         executed = issued.copy()
-        executed_translation = executed[:, :3] * execution_gain
+        executed_translation = executed[:, :3] * execution_gains
         execution_clip_fraction = float(np.mean(np.abs(executed_translation) > 1))
         executed[:, :3] = executed_translation.clip(-1, 1)
         before = measured_response_snapshot(env)
@@ -314,13 +462,15 @@ def rollout(
                 score = calibrator.observe(torch.from_numpy(issued), response)
             else:
                 score = realized_translation_score(torch.from_numpy(issued), response)
-                calibrator.observe_vector(
-                    nominal_displacement, response[7:10], correction
+                estimated_gain = axis_calibrator.observe(
+                    nominal_displacement,
+                    response[7:10],
+                    np.broadcast_to(correction, (3,)),
                 )
             diagnostics.append(
                 {
                     "end_tick": ticks,
-                    "correction": correction,
+                    "correction": np.asarray(correction).tolist(),
                     "response_score": score,
                     "nominal_displacement": (
                         nominal_displacement.tolist()
@@ -328,8 +478,16 @@ def rollout(
                         else None
                     ),
                     "measured_displacement": response[7:10].tolist(),
-                    "estimated_gain": calibrator.ema,
-                    "observations": calibrator.observations,
+                    "estimated_gain": (
+                        estimated_gain.tolist()
+                        if nominal_displacement is not None
+                        else calibrator.ema
+                    ),
+                    "observations": (
+                        axis_calibrator.observations
+                        if nominal_displacement is not None
+                        else calibrator.observations
+                    ),
                     "issued_clip_fraction": issued_clip_fraction,
                     "execution_clip_fraction": execution_clip_fraction,
                 }
@@ -340,7 +498,7 @@ def rollout(
         "case_id": case["id"],
         "split": case["split"],
         "method": method,
-        "execution_gain": execution_gain,
+        "execution_gain": execution_gains.tolist(),
         "success": success,
         "ticks": ticks,
         "reward": reward_sum,
@@ -373,9 +531,12 @@ def run(args: argparse.Namespace) -> None:
     reference = Pi05Reference(model)
     nominal_model, nominal_model_metadata = (None, None)
     if args.nominal_dataset is not None:
-        nominal_model, nominal_model_metadata = NominalResponseRegressor.fit(
-            args.nominal_dataset
+        model_cls = (
+            NominalResponseRegressor
+            if args.nominal_model == "ridge"
+            else DiagonalResponseRegressor
         )
+        nominal_model, nominal_model_metadata = model_cls.fit(args.nominal_dataset)
     declared_cases = json.loads(args.cases.read_text())
     cases = declared_cases[args.case_offset : args.case_offset + args.case_limit]
     if not cases or any(case["split"] != "development" for case in cases):
@@ -406,7 +567,9 @@ def run(args: argparse.Namespace) -> None:
                     reference,
                     case,
                     method,
-                    args.execution_gain,
+                    np.asarray(args.execution_gains)
+                    if args.execution_gains is not None
+                    else args.execution_gain,
                     args.nominal_score,
                     args.ticks,
                     nominal_model,
@@ -450,7 +613,11 @@ def run(args: argparse.Namespace) -> None:
         {
             "state": "complete",
             "summary": summary,
-            "execution_gain": args.execution_gain,
+            "execution_gain": (
+                args.execution_gains
+                if args.execution_gains is not None
+                else [args.execution_gain] * 3
+            ),
             "nominal_score": args.nominal_score,
             "nominal_model": nominal_model_metadata,
             "nominal_context_action": (
@@ -477,8 +644,12 @@ def main() -> None:
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--execution-gain", type=float, default=0.7)
+    parser.add_argument("--execution-gains", type=float, nargs=3)
     parser.add_argument("--nominal-score", type=float, required=True)
     parser.add_argument("--nominal-dataset", type=Path)
+    parser.add_argument(
+        "--nominal-model", choices=("ridge", "diagonal"), default="ridge"
+    )
     parser.add_argument("--ticks", type=int, default=520)
     parser.add_argument("--case-limit", type=int, default=2)
     parser.add_argument("--case-offset", type=int, default=0)
@@ -488,7 +659,8 @@ def main() -> None:
         default=["reference", "adaptive", "reversed", "oracle"],
     )
     args = parser.parse_args()
-    if not 0.2 <= args.execution_gain <= 1.5 or not 10 <= args.ticks <= 520:
+    gains = args.execution_gains or [args.execution_gain] * 3
+    if not all(0.2 <= gain <= 1.5 for gain in gains) or not 10 <= args.ticks <= 520:
         parser.error("Response-adaptation stress is outside the pilot contract")
     if (
         not 1 <= args.case_limit <= 6
