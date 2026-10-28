@@ -17,6 +17,7 @@ from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     SparseMotionConditioner,
     differentiable_env_commands,
+    load_sparse_motion_conditioner,
 )
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
@@ -374,6 +375,28 @@ def test_sparse_object_motion_head_exposes_stable_gated_outputs():
     event_logit, conditional, expected = direct(token, commands, horizon=10)
     assert event_logit is None
     torch.testing.assert_close(conditional, expected)
+
+
+def test_sparse_motion_checkpoint_is_bound_to_readout_version(tmp_path):
+    head = SparseObjectMotionHead(gated=True)
+    path = tmp_path / "sparse.pt"
+    torch.save(
+        {
+            "schema": 1,
+            "gated": True,
+            "arm": "gated_pair",
+            "readout_sha256": "readout-v1",
+            "model": head.state_dict(),
+        },
+        path,
+    )
+    conditioner, payload = load_sparse_motion_conditioner(
+        path, expected_readout_sha256="readout-v1"
+    )
+    assert isinstance(conditioner, SparseMotionConditioner)
+    assert payload["arm"] == "gated_pair"
+    with pytest.raises(ValueError, match="versions differ"):
+        load_sparse_motion_conditioner(path, expected_readout_sha256="readout-v2")
 
 
 def test_sparse_motion_conditioner_is_relative_and_has_zero_control():

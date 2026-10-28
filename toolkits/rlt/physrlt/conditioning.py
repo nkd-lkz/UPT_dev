@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -215,3 +216,23 @@ class SparseMotionConditioner(nn.Module):
         if result.shape != (len(token), 256) or not torch.isfinite(result).all():
             raise FloatingPointError("Invalid sparse candidate consequence token")
         return result
+
+
+def load_sparse_motion_conditioner(
+    path: Path,
+    *,
+    expected_readout_sha256: str | None = None,
+    zero_channel: bool = False,
+) -> tuple[SparseMotionConditioner, dict]:
+    """Load an immutable sparse head and validate its representation version."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if payload.get("schema") != 1 or "model" not in payload:
+        raise ValueError("Unsupported sparse-motion checkpoint schema")
+    if (
+        expected_readout_sha256 is not None
+        and payload.get("readout_sha256") != expected_readout_sha256
+    ):
+        raise ValueError("Sparse head and physical readout versions differ")
+    head = SparseObjectMotionHead(bool(payload.get("gated")))
+    head.load_state_dict(payload["model"], strict=True)
+    return SparseMotionConditioner(head, zero_channel=zero_channel), payload

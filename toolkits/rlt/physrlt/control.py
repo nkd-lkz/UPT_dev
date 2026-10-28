@@ -22,6 +22,7 @@ from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, td_eligib
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
+    load_sparse_motion_conditioner,
     physical_quantities,
 )
 from toolkits.rlt.physrlt.data import (
@@ -199,6 +200,7 @@ def warmup(
     candidate_selection_count: int = 0,
     candidate_selection_margin: float = 0.0,
     candidate_uncertainty_penalty: float = 0.0,
+    critic_conditioner_override: torch.nn.Module | None = None,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -208,7 +210,10 @@ def warmup(
         if critic_conditioning.startswith("candidate_")
         else None
     )
-    if critic_conditioning != "latent" and candidate_mode not in {
+    if critic_conditioner_override is not None:
+        if candidate_mode is not None or critic_conditioning != "sparse_relative_concat":
+            raise ValueError("Sparse critic conditioning conflicts with another mode")
+    elif critic_conditioning != "latent" and candidate_mode not in {
         "outcomes",
         "mixed",
         "relative",
@@ -225,7 +230,8 @@ def warmup(
         chunk_len=10,
         gripper_threshold=0,
         critic_conditioner=(
-            readout.candidate_conditioner(candidate_mode) if candidate_mode else None
+            critic_conditioner_override
+            or (readout.candidate_conditioner(candidate_mode) if candidate_mode else None)
         ),
         critic_conditioning=critic_conditioning,
         correction_limit=correction_limit,
@@ -707,6 +713,10 @@ def run(args):
     fixed_critic_replays = parse_external_readouts(
         getattr(args, "fixed_critic_replays", [])
     )
+    sparse_motion_heads = parse_external_readouts(
+        getattr(args, "sparse_motion_heads", [])
+    )
+    sparse_zero_controls = set(getattr(args, "sparse_zero_controls", []))
     if fixed_replays and (
         set(fixed_replays) != set(args.methods)
         or not getattr(args, "deferred_online_updates", False)
@@ -738,6 +748,7 @@ def run(args):
         concat_control_critics,
         concat_relative_critics,
         unit_concat_relative_critics,
+        set(sparse_motion_heads),
     )
     if sum(map(len, critic_groups)) != len(set().union(*critic_groups)):
         raise ValueError("Critic conditioning labels must be disjoint")
@@ -746,6 +757,8 @@ def run(args):
         raise ValueError("Candidate critic labels must also be requested methods")
     if not conservative_selectors.issubset(args.methods):
         raise ValueError("Conservative selector labels must also be requested methods")
+    if not sparse_zero_controls.issubset(sparse_motion_heads):
+        raise ValueError("Sparse zero controls require a sparse-motion head")
     actor_groups = (
         actor_zero_concat,
         actor_physical_concat,
@@ -811,6 +824,8 @@ def run(args):
                 expected_dataset=args.dataset,
                 expected_method=expected_method,
             )
+            sparse_conditioner = None
+            sparse_payload = None
             critic_conditioning = "latent"
             if method in candidate_critics:
                 critic_conditioning = "candidate_mixed"
@@ -822,6 +837,13 @@ def run(args):
                 critic_conditioning = "candidate_relative_concat"
             elif method in unit_concat_relative_critics:
                 critic_conditioning = "candidate_relative_unit_concat"
+            elif method in sparse_motion_heads:
+                critic_conditioning = "sparse_relative_concat"
+                sparse_conditioner, sparse_payload = load_sparse_motion_conditioner(
+                    sparse_motion_heads[method],
+                    expected_readout_sha256=file_sha256(path),
+                    zero_channel=method in sparse_zero_controls,
+                )
             critic_bottleneck_dim = (
                 256 if critic_conditioning.endswith("_concat") else None
             )
@@ -857,6 +879,15 @@ def run(args):
                         if method in critic_readouts
                         else None
                     ),
+                    "sparse_motion_checkpoint": (
+                        str(sparse_motion_heads[method])
+                        if method in sparse_motion_heads
+                        else None
+                    ),
+                    "sparse_motion_arm": (
+                        sparse_payload.get("arm") if sparse_payload is not None else None
+                    ),
+                    "sparse_zero_control": method in sparse_zero_controls,
                 },
             )
             learner, fidelity = warmup(
@@ -882,6 +913,7 @@ def run(args):
                 ),
                 getattr(args, "candidate_selection_margin", 0.0),
                 getattr(args, "candidate_uncertainty_penalty", 0.0),
+                critic_conditioner_override=sparse_conditioner,
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -1099,6 +1131,19 @@ def main():
         default=[],
         metavar="LABEL=PATH",
         help="Attach matched physical-token views to immutable base replay",
+    )
+    parser.add_argument(
+        "--sparse-motion-heads",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Condition a critic on a frozen sparse candidate-motion head",
+    )
+    parser.add_argument(
+        "--sparse-zero-controls",
+        nargs="*",
+        default=[],
+        help="Replace the matched sparse consequence channel with zeros",
     )
     parser.add_argument("--candidate-critics", nargs="*", default=[])
     parser.add_argument("--relative-critics", nargs="*", default=[])
