@@ -63,8 +63,10 @@ from toolkits.rlt.physrlt.probe import (
     tensor_data,
 )
 from toolkits.rlt.physrlt.response_adaptation import (
+    NominalResponseRegressor,
     TranslationCalibrator,
     control_correction,
+    response_context,
 )
 from toolkits.rlt.pi05_baseline import env_commands
 
@@ -139,15 +141,67 @@ def test_translation_calibrator_is_causal_bounded_and_has_negative_control():
     assert reversed_control.correction() == pytest.approx(0.8)
 
 
+def test_vector_calibrator_removes_the_known_issued_scale():
+    calibrator = TranslationCalibrator(0.01)
+    nominal = torch.tensor([0.1, 0.0, 0.0])
+    measured = nominal * 1.3 * 0.7
+    for _ in range(2):
+        assert calibrator.observe_vector(nominal, measured, 1.3) == pytest.approx(0.7)
+    assert calibrator.correction() == pytest.approx(1.3)
+
+
 def test_response_controls_separate_feedback_from_fixed_action_scaling():
     calibrator = TranslationCalibrator(0.01)
     assert control_correction("reference", calibrator, 0.7) == 1
     assert control_correction("adaptive", calibrator, 0.7) == 1
     assert control_correction("fixed_high", calibrator, 1.0) == 1.3
+    assert control_correction("delayed_high", calibrator, 0.7) == 1
+    calibrator.observations = 2
+    assert control_correction("delayed_high", calibrator, 0.7) == 1.3
     assert control_correction("oracle", calibrator, 0.85) == pytest.approx(1 / 0.85)
     assert control_correction("oracle", calibrator, 1.5) == 0.8
     with pytest.raises(ValueError, match="Unknown"):
         control_correction("missing", calibrator, 0.7)
+
+
+def test_nominal_response_regressor_uses_train_and_validation_only(tmp_path):
+    rows = []
+    for split, count, offset in (("train", 30, 0), ("validation", 12, 30)):
+        for index in range(count):
+            value = (index + offset) / 50
+            commands = torch.zeros(10, 7)
+            commands[:, 0] = 0.1
+            prop = torch.zeros(8)
+            prop[0] = value
+            score = 0.01 + 0.004 * value
+            response = torch.zeros(2, 12)
+            response[1, 7] = score
+            rows.append(
+                {
+                    "split": split,
+                    "commands": commands,
+                    "prop": prop,
+                    "response": response,
+                    "horizon_mask": torch.tensor([True, True]),
+                }
+            )
+    poisoned = copy.deepcopy(rows[0])
+    poisoned.update(split="development")
+    poisoned["response"][1, 7] = 1e6
+    dataset = tmp_path / "transitions.pt"
+    torch.save({"rows": rows + [poisoned]}, dataset)
+    model, metadata = NominalResponseRegressor.fit(dataset)
+    assert metadata["development_rows_read"] == 0
+    commands = torch.zeros(10, 7)
+    commands[:, 0] = 0.1
+    prop = torch.zeros(8)
+    prop[0] = 0.5
+    assert response_context(commands, prop).shape == (58,)
+    prediction = model.predict(commands, prop)
+    assert prediction[0] == pytest.approx(0.012, abs=5e-4)
+    assert prediction[1:].abs().max() < 1e-6
+    assert metadata["validation_rmse"] < metadata["zero_motion_validation_rmse"]
+    assert metadata["validation_cosine"] > 0
 
 
 def test_measured_response_snapshot_uses_deployable_robot_state_only():
