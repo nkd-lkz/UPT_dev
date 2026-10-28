@@ -242,11 +242,15 @@ def run(args: argparse.Namespace) -> dict:
     if not 1 <= args.steps <= 2000:
         raise ValueError("Sparse-motion pilot is bounded to 1--2000 updates")
     dataset = torch.load(args.dataset, map_location="cpu", weights_only=True)
+    evaluation_dataset_path = args.evaluation_dataset or args.dataset
+    evaluation_dataset = torch.load(
+        evaluation_dataset_path, map_location="cpu", weights_only=True
+    )
     train, train_meta = _load_records(
         dataset, args.train_measurements, args.train_result, "train"
     )
     evaluation, evaluation_meta = _load_records(
-        dataset,
+        evaluation_dataset,
         args.evaluation_measurements,
         args.evaluation_result,
         "development",
@@ -302,6 +306,8 @@ def run(args: argparse.Namespace) -> dict:
         "state": "complete",
         "revision": revision,
         "readout_method": readout.payload["method"],
+        "training_dataset_sha256": dataset_sha256(args.dataset),
+        "evaluation_dataset_sha256": dataset_sha256(evaluation_dataset_path),
         "seed": args.seed,
         "steps_per_arm": args.steps,
         "train_pairs": len(train),
@@ -334,6 +340,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--cpu-threads", type=int, choices=range(1, 9), default=1)
+    parser.add_argument("--evaluation-dataset", type=Path)
     parser.add_argument("--motion-threshold-m", type=float, default=0.002)
     args = parser.parse_args()
     if not 0.0005 <= args.motion_threshold_m <= 0.01:

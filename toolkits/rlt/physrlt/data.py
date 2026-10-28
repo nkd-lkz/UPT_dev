@@ -188,8 +188,8 @@ def check_split(rows: list[dict]) -> None:
     hashes = {}
     for row in rows:
         split = row["split"]
-        if split not in {"train", "validation", "development"}:
-            raise ValueError("Final-test data are not allowed in development fitting")
+        if split not in {"train", "validation", "development", "confirmation"}:
+            raise ValueError("Unknown physical-data split")
         # Same original layout across different perturbations stays in one split.
         identity = (row["suite"], row["task"], row["state_id"])
         if identity in owners and owners[identity] != split:

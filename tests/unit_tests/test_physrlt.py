@@ -446,6 +446,12 @@ def test_layout_split_ignores_seed_and_condition_names():
     duplicate["state_id"] = 49
     with pytest.raises(ValueError, match="simulator reset"):
         check_split(rows + [duplicate])
+    confirmation = copy.deepcopy(rows[0])
+    confirmation.update(state_id=50, reset_hash="confirmation", split="confirmation")
+    check_split(rows + [confirmation])
+    confirmation["split"] = "final-test"
+    with pytest.raises(ValueError, match="Unknown physical-data split"):
+        check_split(rows + [confirmation])
 
 
 def test_depth_is_metric_and_invalid_values_fail():

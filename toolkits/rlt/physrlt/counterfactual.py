@@ -223,7 +223,11 @@ def main() -> None:
     parser.add_argument("--ticks", nargs="+", type=int, default=[40, 100, 160])
     parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--offset", type=float, default=0.1)
-    parser.add_argument("--split", choices=("train", "development"), default="train")
+    parser.add_argument(
+        "--split",
+        choices=("train", "development", "confirmation"),
+        default="train",
+    )
     args = parser.parse_args()
     if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 6:
         parser.error(
