@@ -49,6 +49,8 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 ``sparse_motion`` 将上述诊断实现为冻结 physical readout 上的小型可训练头。模型显式区分“物体是否运动”和“发生运动时的条件位移”，并可加入配对候选动作的几何效果监督。直接回归、事件门控、逐点监督、配对监督及符号反转配对五组严格共享训练与 development 初态、优化预算和目标物体。该结果只属于离线候选动作后果证据；冻结预测头尚未通过预先声明的独立闭环评测前，不能计为 policy 或 online RL 收益。
 
+独立 confirmation 通过后，可以用 ``control --sparse-motion-heads LABEL=PATH`` 将冻结预测头给出的“候选动作相对 reference 的运动事件与位移”附加到 critic。``--sparse-zero-controls LABEL`` 保留相同的 256 维 critic 容量，但将物理通道替换为零。加载时会核对 sparse head 与当前 physical readout checkpoint 的摘要；版本不一致时在 rollout 前直接失败。
+
 离线消融完成后，使用 ``prepare-response-check`` 建立独立闭环筛选。三组共享训练 seed、验证／开发初态和 1,500 步 actor BC；``online-ticks`` 固定为 0，不用 Q＋BC 放大尚未确认的目标差异。该筛选只判断冗余响应目标是否影响 BC 控制，不是正式成功率实验。
 
 ``balanced_joint`` 保留三类响应，但分别计算机械臂关节、末端位置和夹爪位置误差，再对三组等权平均。它用于检查完整 12 维目标按维度平均时是否过度强调 7 维关节变化；该方法仍是多视角辅助监督，不把 FK 相关量解释为彼此独立的物理信息。
