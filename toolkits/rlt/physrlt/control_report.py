@@ -25,13 +25,31 @@ def _metrics(rows: list[dict]) -> dict:
             "episodes": 0,
             "success_rate_pct": None,
             "mean_ticks": None,
+            "candidate_nonreference_fraction_mean": None,
+            "candidate_score_improvement_mean": None,
         }
     successes = sum(bool(row["success"]) for row in rows)
+    nonreference = [
+        float(row["candidate_nonreference_fraction"])
+        for row in rows
+        if row.get("candidate_nonreference_fraction") is not None
+    ]
+    score_improvements = [
+        float(row["candidate_score_improvement_mean"])
+        for row in rows
+        if row.get("candidate_score_improvement_mean") is not None
+    ]
     return {
         "successes": successes,
         "episodes": len(rows),
         "success_rate_pct": 100 * successes / len(rows),
         "mean_ticks": statistics.mean(float(row["ticks"]) for row in rows),
+        "candidate_nonreference_fraction_mean": (
+            statistics.mean(nonreference) if nonreference else None
+        ),
+        "candidate_score_improvement_mean": (
+            statistics.mean(score_improvements) if score_improvements else None
+        ),
     }
 
 

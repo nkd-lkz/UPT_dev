@@ -902,6 +902,8 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
                     "split": "validation",
                     "success": index < axis + 1,
                     "ticks": 120 + index,
+                    "candidate_nonreference_fraction": 0.25 * (index + 1),
+                    "candidate_score_improvement_mean": 0.01 * (index + 1),
                 }
                 for index in range(2)
             )
@@ -935,6 +937,9 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
     assert keyed[("0", "physical")]["online_validation_episodes"] == 2
     assert keyed[("0", "physical")]["online_validation_success_rate_pct"] == 50
     assert keyed[("1", "physical")]["online_validation_success_rate_pct"] == 100
+    assert keyed[("1", "physical")][
+        "online_validation_candidate_nonreference_fraction_mean"
+    ] == pytest.approx(0.375)
     assert keyed[("1", "physical")]["updates_skipped"] is True
     assert keyed[("1", "physical")]["skip_reason"] == "no_positive_transition"
 
