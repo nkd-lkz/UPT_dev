@@ -64,6 +64,18 @@ def effect_errors(
     return rows
 
 
+def select_cases(
+    cases: list[dict], split: str, limit: int, start: int = 0
+) -> list[dict]:
+    """Select a bounded consecutive batch without reordering or repeating layouts."""
+    if not 1 <= limit <= 6 or start < 0:
+        raise ValueError("Use one to six cases and a nonnegative case start")
+    selected = [case for case in cases if case["split"] == split][start : start + limit]
+    if not selected:
+        raise ValueError("Selected case batch is empty")
+    return selected
+
+
 def run(args: argparse.Namespace) -> None:
     """Replay recorded prefixes before two bounded translation interventions."""
     args.output.mkdir(parents=True, exist_ok=True)
@@ -74,9 +86,9 @@ def run(args: argparse.Namespace) -> None:
     configure_source(args.source)
     torch.set_num_threads(4)
     dataset = torch.load(args.dataset, map_location="cpu", weights_only=True)
-    cases = [case for case in dataset["meta"]["cases"] if case["split"] == args.split][
-        : args.cases
-    ]
+    cases = select_cases(
+        dataset["meta"]["cases"], args.split, args.cases, getattr(args, "case_start", 0)
+    )
     readouts = {
         name: FrozenReadout(args.probes / f"{name}-seed31/readout.pt")
         for name in args.readout_methods
@@ -210,6 +222,8 @@ def run(args: argparse.Namespace) -> None:
             "offset": args.offset,
             "states_from": f"{args.split}-layout replay with new paired actions",
             "split": args.split,
+            "case_start": getattr(args, "case_start", 0),
+            "case_ids": [case["id"] for case in cases],
             "includes_absolute_origin_geometry": True,
             "no_training": True,
             "policy_calls": 0,
@@ -225,6 +239,7 @@ def main() -> None:
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--cases", type=int, default=2)
+    parser.add_argument("--case-start", type=int, default=0)
     parser.add_argument("--ticks", nargs="+", type=int, default=[40, 100, 160])
     parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--offset", type=float, default=0.1)
@@ -239,9 +254,9 @@ def main() -> None:
         default="train",
     )
     args = parser.parse_args()
-    if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 6:
+    if not 0 < args.offset <= 0.1 or not 1 <= args.cases <= 6 or args.case_start < 0:
         parser.error(
-            "Paired action screen is bounded to six cases and 0.1 native translation offset"
+            "Use up to six cases, a nonnegative case start and at most 0.1 native translation offset"
         )
     run(args)
 

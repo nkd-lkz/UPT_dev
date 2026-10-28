@@ -53,6 +53,12 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 随后用 ``goal_ranking`` 检查冻结 sparse head 能否将配对后果转化为有效的动作排序。程序比较训练集选定物体到声明目标物体的预测距离缩短量与实测距离缩短量，报告排序准确率和 regret，并排除低于阈值的物理平局。仿真绝对物体位置只用于定义该诊断标签，不进入 policy 输入；该实验用于隔离仍然缺失的目标对齐机制，不能视为可部署控制器或 online RL 结果。
 
+解释较高的配对排序分数前，先检查 ``constant_sign_accuracy_pct``：固定方向修正也可能解决方向分布单一的样本。``candidate_summary`` 只合并数据集、readout、目标、状态身份及绝对起点一致的多轴报告，分别报告可区分样本上的准确率、全样本 regret 和每个固定候选动作的结果。最优固定候选的上界使用评估结果选定，仅作为诊断参照。未完成的 10-tick 时间窗会被明确排除并记录。
+
+使用 ``sparse_motion --object-rank 1`` 检验第二个被操作物体；默认 rank 为零，保留原先选择最敏感物体的行为。物体排序仅依据训练布局中的配对作用强度。``--arms gated_pair reversed_gated_pair`` 可运行有限预算的方向对照，``state_action_joint`` 提供相同预算的简单输入对照。``evaluate_object_bank`` 比较两个或更多冻结预测头的作用预测，判断哪个物体受影响最大或没有物体移动，报告 macro recall、固定主要物体和固定无运动对照。这衡量的是物理作用对象辨别能力，尚不代表任务目标选择、policy 成功率或动态路由的计算效率。
+
+``--additional-train-pairs PATH ...`` 将其他干预轴的数据加入同一个预测头；每个目录必须包含已完成的 ``measurements.pt`` 和 ``result.json``，且干预幅度相同。重复的轴会在拟合前被拒绝。一个更新 2,000 步的共享头可以与两个各更新 1,000 步的独立头比较，保持总更新预算一致，但模型容量有所不同。Checkpoint 记录全部训练数据摘要与支持的干预轴。``sum_object_progress`` 对身份及起点一致的物体报告，等权相加源物体到目标的距离缩短量；该诊断尚未编码任务阶段或环境成功条件。``goal_ranking --score-mode reference_centered`` 在比较候选动作前减去每个预测头的 reference 进展预测，用于检查跨轴排序误差是否来自各头的分数偏移。
+
 独立 confirmation 通过后，可以用 ``control --sparse-motion-heads LABEL=PATH`` 将冻结预测头给出的“候选动作相对 reference 的运动事件与位移”附加到 critic。``--sparse-zero-controls LABEL`` 保留相同的 256 维 critic 容量，但将物理通道替换为零。加载时会核对 sparse head 与当前 physical readout checkpoint 的摘要；版本不一致时在 rollout 前直接失败。
 
 每轮有限预算的闭环筛选结束后，运行 ``control_report --runs PATH ...``，将不同修正轴、方法、split 分母、平均 ticks、正 replay 数量及跳过更新的原因写入同一份 CSV 和 JSON。该工具只接受完整且不可变的 run，并始终分开 validation 与 development；它负责忠实汇总协议，不负责挑选最优方法，也不会把不同轴合并成成功率结论。
@@ -152,6 +158,23 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 目前各 supervisor 在启动前申请共享研究 GPU 锁，子进程继承并持有到退出；进度检查同时读取回合／效果结果和终端日志。早先 pilot-v3 的守护进程启动时仍使用只检查 stdout 的旧逻辑，误停了仍在产出结果的实验；其中已完成、协议正确的回合仍属于有效开发数据。prepare-control-recovery 在新目录仅补跑未完成的 mixed-token 对照和被阻塞的 reference 扰动筛查。进程中断不能解释为算法负结果。
 
 旧 pilot-v4 守护进程也中断了 task 0 的 anchor 实验。prepare-anchor-recovery 只补跑其中响应和联合两组；已经完成的 task 3 及 task 0 的重建／几何两组结果仍保留。所有补跑使用新目录，不覆盖原始失败记录。
+
+更多诊断布局可用 ``counterfactual --cases 5 --case-start 0`` 和 ``--case-start 5`` 按固定顺序分批测量。起点只在选定 split 内计数，每个进程仍至多处理六个布局，并记录 case ID；每批使用独立输出目录。批次应在查看结果之前确定。
+
+检验执行响应与物体运动的耦合
+------------------------------
+
+使用 ``transport_probe`` 检验先预测末端执行响应、再预测物体运动能否改善成对后果预测。该实验将预测的三维末端响应乘以取值为 [0, 1] 的学习系数，近似局部运动传递关系。它不是通用接触规律；旋转、滑动和释放可能不满足这一近似。输入仅包含当前本体状态、reference 命令与冻结 readout 特征，未来实测响应和物体位置仅用于监督。
+
+以下命令读取 task 0 的 multiphase 实验目录，并写入新的不可覆盖结果目录。``development`` 对应两个开发布局，``confirmation`` 对应此前使用过的六个诊断布局；后者不是全新最终测试集。
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.transport_probe \
+     --root <task0-multiphase-root> \
+     --output <new-output-directory> --split confirmation
+
+报告比较直接预测、学习耦合系数、训练集均值系数、本体与动作耦合以及打乱标签。使用未来真值的 oracle 单独列示，不可部署。岭回归正则通过训练布局留一验证选择。误差区间按布局重采样，而非将相关 transition 视为独立样本；反复开发后的区间仍属探索性结果，也不能证明控制收益。小样本或全零奖励闭环结果表示证据不足，不应在充分匹配的实验之前据此淘汰表征方案。
 
 在中等难度任务上筛选
 ----------------------

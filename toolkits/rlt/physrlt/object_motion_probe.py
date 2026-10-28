@@ -18,8 +18,8 @@ FEATURES = ("state_action", "final_action", "flow_path", "prefix")
 RIDGES = (0.1, 1.0, 10.0, 100.0, 1000.0)
 
 
-def dominant_object(records: list[dict]) -> int:
-    """Select the most action-sensitive object using training pairs only."""
+def dominant_object(records: list[dict], rank: int = 0) -> int:
+    """Select an object by descending paired-effect energy on training layouts."""
     effects = []
     for record in records:
         geometry = (
@@ -32,7 +32,12 @@ def dominant_object(records: list[dict]) -> int:
     energy = torch.stack(effects).mean(0)
     if not torch.isfinite(energy).all() or float(energy.max()) <= 0:
         raise ValueError("Training pairs contain no measurable object effect")
-    return int(energy.argmax())
+    if not 0 <= rank < len(energy):
+        raise ValueError("Object motion rank is outside the scene")
+    index = int(torch.argsort(energy, descending=True, stable=True)[rank])
+    if float(energy[index]) <= 0:
+        raise ValueError("Selected training object has no measurable effect")
+    return index
 
 
 def object_effect(record: dict, object_index: int) -> torch.Tensor:

@@ -69,6 +69,12 @@ Choose paired-intervention timestamps before opening evaluation outcomes. ``tick
 
 ``goal_ranking`` then tests whether the frozen sparse head can turn those paired consequences into a useful action ordering. It compares the predicted and measured decrease in distance between the train-selected object and a declared target object, reports ranking accuracy and regret, and excludes sub-threshold physical ties. Absolute simulator object positions define this diagnostic label only; they are not policy inputs. This isolates the missing goal-alignment mechanism, but it is neither a deployable controller nor an online-RL result.
 
+Inspect ``constant_sign_accuracy_pct`` before interpreting a high pairwise score. A constant correction can solve a directionally biased sample. ``candidate_summary`` compares multiple axis reports only when their dataset, readout, target, state identities and absolute origins match. It reports resolvable states separately from all-state regret and includes every fixed candidate. The best fixed-candidate envelope uses evaluation outcomes and is only a diagnostic comparator. Incomplete 10-tick horizons are excluded explicitly.
+
+To test a second manipulated object, use ``sparse_motion --object-rank 1``; rank zero retains the original most-sensitive-object behavior. Ranks are selected by paired-effect energy on training layouts only. ``--arms gated_pair reversed_gated_pair`` provides a finite direction-control screen, and ``state_action_joint`` supplies the matched simple-input control. ``evaluate_object_bank`` compares the expected effects of two or more frozen heads, predicts which object is most affected (or none), and reports macro recall and fixed-dominant/no-motion controls. This measures physical-effect identity, not task-goal selection, policy success or runtime routing efficiency.
+
+``--additional-train-pairs PATH ...`` adds other intervention axes to the same head; each directory must contain completed ``measurements.pt`` and ``result.json`` artifacts with the same offset. Duplicate axes fail before fitting. A shared head receiving 2,000 updates can be compared with two separate heads receiving 1,000 each, retaining total optimizer work while changing model capacity. Checkpoints retain every training-artifact digest and the supported axes. ``sum_object_progress`` combines equally weighted source-to-target distance decreases for matching object reports; this diagnostic does not encode task stage or the environment's success predicate. ``goal_ranking --score-mode reference_centered`` subtracts each head's predicted reference progress before comparing candidates, testing whether per-head score offsets explain cross-axis ordering errors.
+
 After confirmation, ``control --sparse-motion-heads LABEL=PATH`` can append the frozen head's candidate-minus-reference event and displacement quantities to a critic. ``--sparse-zero-controls LABEL`` keeps the same 256-dimensional critic capacity but replaces that physical channel with zeros. The loader verifies that the sparse head was trained from the exact physical-readout checkpoint used by the control arm; a mismatched digest fails before rollout.
 
 After every bounded control screen, run ``control_report --runs PATH ...`` to preserve each correction axis, method, split denominator, mean ticks, positive replay count and skipped-update reason in one CSV and JSON report. The reporter accepts only complete immutable runs and keeps validation separate from development. It summarizes the declared experiment; it does not select a winning method or merge different axes into a success claim.
@@ -168,6 +174,23 @@ This candidate-aware critic is a bounded development test, not a new result by c
 Each supervisor now claims the shared research GPU lease before launching, and the child inherits it until exit. The progress watchdog accepts episode/effect artifacts as well as stdout. Earlier pilot-v3 supervisors loaded the stdout-only watchdog before this correction and stopped healthy partial runs; the completed protocol-v2 episodes remain valid development data. ``prepare-control-recovery`` repeats only the incomplete mixed-token arm and the blocked reference stress screen at a new output directory. A process interruption is not an algorithmic negative result.
 
 The old pilot-v4 supervisor also interrupted the task-0 anchor run. ``prepare-anchor-recovery`` recovers its response and joint arms only; the completed task-3 run and task-0 reconstruction/geometry arms remain available. Recovery always uses a new directory and preserves the original failure record.
+
+Larger diagnostic sets can be measured in consecutive batches with ``counterfactual --cases 5 --case-start 0`` and ``--case-start 5``. The offset counts only cases in the selected split. Each process still handles at most six cases, records its case IDs, and needs a separate output directory. Select the batches before examining their outcomes.
+
+Test Execution-to-Object Coupling
+--------------------------------
+
+Use ``transport_probe`` to test whether predicting end-effector response before object motion improves paired-effect prediction. The experimental prior multiplies a predicted three-dimensional response by a learned coefficient bounded to [0, 1]. It approximates local transport, not a universal contact law; rotation, sliding and release can violate it. Current state, reference commands and frozen readout features form the inputs. Measured future responses and object positions supply labels only.
+
+The command below uses the task-0 multiphase artifact layout and writes a new, immutable output directory. Select ``development`` for the two development layouts or ``confirmation`` for the six previously used diagnostic layouts; the latter is not a pristine final test set.
+
+.. code-block:: bash
+
+   python -m toolkits.rlt.physrlt.transport_probe \
+     --root <task0-multiphase-root> \
+     --output <new-output-directory> --split confirmation
+
+The report compares direct prediction, learned coupling, training-mean coupling, state/action-only coupling and shuffled labels. Privileged oracle arms are reported separately and cannot be deployed. Ridge regularization is selected by leave-one-training-layout-out validation. Error intervals resample layouts rather than correlated transitions, remain exploratory after repeated development, and do not establish control improvement. Small or zero-reward closed-loop screens indicate insufficient evidence, not grounds to discard the representation without a properly powered comparison.
 
 Run a Medium-Difficulty Gate
 ----------------------------

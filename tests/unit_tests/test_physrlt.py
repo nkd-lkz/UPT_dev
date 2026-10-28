@@ -353,6 +353,13 @@ def test_sparse_object_motion_probe_selects_training_object_and_crossfits():
     train = records("train")
     evaluation = records("development")
     assert dominant_object(train) == 0
+    with pytest.raises(ValueError, match="no measurable effect"):
+        dominant_object(train, rank=1)
+    secondary = copy.deepcopy(train)
+    for record in secondary:
+        for branch in record["branches"].values():
+            branch["geometry"][:, 67:70] = branch["geometry"][:, 64:67] * 0.5
+    assert dominant_object(secondary, rank=1) == 1
     summary = fit_feature(train, evaluation, "flow_path", 0)
     assert summary["evaluation_pairs"] == 12
     assert summary["evaluation_moving_pairs"] == 6
@@ -398,6 +405,89 @@ def test_sparse_motion_checkpoint_is_bound_to_readout_version(tmp_path):
     assert payload["arm"] == "gated_pair"
     with pytest.raises(ValueError, match="versions differ"):
         load_sparse_motion_conditioner(path, expected_readout_sha256="readout-v2")
+
+
+def test_sparse_motion_shared_axes_retains_train_provenance(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.sparse_motion import run as run_sparse
+
+    rows = synthetic_rows()
+    for index, row in enumerate(rows):
+        row["start_tick"] = index % 4 * 10
+    dataset = tmp_path / "transitions.pt"
+    torch.save({"rows": rows}, dataset)
+    run(
+        Namespace(
+            dataset=dataset,
+            output=tmp_path / "readouts",
+            methods=["state_action_joint"],
+            seeds=[3],
+            steps=2,
+            threads=1,
+        )
+    )
+    for split, selected in (
+        ("train", [rows[0], rows[4]]),
+        ("development", [rows[16], rows[20]]),
+    ):
+        for axis in (0, 1):
+            directory = tmp_path / f"{split}-axis{axis}"
+            directory.mkdir()
+            measurements = [
+                {
+                    "case": {"id": row["case_id"]},
+                    "start_tick": row["start_tick"],
+                    "branches": {
+                        sign: {
+                            "horizon_mask": torch.ones(2, dtype=torch.bool),
+                            "geometry": row["geometry"] + sign * 0.01,
+                            "response": row["response"] + sign * 0.01,
+                        }
+                        for sign in (-1, 1)
+                    },
+                }
+                for row in selected
+            ]
+            torch.save(measurements, directory / "measurements.pt")
+            (directory / "result.json").write_text(
+                json.dumps(
+                    {
+                        "state": "complete",
+                        "no_training": True,
+                        "axis": axis,
+                        "offset": 0.05,
+                    }
+                )
+            )
+    args = Namespace(
+        dataset=dataset,
+        evaluation_dataset=None,
+        checkpoint=tmp_path / "readouts/state_action_joint-seed3/readout.pt",
+        train_measurements=tmp_path / "train-axis0/measurements.pt",
+        train_result=tmp_path / "train-axis0/result.json",
+        additional_train_pairs=[tmp_path / "train-axis1"],
+        evaluation_measurements=tmp_path / "development-axis1/measurements.pt",
+        evaluation_result=tmp_path / "development-axis1/result.json",
+        evaluation_split="development",
+        output=tmp_path / "heads",
+        steps=2,
+        seed=3,
+        cpu_threads=1,
+        motion_threshold_m=0.002,
+        arms=["gated_pair"],
+        object_rank=0,
+    )
+    result = run_sparse(args)
+    assert result["training_axes"] == [0, 1]
+    assert result["train_pairs"] == 4 and result["evaluation_pairs"] == 2
+    payload = torch.load(args.output / "gated_pair.pt", weights_only=True)
+    assert payload["training_axes"] == [0, 1] and "axis" not in payload
+    assert len(payload["all_train_measurements_sha256"]) == 2
+    args.output = tmp_path / "duplicate"
+    args.additional_train_pairs = [tmp_path / "train-axis0"]
+    with pytest.raises(ValueError, match="Duplicate training intervention axis"):
+        run_sparse(args)
 
 
 def test_sparse_motion_conditioner_is_relative_and_has_zero_control():
@@ -460,8 +550,128 @@ def test_goal_progress_and_pairwise_ranking_preserve_physical_direction():
     assert result["pairs"] == 3
     assert result["resolvable_pairs"] == 2
     assert result["rank_accuracy_pct"] == 50
+    assert result["constant_sign_accuracy_pct"] == {"-1": 50, "1": 50}
     assert result["selected_advantage_vs_random_mm"] == pytest.approx(25)
     assert result["oracle_regret_mm"] == pytest.approx(50)
+
+
+def test_goal_candidate_comparison_exposes_constant_direction_and_ties():
+    from toolkits.rlt.physrlt.goal_ranking import candidate_summary, sum_object_progress
+
+    common = {
+        "evaluation_dataset_sha256": "data",
+        "evaluation_split": "development",
+        "source_object_key": "source",
+        "target_object_key": "target",
+        "readout_sha256": "readout",
+        "sparse_arm": "gated_pair",
+        "offset": 0.1,
+    }
+    results = []
+    for axis in (0, 1):
+        rows = []
+        for tick in (10, 20):
+            scores = {"-1": 0.0, "1": 0.01 if axis == 1 and tick == 10 else 0.0}
+            rows.append(
+                {
+                    "case_id": "case",
+                    "start_tick": tick,
+                    "origin_sha256": str(tick),
+                    "actual_progress_m": scores,
+                    "predicted_progress_m": scores,
+                }
+            )
+        results.append(common | {"axis": axis, "rows": rows})
+    summary = candidate_summary(results, 0.0001)
+    assert summary["states"] == 2
+    assert summary["resolvable_states"] == 1
+    assert summary["resolvable_accuracy_pct"] == 100
+    assert summary["fixed_candidates"]["1:1"]["resolvable_accuracy_pct"] == 100
+    assert summary["advantage_over_best_fixed_envelope_mm"] == 0
+    other_object = copy.deepcopy(results[1])
+    other_object["source_object_key"] = "second"
+    results[1]["sparse_head_sha256"] = "first-head"
+    other_object["sparse_head_sha256"] = "second-head"
+    combined = sum_object_progress([results[1], other_object])
+    assert combined["rows"][0]["actual_progress_m"]["1"] == pytest.approx(0.02)
+    assert combined["source_heads_sha256"] == ["first-head", "second-head"]
+    altered = copy.deepcopy(results)
+    altered[1]["rows"][0]["origin_sha256"] = "wrong-origin"
+    with pytest.raises(ValueError, match="origins differ"):
+        candidate_summary(altered, 0.0001)
+    altered = copy.deepcopy(results)
+    altered[1]["rows"].pop()
+    with pytest.raises(ValueError, match="state sets differ"):
+        candidate_summary(altered, 0.0001)
+
+
+def test_transport_prior_is_bounded_and_inputs_exclude_measured_outcomes():
+    from toolkits.rlt.physrlt.transport_probe import (
+        response_features,
+        transport_coefficient,
+    )
+
+    response = torch.tensor(
+        [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    )
+    effects = torch.tensor(
+        [[0.5, 1.0, 0.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+    )
+    torch.testing.assert_close(
+        transport_coefficient(response, effects),
+        torch.tensor([[0.5], [0.0], [0.0], [1.0]]),
+    )
+    row = synthetic_rows()[0]
+    record = {
+        "row": row,
+        "branches": {
+            sign: {
+                "commands": row["commands"] + sign * 0.01,
+                "response": row["response"].clone(),
+            }
+            for sign in (-1, 1)
+        },
+    }
+    before = response_features([record])
+    record["row"]["geometry"][:] = 999
+    for branch in record["branches"].values():
+        branch["response"][:] = 999
+    torch.testing.assert_close(before, response_features([record]), atol=0, rtol=0)
+
+
+def test_paired_case_batches_cover_layouts_once_and_preserve_split():
+    from toolkits.rlt.physrlt.counterfactual import select_cases
+
+    cases = [{"id": "train", "split": "train"}] + [
+        {"id": str(i), "split": "development"} for i in range(10)
+    ]
+    first = select_cases(cases, "development", 5)
+    second = select_cases(cases, "development", 5, 5)
+    assert first + second == cases[1:]
+    assert select_cases(cases, "train", 6) == cases[:1]
+    with pytest.raises(ValueError, match="empty"):
+        select_cases(cases, "development", 5, 10)
+    with pytest.raises(ValueError, match="nonnegative"):
+        select_cases(cases, "development", 5, -1)
+
+
+def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
+    from toolkits.rlt.physrlt.transport_probe import layout_comparison
+
+    target = torch.zeros(4, 3)
+    direct = torch.tensor([[0.001] * 3] * 3 + [[0.003] * 3])
+    arms = dict.fromkeys(
+        ("direct", "constant_coupling", "state_action_coupling", "shuffled_coupling"),
+        direct,
+    )
+    arms["coupled"] = target.clone()
+    report = layout_comparison(arms, target, ["a", "a", "a", "b"])
+    comparison = report["coupled_vs"]["direct"]
+    assert comparison["mse_improvement_mm2"] == pytest.approx(5.0)
+    assert comparison["layouts_improved"] == 2
+    assert comparison["exploratory_layout_bootstrap_95pct"] == pytest.approx([1, 9])
+    with pytest.raises(ValueError, match="layout identity"):
+        layout_comparison(arms, target, ["a"])
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
@@ -1263,6 +1473,37 @@ def test_paired_effect_probe_crossfits_layout_labels(tmp_path):
     )
     joined = paired_records({"rows": rows}, measurements, axis=0, offset=0.05)
     assert len(joined) == 2
+    from toolkits.rlt.physrlt.control import FrozenReadout
+    from toolkits.rlt.physrlt.sparse_motion import evaluate_object_bank, fit_head
+
+    sparse_records = copy.deepcopy(joined)
+    for record in sparse_records:
+        record["row"]["flow_feature"] = record["row"]["action_feature"].clone()
+        for branch in record["branches"].values():
+            branch["horizon_mask"][0] = False
+    readout = FrozenReadout(probe_root / "joint-seed3/readout.pt")
+    first, _ = fit_head(readout, sparse_records, 0, "gated_pair", 7, 2, 0.002)
+    for record in sparse_records:
+        for branch in record["branches"].values():
+            branch["geometry"][0] = 1e6
+    second, _ = fit_head(readout, sparse_records, 0, "gated_pair", 7, 2, 0.002)
+    for name, value in first.state_dict().items():
+        torch.testing.assert_close(value, second.state_dict()[name], rtol=0, atol=0)
+    bank_records = copy.deepcopy(joined)
+    for record in bank_records:
+        for branch in record["branches"].values():
+            branch["geometry"] = torch.cat(
+                (branch["geometry"], torch.zeros(2, 3)), dim=1
+            )
+    heads = [SparseObjectMotionHead(gated=True) for _ in range(2)]
+    for head in heads:
+        for parameter in head.parameters():
+            parameter.data.zero_()
+    bank = evaluate_object_bank(readout, heads, [0, 1], bank_records, 0.002)
+    assert bank["accuracy_pct"] == 0
+    assert bank["fixed_dominant_accuracy_pct"] == 100
+    assert bank["effect_rmse_mm"] == bank["zero_effect_rmse_mm"]
+    assert all(row["predicted_label"] == -1 for row in bank["rows"])
     torch.testing.assert_close(
         joined[0]["branches"][1]["commands"][:, 0]
         - joined[0]["branches"][-1]["commands"][:, 0],
