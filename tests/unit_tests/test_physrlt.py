@@ -160,12 +160,16 @@ def test_axis_calibrator_separates_anisotropic_execution_response():
     issued_scale = np.array([1.3, 1.0, 0.8])
     physical_gain = torch.tensor([0.5, 1.0, 1.2])
     measured = nominal * torch.as_tensor(issued_scale) * physical_gain
-    adaptive = AxisTranslationCalibrator()
-    reversed_control = AxisTranslationCalibrator(reversed_control=True)
+    adaptive = AxisTranslationCalibrator(prior_energy=1e-8)
+    reversed_control = AxisTranslationCalibrator(
+        reversed_control=True, prior_energy=1e-8
+    )
     for calibrator in (adaptive, reversed_control):
         for _ in range(2):
             np.testing.assert_allclose(
-                calibrator.observe(nominal, measured, issued_scale), physical_gain
+                calibrator.observe(nominal, measured, issued_scale),
+                physical_gain,
+                atol=1e-6,
             )
     np.testing.assert_allclose(adaptive.correction(), [1.3, 1.0, 1 / 1.2])
     np.testing.assert_allclose(reversed_control.correction(), [0.8, 1.0, 1.2])

@@ -309,17 +309,18 @@ class AxisTranslationCalibrator:
     def __init__(
         self,
         *,
-        alpha: float = 0.5,
         minimum_observations: int = 2,
         correction_bounds: tuple[float, float] = (0.8, 1.3),
         reversed_control: bool = False,
+        prior_energy: float = 1e-3,
     ) -> None:
-        self.alpha = alpha
+        if prior_energy <= 0:
+            raise ValueError("Axis calibration requires positive prior energy")
         self.minimum_observations = minimum_observations
         self.bounds = correction_bounds
         self.reversed_control = reversed_control
-        self.numerator = torch.zeros(3)
-        self.denominator = torch.zeros(3)
+        self.numerator = torch.full((3,), prior_energy)
+        self.denominator = torch.full((3,), prior_energy)
         self.observations = 0
 
     def observe(
@@ -335,21 +336,14 @@ class AxisTranslationCalibrator:
             return np.full(3, np.nan)
         numerator = expected * measured
         denominator = expected.square()
-        if self.observations == 0:
-            self.numerator = numerator
-            self.denominator = denominator
-        else:
-            self.numerator = self.alpha * numerator + (1 - self.alpha) * self.numerator
-            self.denominator = (
-                self.alpha * denominator + (1 - self.alpha) * self.denominator
-            )
+        self.numerator += numerator
+        self.denominator += denominator
         self.observations += 1
         return self.gain()
 
     def gain(self) -> np.ndarray:
         """Return the current diagonal gain estimate for logging."""
-        gain = self.numerator / self.denominator.clamp_min(1e-8)
-        gain = torch.where(self.denominator > 1e-6, gain, torch.ones_like(gain))
+        gain = self.numerator / self.denominator
         return gain.numpy(force=True)
 
     def correction(self) -> np.ndarray:
