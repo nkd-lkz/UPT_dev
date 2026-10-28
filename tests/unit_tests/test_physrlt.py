@@ -229,8 +229,10 @@ def test_nominal_response_regressor_uses_train_and_validation_only(tmp_path):
     poisoned = copy.deepcopy(rows[0])
     poisoned.update(split="development")
     poisoned["response"][1, 7] = 1e6
+    confirmation = copy.deepcopy(poisoned)
+    confirmation.update(split="confirmation")
     dataset = tmp_path / "transitions.pt"
-    torch.save({"rows": rows + [poisoned]}, dataset)
+    torch.save({"rows": rows + [poisoned, confirmation]}, dataset)
     model, metadata = NominalResponseRegressor.fit(dataset)
     assert metadata["development_rows_read"] == 0
     commands = torch.zeros(10, 7)
@@ -243,6 +245,7 @@ def test_nominal_response_regressor_uses_train_and_validation_only(tmp_path):
     assert prediction[1:].abs().max() < 1e-6
     assert metadata["validation_rmse"] < metadata["zero_motion_validation_rmse"]
     assert metadata["validation_cosine"] > 0
+    assert metadata["evaluation_rows_read"] == 0
 
 
 def test_diagonal_response_regressor_fits_physical_gain_without_development(tmp_path):

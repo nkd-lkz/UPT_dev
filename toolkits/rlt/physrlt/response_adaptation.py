@@ -64,7 +64,10 @@ class NominalResponseRegressor:
         dataset = torch.load(dataset_path, map_location="cpu", weights_only=True)
         rows = []
         for row in dataset["rows"]:
-            if not row["horizon_mask"][1] or row["split"] == "development":
+            if not row["horizon_mask"][1] or row["split"] not in {
+                "train",
+                "validation",
+            }:
                 continue
             displacement = row["response"][1][7:10].float()
             if torch.isfinite(displacement).all():
@@ -141,6 +144,7 @@ class NominalResponseRegressor:
             "zero_motion_validation_rmse": zero_rmse,
             "validation_cosine": cosine,
             "development_rows_read": 0,
+            "evaluation_rows_read": 0,
         }
 
     def predict(self, commands: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
@@ -215,6 +219,7 @@ class DiagonalResponseRegressor:
             "validation_cosine": cosine,
             "validation_gain": validation_gain.tolist(),
             "development_rows_read": 0,
+            "evaluation_rows_read": 0,
         }
 
     def predict(self, commands: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
@@ -547,8 +552,11 @@ def run(args: argparse.Namespace) -> None:
         nominal_model, nominal_model_metadata = model_cls.fit(args.nominal_dataset)
     declared_cases = json.loads(args.cases.read_text())
     cases = declared_cases[args.case_offset : args.case_offset + args.case_limit]
-    if not cases or any(case["split"] != "development" for case in cases):
-        raise ValueError("Response adaptation requires development cases only")
+    allowed_eval_splits = {"development", "confirmation"}
+    if not cases or any(case["split"] not in allowed_eval_splits for case in cases):
+        raise ValueError(
+            "Response adaptation requires development or confirmation cases"
+        )
     methods = args.methods
     allowed_methods = {
         "reference",

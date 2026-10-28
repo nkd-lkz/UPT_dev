@@ -37,7 +37,7 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 ``response_adaptation`` 是下一步闭环筛选，不是最终 RLT 方法。它只根据此前已经完成的 chunk 估计有界平移修正，不读取配置中的真实执行增益。匹配 reference 不作修正；``fixed_high`` 不读取响应，始终采用最大修正；``delayed_high`` 同样不读取响应，但等待与 adaptive 相同的最少观测数后再采用最大修正；``oracle`` 只是读取增益并执行有界固定补偿的对照，而不是真正的最优 policy；``reversed`` 则故意沿错误方向使用响应估计。正常响应分数必须来自独立训练布局；先用两个 development 布局冻结设置，再通过显式 offset 评测剩余布局。
 
-传入 ``--nominal-dataset`` 后，程序使用动作命令和当前本体状态，借助条件 ridge 预测标称的三维末端位移。ridge 强度只在 validation 布局上选择，构造特征前排除全部 development 记录；若该预测器不能在 validation 上优于零位移基线，或预测位移与实测位移的平均方向余弦不为正，运行会直接失败。每个已完成 chunk 将实测位移与“预测位移乘以已知动作修正幅度”比较，分别估计 x／y／z 执行增益，不把修正后的动作重新送入回归器。``--execution-gains`` 可以施加声明过的三轴压力条件，adaptive 组则只能读取已经完成的响应。这些比率及其有界修正是待接入 RLT 的诊断性 Physical Token，不能单独作为任务收益结论。
+传入 ``--nominal-dataset`` 后，程序使用动作命令和当前本体状态，借助条件 ridge 预测标称的三维末端位移。ridge 强度只在 validation 布局上选择，构造特征前排除全部 development 和 confirmation 记录；若该预测器不能在 validation 上优于零位移基线，或预测位移与实测位移的平均方向余弦不为正，运行会直接失败。每个已完成 chunk 将实测位移与“预测位移乘以已知动作修正幅度”比较，分别估计 x／y／z 执行增益，不把修正后的动作重新送入回归器。``--execution-gains`` 可以施加声明过的三轴压力条件，adaptive 组则只能读取已经完成的响应。这些比率及其有界修正是待接入 RLT 的诊断性 Physical Token，不能单独作为任务收益结论。
 
 ``--nominal-model diagonal`` 用三个拟合得到的“命令—位移”系数替代灵活的 ridge。它的表达能力更弱，但必须在 validation 的每个轴上恢复 0.75 到 1.25 范围内的绝对增益。该物理约束对照用于检查：当只有一个执行轴发生变化时，逐轴响应自适应能否超过统一动作缩放。
 
