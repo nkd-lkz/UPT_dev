@@ -34,6 +34,8 @@ METHODS = (
     "arm_q_gripper_joint",
     "eef_gripper_joint",
     "balanced_joint",
+    "flow_recon",
+    "flow_joint",
 )
 
 RESPONSE_GROUPS = {
@@ -111,6 +113,8 @@ def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
         "horizon_mask",
     )
     result = {key: torch.stack([r[key] for r in rows]) for key in keys}
+    if all("flow_feature" in row for row in rows):
+        result["flow_feature"] = torch.stack([row["flow_feature"] for row in rows])
     cases = sorted({r["case_id"] for r in rows})
     result["episode_id"] = torch.tensor([cases.index(r["case_id"]) for r in rows])
     return result
@@ -119,7 +123,9 @@ def tensor_data(rows: list[dict]) -> dict[str, torch.Tensor]:
 def normalization(data: dict, train: torch.Tensor, feature_key: str) -> dict:
     """Estimate scaling exclusively on training layouts, with physical floors."""
     result = {}
-    for key in ("action_feature", "prefix_feature", "prop"):
+    for key in ("action_feature", "prefix_feature", "flow_feature", "prop"):
+        if key not in data:
+            continue
         values = data[key][train]
         result[key + "_mean"] = values.mean(0)
         result[key + "_scale"] = values.std(0).clamp_min(0.05)
@@ -131,7 +137,12 @@ def normalization(data: dict, train: torch.Tensor, feature_key: str) -> dict:
 
 def inputs(data: dict, stats: dict, method: str) -> tuple:
     """Apply train-only normalization identically in fitting and deployment."""
-    key = "prefix_feature" if method == "prefix_joint" else "action_feature"
+    if method.startswith("flow_"):
+        key = "flow_feature"
+    else:
+        key = "prefix_feature" if method == "prefix_joint" else "action_feature"
+    if key not in data:
+        raise ValueError(f"Dataset does not contain the requested {key}")
     feature = (data[key] - stats[key + "_mean"]) / stats[key + "_scale"]
     if method.startswith("hybrid_"):
         prefix = (data["prefix_feature"] - stats["prefix_feature_mean"]) / stats[
@@ -159,7 +170,12 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
         data["geometry"].shape[-1],
         factorized=method == "factorized_joint",
     )
-    feature_key = "prefix_feature" if method == "prefix_joint" else "action_feature"
+    if method.startswith("flow_"):
+        feature_key = "flow_feature"
+    else:
+        feature_key = (
+            "prefix_feature" if method == "prefix_joint" else "action_feature"
+        )
     stats = normalization(data, train, feature_key)
     response_target = data["response"]
     if method == "residual_joint":
@@ -181,7 +197,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
         mask = data["horizon_mask"][targets]
         loss = z.sum() * 0
         terms = {}
-        if method in {"action_recon", "hybrid_recon"}:
+        if method in {"action_recon", "hybrid_recon", "flow_recon"}:
             loss = (model.reconstruct(z) - features[selected]).square().mean()
         else:
             for key in ("response", "geometry"):

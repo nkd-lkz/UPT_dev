@@ -38,6 +38,8 @@ Interpret the Comparisons
 
 Seven readout variants use the same 128-dimensional bottleneck and decoder capacity: action-feature reconstruction, geometry supervision, response supervision, joint supervision, shuffled joint labels, prefix-feature joint supervision, and current-state/reference-only joint supervision. Each receives 400 updates for seeds 31, 47 and 59. A common frozen linear probe tests the resulting representations against state-plus-action and persistence baselines. Its ridge parameter is selected using validation layouts only.
 
+The optional ``flow_recon`` and ``flow_joint`` variants retain the same 512-dimensional input and 128-dimensional bottleneck, but summarize four evenly spaced action-expert states from the frozen Pi0.5 flow-matching trajectory instead of reading only its final forward. They require a newly collected dataset containing ``flow_feature``; old artifacts fail closed rather than silently substituting the final-state feature. This is a representation ablation, not a claim that denoising time is physical execution time.
+
 Four readouts enter the control pilot with 1,500 actor BC updates and seeds 31 and 47. The same AlphaBrain actor/critic architecture and hyperparameters are used for all four. A validation gate requires arm MSE below 0.02, gripper disagreement below 0.05 and at least one validation success before up to 1,040 online ticks. Passing different gates does not establish a fair large-scale RL comparison; failed gates are recorded as diagnostics.
 
 The compact feature projection and 128-dimensional readout differ from the original 2048-dimensional RLT encoder. These are matched research variants, not an exact upstream algorithm reproduction. The existing baseline worktree remains unchanged.

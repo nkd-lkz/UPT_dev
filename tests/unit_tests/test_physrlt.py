@@ -31,9 +31,11 @@ from toolkits.rlt.physrlt.critic_audit import binary_auc, discounted_success_ret
 from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
+    flow_path_features,
     masked_loss,
     measured_response_snapshot,
     metric_depth,
+    projection,
     transition_targets,
 )
 from toolkits.rlt.physrlt.effect_probe import (
@@ -293,6 +295,19 @@ def test_measured_response_snapshot_uses_deployable_robot_state_only():
     )
 
 
+def test_flow_path_feature_uses_fixed_generation_points_and_width():
+    hidden = [torch.full((10, 16), float(index)) for index in range(10)]
+    feature = flow_path_features(hidden)
+    assert feature.shape == (512,)
+    expected = [0, 3, 6, 9]
+    for chunk, index in zip(feature.reshape(4, 128), expected, strict=True):
+        torch.testing.assert_close(
+            chunk, torch.full((10, 16), float(index)).mean(0) @ projection(16)
+        )
+    with pytest.raises(ValueError, match="at least four"):
+        flow_path_features(hidden[:3])
+
+
 def synthetic_rows():
     """Make explicit synthetic fixtures; never report them as robot evidence."""
     rng = torch.Generator().manual_seed(19)
@@ -310,6 +325,7 @@ def synthetic_rows():
                     "reset_hash": str(state),
                     "split": ("train", "validation", "development")[state // 2],
                     "action_feature": torch.randn(512, generator=rng),
+                    "flow_feature": torch.randn(512, generator=rng),
                     "prefix_feature": torch.randn(512, generator=rng),
                     "ref": command.clone(),
                     "commands": command,
@@ -576,17 +592,18 @@ def test_small_experiment_writes_auditable_results(tmp_path):
         Namespace(
             dataset=path,
             output=tmp_path / "probe",
-            methods=["action_recon", "joint"],
+            methods=["action_recon", "joint", "flow_recon", "flow_joint"],
             seeds=[3],
             steps=2,
             threads=2,
         )
     )
-    assert len(results) == 2
-    assert results[0]["trainable_parameters"] == results[1]["trainable_parameters"]
+    assert len(results) == 4
+    assert len({result["trainable_parameters"] for result in results}) == 1
     assert "NOT control improvement" in results[0]["interpretation"]
     assert (tmp_path / "probe/table.csv").is_file()
     assert (tmp_path / "probe/joint-seed3/readout.pt").is_file()
+    assert (tmp_path / "probe/flow_joint-seed3/readout.pt").is_file()
 
 
 def test_medium_gate_is_disjoint_and_pre_registered(tmp_path):

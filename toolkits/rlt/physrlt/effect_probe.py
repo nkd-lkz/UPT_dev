@@ -104,6 +104,8 @@ def _current_inputs(row: dict, stats: dict, method: str) -> tuple[torch.Tensor, 
         key: row[key][None]
         for key in ("action_feature", "prefix_feature", "ref", "prop")
     }
+    if "flow_feature" in row:
+        data["flow_feature"] = row["flow_feature"][None]
     return inputs(data, stats, method)
 
 

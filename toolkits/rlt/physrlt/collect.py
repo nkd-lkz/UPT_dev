@@ -61,6 +61,7 @@ def run(args: argparse.Namespace) -> dict:
         "benchmark": "libero_pro",
         "backbone": "AlphaBrain RLT pi05 flow matching",
         "feature": "last action_out_proj input; fixed four-bin projection",
+        "flow_feature": "four evenly spaced action-expert flow states; fixed-width projection",
         "prefix_control": "same forward real-view prefix; same projection width",
         "horizons_control_ticks": list(HORIZONS),
         "depth_units": "metres; OpenGL converted using calibrated near/far",
@@ -141,6 +142,7 @@ def run(args: argparse.Namespace) -> dict:
                         for h in following
                     },
                     "action_feature": prediction["action_feature"],
+                    "flow_feature": prediction["flow_feature"],
                     "prefix_feature": prediction["prefix_feature"],
                     "ref": torch.from_numpy(prediction["ref"].copy()),
                     "commands": torch.from_numpy(accepted),

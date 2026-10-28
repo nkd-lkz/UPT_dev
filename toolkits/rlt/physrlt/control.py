@@ -133,6 +133,8 @@ class FrozenReadout:
             "ref": torch.as_tensor(prediction["ref"])[None].float(),
             "prop": torch.as_tensor(prop)[None].float(),
         }
+        if "flow_feature" in prediction:
+            data["flow_feature"] = prediction["flow_feature"][None].float()
         z = self.model.encode(
             *inputs(data, self.payload["stats"], self.payload["method"])
         )

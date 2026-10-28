@@ -37,6 +37,27 @@ def compact_features(hidden: torch.Tensor) -> torch.Tensor:
     return (bins @ projection(hidden.shape[-1])).flatten()
 
 
+def flow_path_features(hidden_states: list[torch.Tensor]) -> torch.Tensor:
+    """Summarize four fixed points along one flow-matching generation path."""
+    if len(hidden_states) < 4:
+        raise ValueError("Flow-path features require at least four denoising forwards")
+    shape = hidden_states[0].shape
+    if (
+        len(shape) != 2
+        or shape[0] != 10
+        or any(value.shape != shape for value in hidden_states)
+        or not all(torch.isfinite(value).all() for value in hidden_states)
+    ):
+        raise ValueError("Expected finite, shape-matched 10-token flow states")
+    final = len(hidden_states) - 1
+    indices = (0, round(final / 3), round(2 * final / 3), final)
+    projected = [
+        hidden_states[index].float().cpu() @ projection(shape[-1])
+        for index in indices
+    ]
+    return torch.cat([value.mean(0) for value in projected])
+
+
 class PhysicalReference:
     """Read the last action-expert forward without changing the VLA output."""
 
@@ -64,6 +85,7 @@ class PhysicalReference:
         if not captured:
             raise RuntimeError("No action-generation features were captured")
         row["action_feature"] = compact_features(captured[-1][0])
+        row["flow_feature"] = flow_path_features([value[0] for value in captured])
         row["prefix_feature"] = compact_features(row.pop("hidden"))
         row["denoise_forwards"] = len(captured)
         return row
