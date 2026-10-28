@@ -1370,12 +1370,9 @@ def test_robotwin2_failure_stage_uses_task_geometry():
 
     assert classify_failure(initial, [record(0.2, 0.1, 0.75)], False) == "reach"
     assert (
-        classify_failure(initial, [record(0.05, 0.1, 0.78)], False)
-        == "grasp_or_lift"
+        classify_failure(initial, [record(0.05, 0.1, 0.78)], False) == "grasp_or_lift"
     )
-    assert (
-        classify_failure(initial, [record(0.05, 0.12, 0.9)], False) == "transport"
-    )
+    assert classify_failure(initial, [record(0.05, 0.12, 0.9)], False) == "transport"
     assert (
         classify_failure(initial, [record(0.05, 0.16, 0.86)], False)
         == "place_height_or_stability"

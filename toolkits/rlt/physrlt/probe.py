@@ -173,9 +173,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
     if method.startswith("flow_"):
         feature_key = "flow_feature"
     else:
-        feature_key = (
-            "prefix_feature" if method == "prefix_joint" else "action_feature"
-        )
+        feature_key = "prefix_feature" if method == "prefix_joint" else "action_feature"
     stats = normalization(data, train, feature_key)
     response_target = data["response"]
     if method == "residual_joint":

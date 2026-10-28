@@ -99,9 +99,7 @@ def audit(
         training_layouts = (
             sorted(
                 path
-                for path in training_layouts_root.rglob(
-                    f"{candidate.name}_*.json"
-                )
+                for path in training_layouts_root.rglob(f"{candidate.name}_*.json")
                 if "Eval_Layout" not in path.parts
             )
             if training_layouts_root
@@ -110,7 +108,9 @@ def audit(
         source_ok = source.is_file() and candidate.name in _task_classes(source)
         required_assets = _required_assets(config) if config.is_file() else ()
         missing_assets = [
-            relative for relative in required_assets if not (assets_root or root).joinpath(relative).is_dir()
+            relative
+            for relative in required_assets
+            if not (assets_root or root).joinpath(relative).is_dir()
         ]
         tasks.append(
             {

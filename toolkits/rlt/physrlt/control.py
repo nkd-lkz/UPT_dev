@@ -211,7 +211,10 @@ def warmup(
         else None
     )
     if critic_conditioner_override is not None:
-        if candidate_mode is not None or critic_conditioning != "sparse_relative_concat":
+        if (
+            candidate_mode is not None
+            or critic_conditioning != "sparse_relative_concat"
+        ):
             raise ValueError("Sparse critic conditioning conflicts with another mode")
     elif critic_conditioning != "latent" and candidate_mode not in {
         "outcomes",
@@ -231,7 +234,11 @@ def warmup(
         gripper_threshold=0,
         critic_conditioner=(
             critic_conditioner_override
-            or (readout.candidate_conditioner(candidate_mode) if candidate_mode else None)
+            or (
+                readout.candidate_conditioner(candidate_mode)
+                if candidate_mode
+                else None
+            )
         ),
         critic_conditioning=critic_conditioning,
         correction_limit=correction_limit,
@@ -885,7 +892,9 @@ def run(args):
                         else None
                     ),
                     "sparse_motion_arm": (
-                        sparse_payload.get("arm") if sparse_payload is not None else None
+                        sparse_payload.get("arm")
+                        if sparse_payload is not None
+                        else None
                     ),
                     "sparse_zero_control": method in sparse_zero_controls,
                 },

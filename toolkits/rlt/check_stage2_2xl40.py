@@ -60,9 +60,7 @@ def check_config(cfg) -> None:
         raise RuntimeError(
             "Two-L40 evaluation must use 32 parallel environments for 8 epochs"
         )
-    eval_trajectories = (
-        cfg.env.eval.total_num_envs * cfg.env.eval.rollout_epoch
-    )
+    eval_trajectories = cfg.env.eval.total_num_envs * cfg.env.eval.rollout_epoch
     if eval_trajectories != 256:
         raise RuntimeError("Formal Stage2 must evaluate 256 trajectories")
 

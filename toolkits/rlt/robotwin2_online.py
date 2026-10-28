@@ -25,7 +25,7 @@ import torch
 
 from toolkits.rlt.robodojo_learning import make_encoder
 from toolkits.rlt.robotwin2_features import FrozenRoboTwinPi05
-from toolkits.rlt.robotwin2_learning import AlohaLearner, AlohaNormalizer, PROTOCOL
+from toolkits.rlt.robotwin2_learning import PROTOCOL, AlohaLearner, AlohaNormalizer
 from toolkits.rlt.robotwin2_reference_rollout import (
     build_env_config,
     classify_failure,
@@ -264,9 +264,7 @@ def create_env(args: argparse.Namespace, output: Path, split: str, seed: int) ->
         sys.path.insert(0, str(robotwin))
     from rlinf.envs.sim.robotwin.robotwin_env import RoboTwinEnv
 
-    cfg = build_env_config(
-        args.repo.resolve(), robotwin, output, split=split
-    )
+    cfg = build_env_config(args.repo.resolve(), robotwin, output, split=split)
     cfg.seed = seed
     return RoboTwinEnv(
         cfg,
@@ -349,7 +347,11 @@ def run_episode(
             if "success" in infos:
                 record["success"] = bool(scalar(infos["success"]))
             if learner is not None:
-                assert current is not None and normalized is not None and normalizer is not None
+                assert (
+                    current is not None
+                    and normalized is not None
+                    and normalizer is not None
+                )
                 issued = current | {
                     "action": normalized,
                     "executed_action": normalized.copy(),
@@ -559,7 +561,9 @@ def parse_args() -> argparse.Namespace:
     warmup_parser = subparsers.add_parser("warmup")
     warmup_parser.add_argument("--stage1", type=Path, required=True)
     warmup_parser.add_argument("--norm-stats", type=Path, required=True)
-    warmup_parser.add_argument("--reference-root", type=Path, action="append", required=True)
+    warmup_parser.add_argument(
+        "--reference-root", type=Path, action="append", required=True
+    )
     warmup_parser.add_argument("--output", type=Path, required=True)
     warmup_parser.add_argument("--steps", type=int, default=1000)
     warmup_parser.add_argument("--batch-size", type=int, default=16)
@@ -571,7 +575,9 @@ def parse_args() -> argparse.Namespace:
 
     evaluate_parser = subparsers.add_parser("evaluate")
     common(evaluate_parser)
-    evaluate_parser.add_argument("--policy", choices=("reference", "actor"), required=True)
+    evaluate_parser.add_argument(
+        "--policy", choices=("reference", "actor"), required=True
+    )
     evaluate_parser.add_argument("--learner", type=Path)
     evaluate_parser.add_argument("--seeds", type=comma_ints, required=True)
 

@@ -67,9 +67,7 @@ def owns_listener(pid: int, port: int) -> bool:
     return False
 
 
-def foreign_gpu_processes(
-    children: list[subprocess.Popen], gpu: int = 2
-) -> list[int]:
+def foreign_gpu_processes(children: list[subprocess.Popen], gpu: int = 2) -> list[int]:
     """Include graphics processes and allow only our fresh process groups."""
     uuid = subprocess.check_output(
         ["nvidia-smi", "-i", str(gpu), "--query-gpu=uuid", "--format=csv,noheader"],

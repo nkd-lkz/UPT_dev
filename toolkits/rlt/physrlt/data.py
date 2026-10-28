@@ -52,8 +52,7 @@ def flow_path_features(hidden_states: list[torch.Tensor]) -> torch.Tensor:
     final = len(hidden_states) - 1
     indices = (0, round(final / 3), round(2 * final / 3), final)
     projected = [
-        hidden_states[index].float().cpu() @ projection(shape[-1])
-        for index in indices
+        hidden_states[index].float().cpu() @ projection(shape[-1]) for index in indices
     ]
     return torch.cat([value.mean(0) for value in projected])
 

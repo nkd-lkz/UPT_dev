@@ -51,9 +51,10 @@ def _branch_target(
     record: dict, sign: int, horizon_index: int, object_index: int
 ) -> torch.Tensor:
     start = 64 + 3 * object_index
-    return record["branches"][sign]["geometry"][
-        horizon_index, start : start + 3
-    ].float() / OBJECT_SCALE_M
+    return (
+        record["branches"][sign]["geometry"][horizon_index, start : start + 3].float()
+        / OBJECT_SCALE_M
+    )
 
 
 def fit_head(
@@ -230,9 +231,7 @@ def run(args: argparse.Namespace) -> dict:
     )
     if train_meta["axis"] != evaluation_meta["axis"]:
         raise ValueError("Training and evaluation intervention axes differ")
-    if {row["case_id"] for row in train} & {
-        row["case_id"] for row in evaluation
-    }:
+    if {row["case_id"] for row in train} & {row["case_id"] for row in evaluation}:
         raise ValueError("Sparse-motion training and evaluation layouts overlap")
     readout = FrozenReadout(args.checkpoint, expected_dataset=args.dataset)
     if readout.payload["method"] not in {"joint", "flow_joint"}:

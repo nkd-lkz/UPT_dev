@@ -100,9 +100,7 @@ def _predict(
         raise ValueError("Motion gating requires moving and stationary training pairs")
     event_target = moving.double()[:, None]
     event_score = _ridge_predict(train_x, event_target, test_x, event_ridge).clamp(0, 1)
-    conditional = _ridge_predict(
-        train_x[moving], train_y[moving], test_x, motion_ridge
-    )
+    conditional = _ridge_predict(train_x[moving], train_y[moving], test_x, motion_ridge)
     return {
         "target": test_y,
         "direct": _ridge_predict(train_x, train_y, test_x, direct_ridge),
@@ -224,9 +222,7 @@ def run(args: argparse.Namespace) -> dict:
         args.evaluation_result,
         "development",
     )
-    if {row["case_id"] for row in train} & {
-        row["case_id"] for row in evaluation
-    }:
+    if {row["case_id"] for row in train} & {row["case_id"] for row in evaluation}:
         raise ValueError("Object-motion train and evaluation layouts overlap")
     object_index = dominant_object(train)
     object_keys = train[0]["row"]["object_keys"]

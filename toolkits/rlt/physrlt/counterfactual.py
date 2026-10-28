@@ -174,6 +174,10 @@ def run(args: argparse.Namespace) -> None:
                     {
                         "case": case,
                         "start_tick": target_tick,
+                        "origin": {
+                            "geometry": origin["geometry"].clone(),
+                            "object_keys": list(origin["object_keys"]),
+                        },
                         "branches": branches,
                         "predictions": predictions,
                     }
@@ -206,6 +210,7 @@ def run(args: argparse.Namespace) -> None:
             "offset": args.offset,
             "states_from": f"{args.split}-layout replay with new paired actions",
             "split": args.split,
+            "includes_absolute_origin_geometry": True,
             "no_training": True,
             "policy_calls": 0,
             "interpretation": "Direct consequence-decoder fidelity under paired action changes; not a representation-vs-reconstruction or control-success comparison",

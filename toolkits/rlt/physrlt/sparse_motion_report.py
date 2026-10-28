@@ -39,9 +39,7 @@ def aggregate(paths: list[Path]) -> dict:
         seeds = [run["seed"] for run in runs]
         if len(seeds) != len(set(seeds)):
             raise ValueError("A sparse-motion group repeats an optimizer seed")
-        dataset_hashes = {
-            run.get("evaluation_dataset_sha256") for run in runs
-        }
+        dataset_hashes = {run.get("evaluation_dataset_sha256") for run in runs}
         if len(dataset_hashes) != 1:
             raise ValueError("Matched seeds must use one evaluation dataset")
         arms = set(runs[0]["results"])
@@ -84,7 +82,9 @@ def aggregate(paths: list[Path]) -> dict:
         for row in summary
     }
     comparisons = []
-    for axis, split in sorted({(row["axis"], row["evaluation_split"]) for row in summary}):
+    for axis, split in sorted(
+        {(row["axis"], row["evaluation_split"]) for row in summary}
+    ):
         keys = {
             name: indexed.get((axis, split, method, arm))
             for name, method, arm in (
@@ -143,8 +143,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(
-            {key: value for key, value in row.items() if key != "seeds"}
-            for row in rows
+            {key: value for key, value in row.items() if key != "seeds"} for row in rows
         )
     temporary.replace(path)
 

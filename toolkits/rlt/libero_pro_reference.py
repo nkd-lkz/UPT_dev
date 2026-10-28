@@ -15,7 +15,6 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-
 PERTURBATIONS = {"lan", "object", "swap", "task"}
 
 
@@ -234,6 +233,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if os.environ.get("LIBERO_TYPE") != "pro":
         raise RuntimeError("Set LIBERO_TYPE=pro; refusing a silent standard fallback")
     from liberopro.liberopro.benchmark import get_benchmark
+
     from rlinf.models.embodiment.openpi import get_model
 
     suite = get_benchmark("libero_10")()
@@ -280,7 +280,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "completed": len(valid),
                 "infrastructure_failures": len(selected) - len(valid),
                 "successes": sum(episode["success"] for episode in valid),
-                "success_rate": float(np.mean([episode["success"] for episode in valid]))
+                "success_rate": float(
+                    np.mean([episode["success"] for episode in valid])
+                )
                 if valid
                 else None,
             }

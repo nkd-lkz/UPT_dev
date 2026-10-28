@@ -53,6 +53,7 @@ from toolkits.rlt.physrlt.gain_probe import (
 from toolkits.rlt.physrlt.gain_probe import (
     summarize as summarize_gain_probe,
 )
+from toolkits.rlt.physrlt.goal_ranking import distance_progress, pairwise_summary
 from toolkits.rlt.physrlt.medium_gate import prepare as prepare_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize as summarize_medium_gate
 from toolkits.rlt.physrlt.medium_gate import summarize_followups
@@ -367,9 +368,7 @@ def test_sparse_object_motion_head_exposes_stable_gated_outputs():
     assert event_logit.shape == (2,)
     assert conditional.shape == (2, 3)
     assert expected.shape == (2, 3)
-    torch.testing.assert_close(
-        expected, event_logit.sigmoid()[:, None] * conditional
-    )
+    torch.testing.assert_close(expected, event_logit.sigmoid()[:, None] * conditional)
     expected.square().mean().backward()
     assert all(parameter.grad is not None for parameter in gated.parameters())
 
@@ -418,6 +417,51 @@ def test_sparse_motion_conditioner_is_relative_and_has_zero_control():
     assert control[:, 128:].count_nonzero() == 0
     matched = SparseMotionConditioner(head)(token, reference, reference)
     assert matched[:, 128:].count_nonzero() == 0
+
+
+def test_goal_progress_and_pairwise_ranking_preserve_physical_direction():
+    source = torch.tensor([0.0, 0.0, 0.0])
+    target = torch.tensor([1.0, 0.0, 0.0])
+    toward = distance_progress(
+        source, target, torch.tensor([0.1, 0.0, 0.0]), torch.zeros(3)
+    )
+    away = distance_progress(
+        source, target, torch.tensor([-0.1, 0.0, 0.0]), torch.zeros(3)
+    )
+    assert toward == pytest.approx(0.1)
+    assert away == pytest.approx(-0.1)
+    rows = [
+        {
+            "actual_progress_difference_m": 0.2,
+            "predicted_sign": 1,
+            "oracle_sign": 1,
+            "selected_actual_progress_m": 0.1,
+            "oracle_actual_progress_m": 0.1,
+            "random_actual_progress_m": 0.0,
+        },
+        {
+            "actual_progress_difference_m": -0.1,
+            "predicted_sign": 1,
+            "oracle_sign": -1,
+            "selected_actual_progress_m": -0.05,
+            "oracle_actual_progress_m": 0.05,
+            "random_actual_progress_m": 0.0,
+        },
+        {
+            "actual_progress_difference_m": 1e-5,
+            "predicted_sign": -1,
+            "oracle_sign": 1,
+            "selected_actual_progress_m": 0.0,
+            "oracle_actual_progress_m": 1e-5,
+            "random_actual_progress_m": 5e-6,
+        },
+    ]
+    result = pairwise_summary(rows, tie_threshold_m=1e-4)
+    assert result["pairs"] == 3
+    assert result["resolvable_pairs"] == 2
+    assert result["rank_accuracy_pct"] == 50
+    assert result["selected_advantage_vs_random_mm"] == pytest.approx(25)
+    assert result["oracle_regret_mm"] == pytest.approx(50)
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
@@ -963,9 +1007,7 @@ def test_tick_selection_reads_training_geometry_only():
                         "geometry": geometry,
                     }
                 )
-    result = select_ticks(
-        {"rows": rows}, count=2, minimum_cases=2, minimum_spacing=10
-    )
+    result = select_ticks({"rows": rows}, count=2, minimum_cases=2, minimum_spacing=10)
     assert result["selected_ticks"] == [20, 30]
     assert result["training_cases"] == 3
     assert result["role"].startswith("train-only")
@@ -1741,6 +1783,7 @@ def test_delayed_online_rl_requires_state_augmentation():
 
 def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path):
     from toolkits.rlt.physrlt.control import FrozenReadout
+    from toolkits.rlt.physrlt.goal_ranking import load_audited_readout
 
     rows = synthetic_rows()
     dataset = tmp_path / "synthetic.pt"
@@ -1757,6 +1800,7 @@ def test_action_prior_and_grounded_readout_have_one_causal_token_budget(tmp_path
     )
     prior = tmp_path / "probes/action_recon-seed59/readout.pt"
     physical = tmp_path / "probes/joint-seed31/readout.pt"
+    assert load_audited_readout(physical).payload["method"] == "joint"
     combined = FrozenReadout(physical, anchor=prior)
     result = combined.encode(rows[0], rows[0]["prop"])["z"]
     assert result.shape == (128,) and torch.isfinite(result).all()

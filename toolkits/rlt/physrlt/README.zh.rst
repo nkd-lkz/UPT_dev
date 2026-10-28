@@ -51,6 +51,8 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 打开评估结果前，先固定配对干预时刻。``tick_selection`` 只读取 train 布局的物体位移，按预先声明的布局覆盖数筛选候选，并限制相邻时刻的最小间隔；将输出的 ``selected_ticks`` 传给 ``counterfactual --ticks``。该结果记录测量数据的采集协议，不代表表征或控制性能有所提升。
 
+随后用 ``goal_ranking`` 检查冻结 sparse head 能否将配对后果转化为有效的动作排序。程序比较训练集选定物体到声明目标物体的预测距离缩短量与实测距离缩短量，报告排序准确率和 regret，并排除低于阈值的物理平局。仿真绝对物体位置只用于定义该诊断标签，不进入 policy 输入；该实验用于隔离仍然缺失的目标对齐机制，不能视为可部署控制器或 online RL 结果。
+
 独立 confirmation 通过后，可以用 ``control --sparse-motion-heads LABEL=PATH`` 将冻结预测头给出的“候选动作相对 reference 的运动事件与位移”附加到 critic。``--sparse-zero-controls LABEL`` 保留相同的 256 维 critic 容量，但将物理通道替换为零。加载时会核对 sparse head 与当前 physical readout checkpoint 的摘要；版本不一致时在 rollout 前直接失败。
 
 每轮有限预算的闭环筛选结束后，运行 ``control_report --runs PATH ...``，将不同修正轴、方法、split 分母、平均 ticks、正 replay 数量及跳过更新的原因写入同一份 CSV 和 JSON。该工具只接受完整且不可变的 run，并始终分开 validation 与 development；它负责忠实汇总协议，不负责挑选最优方法，也不会把不同轴合并成成功率结论。

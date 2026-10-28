@@ -185,8 +185,7 @@ def download(manifest: dict, root: Path, *, max_bytes: int, workers: int) -> dic
                 temporary.write_text(json.dumps(report, indent=2) + "\n")
                 temporary.replace(root / "robodojo-selected-task-report.json")
         report["complete"] = (
-            len(report["files"]) == len(manifest["files"])
-            and not report["errors"]
+            len(report["files"]) == len(manifest["files"]) and not report["errors"]
         )
         (root / "robodojo-selected-task-report.json").write_text(
             json.dumps(report, indent=2) + "\n"
