@@ -79,7 +79,52 @@ def aggregate(paths: list[Path]) -> dict:
                     "evaluation_dataset_sha256": next(iter(dataset_hashes)),
                 }
             )
-    return {"state": "complete", "source_runs": len(paths), "rows": summary}
+    indexed = {
+        (row["axis"], row["evaluation_split"], row["readout_method"], row["arm"]): row
+        for row in summary
+    }
+    comparisons = []
+    for axis, split in sorted({(row["axis"], row["evaluation_split"]) for row in summary}):
+        keys = {
+            name: indexed.get((axis, split, method, arm))
+            for name, method, arm in (
+                ("flow", "flow_joint", "gated_pair"),
+                ("final", "joint", "gated_pair"),
+                ("reversed", "flow_joint", "reversed_gated_pair"),
+            )
+        }
+        if any(value is None for value in keys.values()):
+            continue
+        flow, final, reversed_row = (
+            keys["flow"],
+            keys["final"],
+            keys["reversed"],
+        )
+        comparisons.append(
+            {
+                "axis": axis,
+                "evaluation_split": split,
+                "flow_vs_final_rmse_reduction_pct": 100
+                * (final["rmse_mm_mean"] - flow["rmse_mm_mean"])
+                / final["rmse_mm_mean"],
+                "flow_improvement_vs_zero_pct": flow["improvement_pct_mean"],
+                "flow_min_seed_improvement_pct": flow["improvement_pct_min"],
+                "reversed_improvement_vs_zero_pct": reversed_row[
+                    "improvement_pct_mean"
+                ],
+                "passed": (
+                    flow["improvement_pct_min"] > 5
+                    and flow["rmse_mm_mean"] < final["rmse_mm_mean"]
+                    and flow["rmse_mm_mean"] < reversed_row["rmse_mm_mean"]
+                ),
+            }
+        )
+    return {
+        "state": "complete",
+        "source_runs": len(paths),
+        "rows": summary,
+        "comparisons": comparisons,
+    }
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
