@@ -1890,6 +1890,7 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
         runs.append(run)
     result = summarize_control_runs(runs)
     assert len(result["rows"]) == 4
+    assert len(result["aggregate_rows"]) == 4
     keyed = {(row["correction_axes"], row["method"]): row for row in result["rows"]}
     assert keyed[("0", "physical")]["online_validation_episodes"] == 2
     assert keyed[("0", "physical")]["online_validation_success_rate_pct"] == 50

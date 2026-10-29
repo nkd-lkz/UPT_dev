@@ -12,6 +12,23 @@ from pathlib import Path
 
 from toolkits.rlt.pi05_baseline import write_json
 
+AGGREGATE_METRICS = (
+    "online_validation_success_rate_pct",
+    "online_development_success_rate_pct",
+    "reference_validation_success_rate_pct",
+    "reference_development_success_rate_pct",
+    "paired_validation_success_rate_delta_pct",
+    "paired_development_success_rate_delta_pct",
+    "paired_validation_failure_capped_ticks_delta_mean",
+    "paired_development_failure_capped_ticks_delta_mean",
+    "online_validation_ticks_per_wall_second",
+    "online_development_ticks_per_wall_second",
+    "online_validation_candidate_nonreference_fraction_mean",
+    "online_development_candidate_nonreference_fraction_mean",
+    "online_validation_candidate_scale_mean",
+    "online_development_candidate_scale_mean",
+)
+
 
 def _episodes(path: Path) -> list[dict]:
     payload = json.loads(path.read_text())
@@ -262,6 +279,7 @@ def summarize(runs: list[Path]) -> dict:
                     row[f"{name}_{metric}"] = value
             row.update(_paired_metrics(selected, reference_rows))
             output.append(row)
+    aggregate_rows = aggregate_seed_rows(output)
     return {
         "state": "complete",
         "role": "small development control screens; not final-test claims",
@@ -271,7 +289,40 @@ def summarize(runs: list[Path]) -> dict:
         ),
         "source_runs": [str(run.resolve()) for run in runs],
         "rows": output,
+        "aggregate_rows": aggregate_rows,
     }
+
+
+def aggregate_seed_rows(rows: list[dict]) -> list[dict]:
+    """Aggregate matched control metrics across unique optimization seeds."""
+    grouped = {}
+    for row in rows:
+        key = (row["correction_axes"], row["method"])
+        grouped.setdefault(key, []).append(row)
+    output = []
+    for (axis, method), group in sorted(grouped.items()):
+        seeds = [int(row["seed"]) for row in group]
+        if len(seeds) != len(set(seeds)):
+            raise ValueError("Control report contains duplicate optimization seeds")
+        aggregate = {
+            "correction_axes": axis,
+            "method": method,
+            "seed_count": len(seeds),
+            "seeds": ";".join(map(str, sorted(seeds))),
+        }
+        for metric in AGGREGATE_METRICS:
+            values = [row.get(metric) for row in group]
+            if any(value is None for value in values):
+                aggregate[f"{metric}_mean"] = None
+                aggregate[f"{metric}_std"] = None
+                continue
+            numeric = [float(value) for value in values]
+            aggregate[f"{metric}_mean"] = statistics.mean(numeric)
+            aggregate[f"{metric}_std"] = (
+                statistics.stdev(numeric) if len(numeric) > 1 else 0.0
+            )
+        output.append(aggregate)
+    return output
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -295,6 +346,7 @@ def main() -> None:
     args.output.mkdir(parents=True)
     write_json(args.output / "summary.json", result)
     write_csv(args.output / "summary.csv", result["rows"])
+    write_csv(args.output / "aggregate.csv", result["aggregate_rows"])
     print(json.dumps(result, indent=2))
 
 
