@@ -102,6 +102,12 @@ from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
 from toolkits.rlt.physrlt.response_matrix import CausalResponseMatrix
+from toolkits.rlt.physrlt.response_matrix_control_gate import (
+    evaluate as evaluate_matrix_gate,
+)
+from toolkits.rlt.physrlt.response_matrix_control_gate import (
+    summarize as summarize_matrix_gate,
+)
 from toolkits.rlt.physrlt.sparse_motion_report import aggregate
 from toolkits.rlt.physrlt.tick_selection import select_ticks
 from toolkits.rlt.pi05_baseline import env_commands
@@ -246,6 +252,56 @@ def test_response_matrix_rollout_uses_only_completed_chunks(
     assert result["diagnostics"][2]["correction"][0][0] == pytest.approx(
         expected_scale, abs=1e-5
     )
+
+
+def test_response_matrix_control_gate_uses_success_then_capped_ticks():
+    def episodes(scenario, method, successes, ticks):
+        return [
+            {
+                "scenario": scenario,
+                "case_id": str(index),
+                "method": method,
+                "success": index < successes,
+                "ticks": tick,
+            }
+            for index, tick in enumerate(ticks)
+        ]
+
+    stress = []
+    nominal = []
+    for method, successes, ticks in (
+        ("reference", 4, [200] * 6),
+        ("adaptive", 4, [190] * 6),
+        ("matrix_adaptive", 5, [180] * 6),
+        ("matrix_reversed", 4, [210] * 6),
+        ("fixed_high", 5, [175] * 6),
+        ("delayed_high", 4, [190] * 6),
+    ):
+        stress.extend(episodes("stress", method, successes, ticks))
+    for method, successes, ticks in (
+        ("reference", 5, [200] * 6),
+        ("adaptive", 5, [195] * 6),
+        ("matrix_adaptive", 5, [205] * 6),
+        ("matrix_reversed", 4, [210] * 6),
+        ("fixed_high", 5, [190] * 6),
+        ("delayed_high", 5, [195] * 6),
+    ):
+        nominal.extend(episodes("nominal", method, successes, ticks))
+    rows, passed = evaluate_matrix_gate(stress, nominal)
+    assert passed is True
+    assert len(summarize_matrix_gate(stress, "stress")) == 6
+    matrix = next(
+        row
+        for row in rows
+        if row.get("scenario") == "stress" and row.get("method") == "matrix_adaptive"
+    )
+    assert matrix["success_rate"] == pytest.approx(5 / 6)
+    failed = copy.deepcopy(stress)
+    for row in failed:
+        if row["method"] == "matrix_adaptive":
+            row["success"] = False
+    _, passed = evaluate_matrix_gate(failed, nominal)
+    assert passed is False
 
 
 @pytest.mark.parametrize(
