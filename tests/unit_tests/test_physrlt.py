@@ -1836,6 +1836,8 @@ def test_consequence_component_report_requires_matched_causal_gates(tmp_path):
     payloads = {
         component: {
             "state": "complete",
+            "revision": "test-revision",
+            "worktree_clean": True,
             "consequence_component": component,
             "trace_sha256": {"train": "a", "independent": "b"},
             "base_readout_sha256": "base",
@@ -1843,6 +1845,7 @@ def test_consequence_component_report_requires_matched_causal_gates(tmp_path):
             "consequence_conditioning": "relative_concat",
             "require_robust_replay": True,
             "replay_sampling": "td_eligible_transition_uniform",
+            "train_steps": 105,
             "causal_protocol": (
                 "train_correct_once_freeze_weights_intervene_input_sign"
             ),
@@ -1855,6 +1858,8 @@ def test_consequence_component_report_requires_matched_causal_gates(tmp_path):
     result = summarize_consequence_components(payloads)
     assert len(result["rows"]) == 12
     assert result["replay_sampling"] == "td_eligible_transition_uniform"
+    assert result["revision"] == "test-revision"
+    assert result["train_steps"] == 105
     assert result["paper_rows"][0]["seed_cells_passed"] == 2
     assert result["paper_rows"][0]["aggregate_cells_passed"] == 2
     assert all(row["passes_strict_screen"] for row in result["component_summary"])

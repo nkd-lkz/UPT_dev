@@ -309,6 +309,7 @@ def run(args: argparse.Namespace) -> dict:
         "consequence_conditioning": args.consequence_conditioning,
         "require_robust_replay": args.require_robust_replay,
         "replay_sampling": "td_eligible_transition_uniform",
+        "train_steps": args.steps,
         "seeds": args.seeds,
         "rows": rows,
         "gate_summaries": summaries,

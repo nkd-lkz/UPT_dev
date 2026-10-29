@@ -91,13 +91,18 @@ def summarize(payloads: dict[str, dict]) -> dict:
     if set(payloads) != set(COMPONENTS):
         raise ValueError("Require all three physical components")
     reference = payloads["joint"]
+    if not reference.get("revision") or reference.get("worktree_clean") is not True:
+        raise ValueError("Component gates require clean revision provenance")
     matched_fields = (
+        "revision",
+        "worktree_clean",
         "trace_sha256",
         "base_readout_sha256",
         "consequence_readout_sha256",
         "consequence_conditioning",
         "require_robust_replay",
         "replay_sampling",
+        "train_steps",
         "causal_protocol",
         "seeds",
     )
@@ -134,12 +139,15 @@ def summarize(payloads: dict[str, dict]) -> dict:
             "frozen while only the input sign and retained coordinates differ"
         ),
         "causal_protocol": reference["causal_protocol"],
+        "revision": reference["revision"],
+        "worktree_clean": True,
         "trace_sha256": reference["trace_sha256"],
         "base_readout_sha256": reference["base_readout_sha256"],
         "consequence_readout_sha256": reference["consequence_readout_sha256"],
         "consequence_conditioning": reference["consequence_conditioning"],
         "require_robust_replay": reference["require_robust_replay"],
         "replay_sampling": reference["replay_sampling"],
+        "train_steps": reference["train_steps"],
         "seeds": reference["seeds"],
         "component_summary": component_summary,
         "paper_rows": _paper_rows(payloads),
