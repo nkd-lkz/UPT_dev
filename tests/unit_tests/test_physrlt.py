@@ -694,8 +694,10 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
         classification_report,
         gated_coefficient,
         layout_comparison,
+        out_of_layout_gated_predictions,
         out_of_layout_predictions,
         phase_expand,
+        select_incremental_ratio,
         select_residual_ratio,
         transport_jacobian,
         transport_residual,
@@ -821,6 +823,25 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     )
     torch.testing.assert_close(no_motion, torch.zeros(4, 1, dtype=torch.double))
     assert stationary_audit["event_cv"] == {"constant_label": 0}
+    gated_oof = out_of_layout_gated_predictions(
+        torch.arange(8, dtype=torch.double)[:, None],
+        torch.tensor(
+            [[0.0], [0.0], [0.5], [0.5], [0.7], [0.7], [1.0], [1.0]],
+            dtype=torch.double,
+        ),
+        torch.tensor([False, False, True, True, True, True, True, True]),
+        ["a", "a", "b", "b", "c", "c", "d", "d"],
+    )
+    assert gated_oof.shape == (8, 1)
+    assert torch.isfinite(gated_oof).all()
+    ratio, losses = select_incremental_ratio(
+        torch.tensor([[0.2], [0.4]], dtype=torch.double),
+        torch.tensor([[0.2], [-0.2]], dtype=torch.double),
+        torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.double),
+        torch.tensor([[0.4, 0.0, 0.0], [0.2, 0.0, 0.0]], dtype=torch.double),
+    )
+    assert ratio == 1.0
+    assert losses["1.0"] == 0.0
     response = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     effect = torch.tensor([[0.0, 0.5, 0.0], [0.0, 2.0, 0.0]])
     jacobian = transport_jacobian(response, effect)

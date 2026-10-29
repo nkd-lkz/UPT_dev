@@ -144,6 +144,34 @@ def select_residual_ratio(
     return selected, losses
 
 
+def select_incremental_ratio(
+    coefficient: torch.Tensor,
+    correction: torch.Tensor,
+    response: torch.Tensor,
+    target: torch.Tensor,
+    candidates: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0),
+) -> tuple[float, dict[str, float]]:
+    """Select action-token correction strength from training predictions only."""
+    if coefficient.ndim != 2 or coefficient.shape[-1] != 1:
+        raise ValueError("Incremental coefficient must have shape Nx1")
+    if correction.shape != coefficient.shape:
+        raise ValueError("Incremental correction must match the coefficient")
+    if response.shape != target.shape or response.shape != (len(coefficient), 3):
+        raise ValueError("Incremental response and target must have shape Nx3")
+    if not candidates or any(value < 0 for value in candidates):
+        raise ValueError("Incremental ratio candidates must be nonnegative")
+    losses = {
+        str(value): float(
+            ((coefficient + value * correction).clamp(0, 1) * response - target)
+            .square()
+            .mean()
+        )
+        for value in candidates
+    }
+    selected = min(candidates, key=lambda value: losses[str(value)])
+    return selected, losses
+
+
 def crossfit_ridge(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -235,6 +263,34 @@ def gated_coefficient(
         "conditional_cv": conditional_cv,
         "event_labels_shuffled": shuffle_seed is not None,
     }
+
+
+def out_of_layout_gated_predictions(
+    x: torch.Tensor,
+    coefficient: torch.Tensor,
+    moving: torch.Tensor,
+    cases: list[str],
+) -> torch.Tensor:
+    """Predict gated coefficients while excluding each row's entire layout."""
+    if len(x) != len(coefficient) or len(x) != len(moving) or len(x) != len(cases):
+        raise ValueError("Out-of-layout gated rows must align")
+    layouts = sorted(set(cases))
+    if len(layouts) < 3:
+        raise ValueError("Gated out-of-layout prediction requires three layouts")
+    prediction = torch.empty_like(coefficient)
+    for layout in layouts:
+        heldout = torch.tensor([case == layout for case in cases])
+        remaining_cases = [
+            case for case, excluded in zip(cases, heldout, strict=True) if not excluded
+        ]
+        prediction[heldout], _ = gated_coefficient(
+            x[~heldout],
+            x[heldout],
+            coefficient[~heldout],
+            moving[~heldout],
+            remaining_cases,
+        )
+    return prediction
 
 
 def response_features(records: list[dict]) -> torch.Tensor:
@@ -600,8 +656,11 @@ def evaluate_records(
     probes: Path,
     methods: list[str],
     object_ranks: list[int],
+    motion_threshold_m: float = 0.002,
 ) -> dict:
     """Fit matched transport arms and evaluate them on disjoint layouts."""
+    if motion_threshold_m <= 0:
+        raise ValueError("Transport motion threshold must be positive")
     provenance = assert_disjoint_records(train, evaluation)
     cases = [record["case_id"] for record in train]
     x_response, test_response = response_features(train), response_features(evaluation)
@@ -672,7 +731,7 @@ def evaluate_records(
                 jacobian = transport_jacobian(measured_train_response, target)
                 vector = transport_vector(measured_train_response, target)
                 residual = transport_residual(measured_train_response, target)
-                moving = target.norm(dim=1) > 0.002
+                moving = target.norm(dim=1) > motion_threshold_m
                 direct, direct_cv = crossfit_ridge(x, target, cases, test_x)
                 predicted_coefficient, coefficient_cv = crossfit_ridge(
                     x, coefficient, cases, test_x
@@ -747,11 +806,37 @@ def evaluate_records(
                 residual_correction, residual_cv = crossfit_ridge(
                     token_x, residual_target, cases, test_token_x
                 )
+                train_residual_correction = out_of_layout_predictions(
+                    token_x,
+                    residual_target,
+                    cases,
+                    residual_cv["ridge"],
+                )
+                incremental_ratio, incremental_ratio_cv = select_incremental_ratio(
+                    state_train_prediction,
+                    train_residual_correction,
+                    train_predicted_response,
+                    target,
+                )
                 shuffled_residual = residual_target[
                     torch.randperm(len(residual_target), generator=generator)
                 ]
                 shuffled_residual_correction, shuffled_residual_cv = crossfit_ridge(
                     token_x, shuffled_residual, cases, test_token_x
+                )
+                train_shuffled_residual_correction = out_of_layout_predictions(
+                    token_x,
+                    shuffled_residual,
+                    cases,
+                    shuffled_residual_cv["ridge"],
+                )
+                shuffled_incremental_ratio, shuffled_incremental_ratio_cv = (
+                    select_incremental_ratio(
+                        state_train_prediction,
+                        train_shuffled_residual_correction,
+                        train_predicted_response,
+                        target,
+                    )
                 )
                 phase_state_coefficient, phase_state_cv = crossfit_ridge(
                     phase_response, coefficient, cases, test_phase_response
@@ -761,6 +846,19 @@ def evaluate_records(
                 )
                 gated_state_coefficient, gated_state_cv = gated_coefficient(
                     x_response, test_response, coefficient, moving, cases
+                )
+                gated_state_train_prediction = out_of_layout_gated_predictions(
+                    x_response, coefficient, moving, cases
+                )
+                gated_residual_target = coefficient - gated_state_train_prediction
+                gated_residual_correction, gated_residual_cv = crossfit_ridge(
+                    token_x, gated_residual_target, cases, test_token_x
+                )
+                shuffled_gated_residual = gated_residual_target[
+                    torch.randperm(len(gated_residual_target), generator=generator)
+                ]
+                shuffled_gated_correction, shuffled_gated_cv = crossfit_ridge(
+                    token_x, shuffled_gated_residual, cases, test_token_x
                 )
                 shuffled_event_coefficient, shuffled_event_cv = gated_coefficient(
                     x,
@@ -787,13 +885,30 @@ def evaluate_records(
                         state_coefficient + residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
+                    "adaptive_incremental_action_coupling": (
+                        state_coefficient + incremental_ratio * residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
                     "shuffled_incremental_coupling": (
                         state_coefficient + shuffled_residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "adaptive_shuffled_incremental_coupling": (
+                        state_coefficient
+                        + shuffled_incremental_ratio * shuffled_residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
                     "gated_action_coupling": gated_action_coefficient
                     * predicted_response,
                     "gated_state_action_coupling": gated_state_coefficient
+                    * predicted_response,
+                    "gated_incremental_action_coupling": (
+                        gated_state_coefficient + gated_residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "shuffled_gated_incremental_coupling": (
+                        gated_state_coefficient + shuffled_gated_correction
+                    ).clamp(0, 1)
                     * predicted_response,
                     "shuffled_event_coupling": shuffled_event_coefficient
                     * predicted_response,
@@ -868,8 +983,14 @@ def evaluate_records(
                         "state_action_cv": state_cv,
                         "incremental_action_cv": residual_cv,
                         "shuffled_incremental_cv": shuffled_residual_cv,
+                        "adaptive_incremental_ratio": incremental_ratio,
+                        "adaptive_incremental_ratio_train_layout_cv_mse": incremental_ratio_cv,
+                        "adaptive_shuffled_incremental_ratio": shuffled_incremental_ratio,
+                        "adaptive_shuffled_incremental_ratio_train_layout_cv_mse": shuffled_incremental_ratio_cv,
                         "gated_action_cv": gated_action_cv,
                         "gated_state_action_cv": gated_state_cv,
+                        "gated_incremental_action_cv": gated_residual_cv,
+                        "shuffled_gated_incremental_cv": shuffled_gated_cv,
                         "shuffled_event_cv": shuffled_event_cv,
                         "jacobian_cv": jacobian_cv,
                         "state_action_jacobian_cv": state_jacobian_cv,
@@ -910,6 +1031,17 @@ def evaluate_records(
                                 "shuffled_incremental_coupling",
                             ),
                         ),
+                        "adaptive_incremental_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="adaptive_incremental_action_coupling",
+                            comparators=(
+                                "state_action_coupling",
+                                "incremental_action_coupling",
+                                "adaptive_shuffled_incremental_coupling",
+                            ),
+                        ),
                         "gated_layout_comparison": layout_comparison(
                             arms,
                             truth,
@@ -919,6 +1051,18 @@ def evaluate_records(
                                 "coupled",
                                 "gated_state_action_coupling",
                                 "shuffled_event_coupling",
+                            ),
+                        ),
+                        "gated_incremental_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="gated_incremental_action_coupling",
+                            comparators=(
+                                "gated_state_action_coupling",
+                                "gated_action_coupling",
+                                "incremental_action_coupling",
+                                "shuffled_gated_incremental_coupling",
                             ),
                         ),
                         "jacobian_layout_comparison": layout_comparison(
@@ -973,6 +1117,7 @@ def evaluate_records(
         "evaluation_pairs": len(evaluation),
         "train_layouts": len(set(cases)),
         "evaluation_layouts": len({record["case_id"] for record in evaluation}),
+        "motion_threshold_m": motion_threshold_m,
         "split_audit": provenance,
         "response_cv": response_cv,
         "predicted_response": score_prediction(
@@ -1021,6 +1166,7 @@ def run(args: argparse.Namespace) -> dict:
         root / "probes_v1",
         ["joint", "flow_joint", "state_action_joint"],
         [0, 1],
+        0.002,
     ) | {
         "state": "complete",
         "split": args.split,
@@ -1063,6 +1209,7 @@ def run_manifest(args: argparse.Namespace) -> dict:
         Path(manifest["probes"]),
         manifest["methods"],
         manifest["object_ranks"],
+        manifest.get("motion_threshold_m", 0.002),
     ) | {
         "state": "complete",
         "split": manifest["evaluation_split"],
