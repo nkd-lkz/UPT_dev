@@ -3157,6 +3157,15 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
 
     class Learner:
         def command(self, features, deterministic):
+            self.last_command_diagnostics = {
+                "enabled": True,
+                "reason": "selected",
+                "selected_index": 2,
+                "selected_scale": 0.5,
+                "score_improvement": 0.1,
+                "reference_score": 0.0,
+                "selected_disagreement": 0.0,
+            }
             return features["ref"].clone()
 
         def update(self, replay):
@@ -3181,6 +3190,12 @@ def test_control_records_proposal_and_execution_domains_and_real_successor(
         execution_gain=gain,
     )
     assert result["ticks"] == limit
+    assert len(result["executed_command_trace"]) == 1
+    assert len(result["executed_command_trace"][0]) == limit
+    assert result["executed_command_trace"][0][0][0] == pytest.approx(0.2 * gain)
+    assert result["executed_command_trace"][0][0][6] == 1
+    assert result["candidate_selection_calls"] == 1
+    assert result["candidate_selected_indices"] == [2]
     assert len(replay) == int(limit == 10)
     if replay:
         assert replay[0]["action"][0, 6].item() == pytest.approx(0.2)
