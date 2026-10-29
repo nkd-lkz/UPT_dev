@@ -1818,6 +1818,7 @@ def test_consequence_component_report_requires_matched_causal_gates():
             "consequence_readout_sha256": "physical",
             "consequence_conditioning": "relative_concat",
             "require_robust_replay": True,
+            "replay_sampling": "td_eligible_transition_uniform",
             "causal_protocol": (
                 "train_correct_once_freeze_weights_intervene_input_sign"
             ),
@@ -1829,6 +1830,7 @@ def test_consequence_component_report_requires_matched_causal_gates():
     }
     result = summarize_consequence_components(payloads)
     assert len(result["rows"]) == 3
+    assert result["replay_sampling"] == "td_eligible_transition_uniform"
     assert all(row["passes_strict_screen"] for row in result["component_summary"])
     payloads["geometry"]["trace_sha256"]["independent"] = "different"
     with pytest.raises(ValueError, match="same protocol evidence"):

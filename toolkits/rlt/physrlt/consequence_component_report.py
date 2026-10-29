@@ -45,6 +45,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "consequence_readout_sha256",
         "consequence_conditioning",
         "require_robust_replay",
+        "replay_sampling",
         "causal_protocol",
         "seeds",
     )
@@ -86,6 +87,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "consequence_readout_sha256": reference["consequence_readout_sha256"],
         "consequence_conditioning": reference["consequence_conditioning"],
         "require_robust_replay": reference["require_robust_replay"],
+        "replay_sampling": reference["replay_sampling"],
         "seeds": reference["seeds"],
         "component_summary": component_summary,
         "rows": rows,
