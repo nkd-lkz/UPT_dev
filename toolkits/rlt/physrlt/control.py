@@ -118,13 +118,14 @@ class FrozenReadout:
         self.model.eval().requires_grad_(False)
 
     def candidate_conditioner(
-        self, mode: str = "mixed"
+        self, mode: str = "mixed", component: str = "joint"
     ) -> CandidateConsequenceConditioner:
         """Build a frozen, action-conditioned consequence view for a critic."""
         return CandidateConsequenceConditioner(
             (self.consequence or self).model,
             (self.consequence or self).payload["method"],
             mode=mode,
+            component=component,
         )
 
     @torch.no_grad()
@@ -314,6 +315,25 @@ def parse_online_checkpoint_arms(specs: list[str]) -> dict[str, str]:
     return result
 
 
+def parse_online_checkpoint_components(specs: list[str]) -> dict[str, str]:
+    """Parse control labels and the physical consequence channel they retain."""
+    result = {}
+    for spec in specs:
+        label, separator, component = spec.partition("=")
+        if (
+            not separator
+            or not label
+            or component not in {"joint", "response", "geometry"}
+            or label in result
+        ):
+            raise ValueError(
+                "Checkpoint components require unique "
+                "LABEL=joint|response|geometry entries"
+            )
+        result[label] = component
+    return result
+
+
 def warmup_gate(
     fidelity: dict, validation_results: list[dict], residual_output: bool
 ) -> tuple[bool, str]:
@@ -343,6 +363,7 @@ def load_gated_online_checkpoint(
     path: Path,
     *,
     expected_arm: str,
+    expected_component: str,
     optimizer_seed: int,
     base_readout: Path,
     consequence_readout: Path,
@@ -350,6 +371,8 @@ def load_gated_online_checkpoint(
     """Load one exact critic arm emitted by a passed consequence gate."""
     if expected_arm not in {"correct", "reversed", "zero"}:
         raise ValueError("Expected checkpoint arm must be correct, reversed or zero")
+    if expected_component not in {"joint", "response", "geometry"}:
+        raise ValueError("Expected component must be joint, response or geometry")
     payload = torch.load(path, map_location="cpu", weights_only=True)
     required = {
         "state_dict",
@@ -359,6 +382,7 @@ def load_gated_online_checkpoint(
         "train_trace_sha256",
         "base_readout_sha256",
         "consequence_readout_sha256",
+        "consequence_component",
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
@@ -366,6 +390,8 @@ def load_gated_online_checkpoint(
         raise ValueError("Gated online checkpoint was not emitted by a passed gate")
     if payload["arm"] != expected_arm:
         raise ValueError("Gated online checkpoint arm differs")
+    if payload["consequence_component"] != expected_component:
+        raise ValueError("Gated online checkpoint physical component differs")
     if int(payload["optimizer_seed"]) != optimizer_seed:
         raise ValueError("Gated online checkpoint optimizer seed differs")
     if payload["base_readout_sha256"] != file_sha256(base_readout):
@@ -796,6 +822,17 @@ def run(args):
         label: online_checkpoint_arms.get(label, "correct")
         for label in online_checkpoints
     }
+    online_checkpoint_components = parse_online_checkpoint_components(
+        getattr(args, "online_checkpoint_components", [])
+    )
+    if not set(online_checkpoint_components).issubset(online_checkpoints):
+        raise ValueError(
+            "Checkpoint component labels require matching online checkpoints"
+        )
+    online_checkpoint_components = {
+        label: online_checkpoint_components.get(label, "joint")
+        for label in online_checkpoints
+    }
     sparse_motion_heads = parse_external_readouts(
         getattr(args, "sparse_motion_heads", [])
     )
@@ -954,7 +991,10 @@ def run(args):
                 critic_conditioner_override = sparse_conditioner
             if method in online_checkpoints:
                 critic_conditioner_override = SignedCandidateConsequence(
-                    readout.candidate_conditioner("relative_concat"),
+                    readout.candidate_conditioner(
+                        "relative_concat",
+                        component=online_checkpoint_components[method],
+                    ),
                     {"correct": 1, "reversed": -1, "zero": 0}[
                         online_checkpoint_arms[method]
                     ],
@@ -981,6 +1021,9 @@ def run(args):
                     "residual_output": getattr(args, "residual_output", False),
                     "conservative_selector": method in conservative_selectors,
                     "online_checkpoint_arm": online_checkpoint_arms.get(method),
+                    "online_checkpoint_component": online_checkpoint_components.get(
+                        method
+                    ),
                     "candidate_selection_count": getattr(
                         args, "candidate_selection_count", 0
                     ),
@@ -1083,6 +1126,7 @@ def run(args):
                     checkpoint_payload = load_gated_online_checkpoint(
                         online_checkpoints[method],
                         expected_arm=online_checkpoint_arms[method],
+                        expected_component=online_checkpoint_components[method],
                         optimizer_seed=args.seed,
                         base_readout=path,
                         consequence_readout=critic_readouts[method],
@@ -1095,6 +1139,9 @@ def run(args):
                             "source_sha256": file_sha256(online_checkpoints[method]),
                             "optimizer_seed": args.seed,
                             "arm": checkpoint_payload["arm"],
+                            "consequence_component": checkpoint_payload[
+                                "consequence_component"
+                            ],
                             "train_trace_sha256": checkpoint_payload[
                                 "train_trace_sha256"
                             ],
@@ -1240,6 +1287,7 @@ def run(args):
             key: str(value) for key, value in online_checkpoints.items()
         },
         "online_checkpoint_arms": online_checkpoint_arms,
+        "online_checkpoint_components": online_checkpoint_components,
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -1319,6 +1367,13 @@ def main():
         default=[],
         metavar="LABEL=ARM",
         help="Preserve the correct, reversed or zero consequence arm at inference",
+    )
+    parser.add_argument(
+        "--online-checkpoint-components",
+        nargs="*",
+        default=[],
+        metavar="LABEL=COMPONENT",
+        help="Retain joint, response-only or geometry-only physical consequences",
     )
     parser.add_argument(
         "--sparse-motion-heads",

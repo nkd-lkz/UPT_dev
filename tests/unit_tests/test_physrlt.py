@@ -20,6 +20,7 @@ from toolkits.rlt.physrlt.conditioning import (
     SparseMotionConditioner,
     differentiable_env_commands,
     load_sparse_motion_conditioner,
+    physical_quantities,
 )
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     load_replay as load_consequence_gate_replay,
@@ -35,6 +36,7 @@ from toolkits.rlt.physrlt.control import (
     merge_replay_views,
     parse_external_readouts,
     parse_online_checkpoint_arms,
+    parse_online_checkpoint_components,
     replay_trace_sha256,
     skip_deferred_updates,
     validate_fixed_replay,
@@ -1402,6 +1404,32 @@ def test_consequence_concat_preserves_the_complete_base_token():
     assert not torch.allclose(separate_source[:, 128:], unit_result[:, 128:])
 
 
+def test_response_and_geometry_consequence_channels_form_joint_token():
+    torch.manual_seed(37)
+    model = PhysicalReadout(12, 67)
+    token = torch.randn(2, 128)
+    reference = torch.randn(2, 10, 7)
+    candidate = reference + 0.2
+    outputs = {
+        component: CandidateConsequenceConditioner(
+            model, "joint", mode="relative_concat", component=component
+        )(token, candidate, reference)
+        for component in ("joint", "response", "geometry")
+    }
+    for output in outputs.values():
+        torch.testing.assert_close(output[:, :128], token)
+    joint = outputs["joint"][:, 128:]
+    response = outputs["response"][:, 128:]
+    geometry = outputs["geometry"][:, 128:]
+    torch.testing.assert_close(joint, response + geometry)
+    assert response[:, :24].count_nonzero() > 0
+    assert response[:, 24:].count_nonzero() == 0
+    assert geometry[:, :24].count_nonzero() == 0
+    assert geometry[:, 24:].count_nonzero() > 0
+    with pytest.raises(ValueError, match="Physical component"):
+        physical_quantities(model, token, candidate, "joint", "invalid")
+
+
 def test_fixed_replay_views_require_the_same_executed_trace():
     base = [
         {
@@ -1451,11 +1479,13 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         "train_trace_sha256": "trace",
         "base_readout_sha256": file_sha256(base),
         "consequence_readout_sha256": file_sha256(consequence),
+        "consequence_component": "joint",
     }
     torch.save(payload, checkpoint)
     loaded = load_gated_online_checkpoint(
         checkpoint,
         expected_arm="correct",
+        expected_component="joint",
         optimizer_seed=31,
         base_readout=base,
         consequence_readout=consequence,
@@ -1465,6 +1495,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         load_gated_online_checkpoint(
             checkpoint,
             expected_arm="correct",
+            expected_component="joint",
             optimizer_seed=47,
             base_readout=base,
             consequence_readout=consequence,
@@ -1475,6 +1506,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         load_gated_online_checkpoint(
             checkpoint,
             expected_arm="correct",
+            expected_component="joint",
             optimizer_seed=31,
             base_readout=base,
             consequence_readout=consequence,
@@ -1482,6 +1514,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     loaded = load_gated_online_checkpoint(
         checkpoint,
         expected_arm="reversed",
+        expected_component="joint",
         optimizer_seed=31,
         base_readout=base,
         consequence_readout=consequence,
@@ -1493,6 +1526,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         load_gated_online_checkpoint(
             checkpoint,
             expected_arm="reversed",
+            expected_component="joint",
             optimizer_seed=31,
             base_readout=base,
             consequence_readout=consequence,
@@ -1526,6 +1560,11 @@ def test_online_checkpoint_arm_parser_is_explicit():
     }
     with pytest.raises(ValueError, match="Checkpoint arms require"):
         parse_online_checkpoint_arms(["method=unknown"])
+    assert parse_online_checkpoint_components(
+        ["all=joint", "robot=response", "object=geometry"]
+    ) == {"all": "joint", "robot": "response", "object": "geometry"}
+    with pytest.raises(ValueError, match="Checkpoint components require"):
+        parse_online_checkpoint_components(["method=unknown"])
 
 
 def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):

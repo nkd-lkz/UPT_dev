@@ -40,8 +40,11 @@ def physical_quantities(
     token: torch.Tensor,
     actions: torch.Tensor,
     method: str,
+    component: str = "joint",
 ) -> torch.Tensor:
     """Predict a fixed-width normalized consequence vector for each action."""
+    if component not in {"joint", "response", "geometry"}:
+        raise ValueError("Physical component must be joint, response or geometry")
     commands = differentiable_env_commands(actions)
     predictions = model.consequences(token, commands)
     response = predictions["response"].clone()
@@ -55,9 +58,13 @@ def physical_quantities(
     depth = geometry[..., :64].reshape(-1, 2, 1, 8, 8)
     depth = torch.nn.functional.avg_pool2d(depth.flatten(0, 1), 2)
     depth = depth.reshape(len(token), -1)
-    quantities = torch.cat(
-        (response.flatten(1), depth, geometry[..., 64:].flatten(1)), dim=-1
-    )
+    response = response.flatten(1)
+    geometry = torch.cat((depth, geometry[..., 64:].flatten(1)), dim=-1)
+    if component == "response":
+        geometry = torch.zeros_like(geometry)
+    elif component == "geometry":
+        response = torch.zeros_like(response)
+    quantities = torch.cat((response, geometry), dim=-1)
     if quantities.shape[-1] > 128:
         raise ValueError("Explicit physical quantities exceed token budget")
     return torch.nn.functional.pad(quantities, (0, 128 - quantities.shape[-1]))
@@ -70,7 +77,13 @@ class CandidateConsequenceConditioner(nn.Module):
     its action input, but never update the physical readout during online RL.
     """
 
-    def __init__(self, model: nn.Module, method: str, mode: str = "mixed") -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        method: str,
+        mode: str = "mixed",
+        component: str = "joint",
+    ) -> None:
         super().__init__()
         if mode not in {
             "outcomes",
@@ -84,6 +97,7 @@ class CandidateConsequenceConditioner(nn.Module):
         self.model = copy.deepcopy(model).eval().requires_grad_(False)
         self.method = method
         self.mode = mode
+        self.component = component
 
     def train(self, mode: bool = True):
         """Keep the frozen predictor in evaluation mode."""
@@ -107,7 +121,11 @@ class CandidateConsequenceConditioner(nn.Module):
         if reference.shape != actions.shape:
             raise ValueError("Reference and candidate action chunks must match")
         physical = physical_quantities(
-            self.model, consequence_token, actions, self.method
+            self.model,
+            consequence_token,
+            actions,
+            self.method,
+            self.component,
         )
         if self.mode == "outcomes":
             result = physical
@@ -115,12 +133,20 @@ class CandidateConsequenceConditioner(nn.Module):
             result = torch.cat((token, torch.zeros_like(physical)), dim=-1)
         elif self.mode == "relative_concat":
             reference_physical = physical_quantities(
-                self.model, consequence_token, reference, self.method
+                self.model,
+                consequence_token,
+                reference,
+                self.method,
+                self.component,
             )
             result = torch.cat((token, physical - reference_physical), dim=-1)
         elif self.mode == "relative_unit_concat":
             reference_physical = physical_quantities(
-                self.model, consequence_token, reference, self.method
+                self.model,
+                consequence_token,
+                reference,
+                self.method,
+                self.component,
             )
             # The critic already receives the candidate action and therefore
             # its magnitude. Normalize the active consequence coordinates so
@@ -140,7 +166,11 @@ class CandidateConsequenceConditioner(nn.Module):
         else:
             if self.mode == "relative":
                 reference_physical = physical_quantities(
-                    self.model, consequence_token, reference, self.method
+                    self.model,
+                    consequence_token,
+                    reference,
+                    self.method,
+                    self.component,
                 )
                 physical = physical - reference_physical
             compact = torch.nn.functional.adaptive_avg_pool1d(physical[:, None], 64)[

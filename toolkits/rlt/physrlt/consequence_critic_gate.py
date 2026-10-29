@@ -222,7 +222,10 @@ def run(args: argparse.Namespace) -> dict:
             random.seed(seed)
             torch.manual_seed(seed)
             conditioner = SignedCandidateConsequence(
-                readout.candidate_conditioner("relative_concat"), sign
+                readout.candidate_conditioner(
+                    "relative_concat", component=args.consequence_component
+                ),
+                sign,
             )
             learner = AcceptanceLearner(
                 "cpu",
@@ -278,6 +281,7 @@ def run(args: argparse.Namespace) -> dict:
         "base_readout_sha256": base_readout_sha256,
         "consequence_readout": str(args.consequence_readout),
         "consequence_readout_sha256": consequence_readout_sha256,
+        "consequence_component": args.consequence_component,
         "seeds": args.seeds,
         "rows": rows,
         "gate_summaries": summaries,
@@ -303,6 +307,7 @@ def run(args: argparse.Namespace) -> dict:
                     "train_trace_sha256": trace_hashes["train"],
                     "base_readout_sha256": base_readout_sha256,
                     "consequence_readout_sha256": consequence_readout_sha256,
+                    "consequence_component": args.consequence_component,
                     "candidate_selection_count": 5,
                     "candidate_selection_margin": 0.0,
                     "candidate_uncertainty_penalty": 1.0,
@@ -324,6 +329,11 @@ def main() -> None:
     parser.add_argument("--evaluations", nargs="+", required=True)
     parser.add_argument("--base-readout", type=Path, required=True)
     parser.add_argument("--consequence-readout", type=Path, required=True)
+    parser.add_argument(
+        "--consequence-component",
+        choices=("joint", "response", "geometry"),
+        default="joint",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=105)
     parser.add_argument("--seeds", type=int, nargs="+", default=[31, 47, 59])
