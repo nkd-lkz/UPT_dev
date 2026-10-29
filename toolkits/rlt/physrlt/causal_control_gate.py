@@ -164,7 +164,7 @@ def _paired_row(
         outcome_changed = bool(correct[case_id]["success"]) != bool(
             control[case_id]["success"]
         ) or float(correct[case_id]["ticks"]) != float(control[case_id]["ticks"])
-        if comparator != "reference" and outcome_changed and not trace_diverged:
+        if outcome_changed and not trace_diverged:
             outcome_changed_without_trace_divergence += 1
     correct_successes = sum(bool(row["success"]) for row in correct.values())
     control_successes = sum(bool(row["success"]) for row in control.values())
@@ -319,9 +319,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             if comparator == "reference"
             else selection_trace_complete and selection_trace_diverged_cases > 0
         )
-        causal_outcomes_attributed = (
-            comparator == "reference" or unattributed_outcome_cases == 0
-        )
+        causal_outcomes_attributed = unattributed_outcome_cases == 0
         strict_success_gain = correct_successes > control_successes
         tick_improvement_fraction = (
             (control_ticks - correct_ticks) / control_ticks

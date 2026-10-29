@@ -2096,6 +2096,21 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     assert not reversed_comparison["causal_outcomes_attributed"]
     assert not result["passes_causal_closed_loop_gate"]
 
+    unattributed_reference_rows = copy.deepcopy(passing_rows)
+    for row in unattributed_reference_rows:
+        if row["split"] == "development" and row["method"] == "reference":
+            row["ticks"] = 2
+            row["executed_command_trace"] = command_trace(0, 1, 1, 1)
+    (run / "episodes.json").write_text(json.dumps(unattributed_reference_rows))
+    result = evaluate_causal_control([run], arms)
+    reference_comparison = next(
+        row for row in result["comparisons"] if row["comparator"] == "reference"
+    )
+    assert reference_comparison["causal_choices_diverged"]
+    assert reference_comparison["unattributed_outcome_cases"] == 1
+    assert not reference_comparison["causal_outcomes_attributed"]
+    assert not result["passes_causal_closed_loop_gate"]
+
     inactive_rows = copy.deepcopy(passing_rows)
     for row in inactive_rows:
         if row["method"] == arms["correct"]:
