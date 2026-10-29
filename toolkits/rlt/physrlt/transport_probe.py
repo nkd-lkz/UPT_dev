@@ -37,6 +37,113 @@ def transport_coefficient(response: torch.Tensor, effect: torch.Tensor) -> torch
     ).clamp(0, 1)[:, None]
 
 
+def transport_jacobian(response: torch.Tensor, effect: torch.Tensor) -> torch.Tensor:
+    """Build a minimum-norm local transport Jacobian with gain at most one."""
+    if response.shape != effect.shape or response.ndim != 2 or response.shape[-1] != 3:
+        raise ValueError("Jacobian targets must be matching Nx3 tensors")
+    if not torch.isfinite(response).all() or not torch.isfinite(effect).all():
+        raise ValueError("Jacobian targets must be finite")
+    denominator = response.square().sum(-1).clamp_min(1e-10)
+    matrix = effect[:, :, None] * response[:, None, :] / denominator[:, None, None]
+    return project_transport_jacobian(matrix)
+
+
+def project_transport_jacobian(matrix: torch.Tensor) -> torch.Tensor:
+    """Project batched 3-D transport matrices to spectral gain no greater than one."""
+    if matrix.ndim != 3 or matrix.shape[-2:] != (3, 3):
+        raise ValueError("Transport Jacobians must have shape Nx3x3")
+    gain = torch.linalg.matrix_norm(matrix, ord=2).clamp_min(1e-10)
+    scale = (1 / gain).clamp_max(1)
+    return matrix * scale[:, None, None]
+
+
+def apply_transport_jacobian(
+    matrix: torch.Tensor, response: torch.Tensor
+) -> torch.Tensor:
+    """Apply a bounded local transport Jacobian to a predicted EEF response."""
+    matrix = project_transport_jacobian(matrix.reshape(-1, 3, 3))
+    if response.shape != (len(matrix), 3):
+        raise ValueError("Transport response does not align with Jacobians")
+    return torch.bmm(matrix, response[:, :, None])[:, :, 0]
+
+
+def transport_vector(response: torch.Tensor, effect: torch.Tensor) -> torch.Tensor:
+    """Normalize object motion by response magnitude and bound its vector gain."""
+    if response.shape != effect.shape or response.ndim != 2 or response.shape[-1] != 3:
+        raise ValueError("Transport vectors require matching Nx3 tensors")
+    magnitude = response.norm(dim=1, keepdim=True).clamp_min(1e-5)
+    vector = effect / magnitude
+    gain = vector.norm(dim=1, keepdim=True).clamp_min(1e-10)
+    return vector * (1 / gain).clamp_max(1)
+
+
+def apply_transport_vector(
+    vector: torch.Tensor, response: torch.Tensor
+) -> torch.Tensor:
+    """Scale a bounded motion direction by predicted response magnitude."""
+    if vector.shape != response.shape or vector.ndim != 2 or vector.shape[-1] != 3:
+        raise ValueError("Transport vectors and responses must be matching Nx3 tensors")
+    gain = vector.norm(dim=1, keepdim=True).clamp_min(1e-10)
+    vector = vector * (1 / gain).clamp_max(1)
+    return vector * response.norm(dim=1, keepdim=True)
+
+
+def transport_residual(response: torch.Tensor, effect: torch.Tensor) -> torch.Tensor:
+    """Return object motion not explained by bounded collinear transport."""
+    coefficient = transport_coefficient(response, effect)
+    return effect - coefficient * response
+
+
+def apply_transport_residual(
+    base: torch.Tensor,
+    residual: torch.Tensor,
+    response: torch.Tensor,
+    *,
+    max_response_ratio: float = 1.0,
+) -> torch.Tensor:
+    """Add a bounded geometry residual to a collinear transport prediction."""
+    if base.shape != residual.shape or base.shape != response.shape:
+        raise ValueError("Transport residual inputs must have matching shapes")
+    if base.ndim != 2 or base.shape[-1] != 3:
+        raise ValueError("Transport residual inputs must have shape Nx3")
+    if max_response_ratio < 0:
+        raise ValueError("Residual response ratio must be nonnegative")
+    limit = max_response_ratio * response.norm(dim=1, keepdim=True)
+    magnitude = residual.norm(dim=1, keepdim=True).clamp_min(1e-10)
+    bounded = residual * (limit / magnitude).clamp_max(1)
+    return base + bounded
+
+
+def select_residual_ratio(
+    base: torch.Tensor,
+    residual: torch.Tensor,
+    response: torch.Tensor,
+    target: torch.Tensor,
+    candidates: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0),
+) -> tuple[float, dict[str, float]]:
+    """Select residual strength from training-layout predictions only."""
+    if not candidates or any(value < 0 for value in candidates):
+        raise ValueError("Residual ratio candidates must be nonnegative")
+    losses = {
+        str(value): float(
+            (
+                apply_transport_residual(
+                    base,
+                    residual,
+                    response,
+                    max_response_ratio=value,
+                )
+                - target
+            )
+            .square()
+            .mean()
+        )
+        for value in candidates
+    }
+    selected = min(candidates, key=lambda value: losses[str(value)])
+    return selected, losses
+
+
 def crossfit_ridge(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -92,22 +199,38 @@ def gated_coefficient(
     """Predict motion probability times a coefficient fitted on motion events."""
     if moving.dtype != torch.bool or moving.shape != (len(train_x),):
         raise ValueError("Motion mask must align with coupling rows")
-    if int(moving.sum()) < 2 or int((~moving).sum()) < 2:
-        raise ValueError("Gated coupling requires moving and stationary examples")
+    moving_rows = int(moving.sum())
+    stationary_rows = int((~moving).sum())
+    if moving_rows == 0:
+        return torch.zeros(len(test_x), 1, dtype=coefficient.dtype), {
+            "moving_rows": 0,
+            "stationary_rows": stationary_rows,
+            "event_cv": {"constant_label": 0},
+            "conditional_cv": None,
+            "event_labels_shuffled": shuffle_seed is not None,
+        }
+    if moving_rows < 2:
+        raise ValueError("Gated coupling requires at least two moving examples")
     event_target = moving.double()[:, None]
     if shuffle_seed is not None:
         generator = torch.Generator().manual_seed(shuffle_seed)
         event_target = event_target[
             torch.randperm(len(event_target), generator=generator)
         ]
-    event, event_cv = crossfit_ridge(train_x, event_target, cases, test_x)
+    if stationary_rows == 0:
+        event = torch.ones(len(test_x), 1, dtype=coefficient.dtype)
+        event_cv = {"constant_label": 1}
+    elif stationary_rows < 2:
+        raise ValueError("Gated coupling requires at least two stationary examples")
+    else:
+        event, event_cv = crossfit_ridge(train_x, event_target, cases, test_x)
     moving_cases = [case for case, active in zip(cases, moving, strict=True) if active]
     conditional, conditional_cv = crossfit_ridge(
         train_x[moving], coefficient[moving], moving_cases, test_x
     )
     return event.clamp(0, 1) * conditional.clamp(0, 1), {
-        "moving_rows": int(moving.sum()),
-        "stationary_rows": int((~moving).sum()),
+        "moving_rows": moving_rows,
+        "stationary_rows": stationary_rows,
         "event_cv": event_cv,
         "conditional_cv": conditional_cv,
         "event_labels_shuffled": shuffle_seed is not None,
@@ -489,6 +612,12 @@ def evaluate_records(
     predicted_response, response_cv = crossfit_ridge(
         x_response, measured_train_response, cases, test_response
     )
+    train_predicted_response = out_of_layout_predictions(
+        x_response,
+        measured_train_response,
+        cases,
+        response_cv["ridge"],
+    )
     results = []
     object_indices = [dominant_object(train, rank) for rank in object_ranks]
     for method in methods:
@@ -540,6 +669,9 @@ def evaluate_records(
                     [object_effect(record, index) for record in evaluation]
                 )
                 coefficient = transport_coefficient(measured_train_response, target)
+                jacobian = transport_jacobian(measured_train_response, target)
+                vector = transport_vector(measured_train_response, target)
+                residual = transport_residual(measured_train_response, target)
                 moving = target.norm(dim=1) > 0.002
                 direct, direct_cv = crossfit_ridge(x, target, cases, test_x)
                 predicted_coefficient, coefficient_cv = crossfit_ridge(
@@ -559,8 +691,54 @@ def evaluate_records(
                     torch.randperm(len(coefficient), generator=generator)
                 ]
                 wrong_coefficient, wrong_cv = crossfit_ridge(x, shuffled, cases, test_x)
+                predicted_jacobian, jacobian_cv = crossfit_ridge(
+                    x, jacobian.flatten(1), cases, test_x
+                )
+                state_jacobian, state_jacobian_cv = crossfit_ridge(
+                    x_response, jacobian.flatten(1), cases, test_response
+                )
+                shuffled_jacobian = jacobian[
+                    torch.randperm(len(jacobian), generator=generator)
+                ]
+                wrong_jacobian, wrong_jacobian_cv = crossfit_ridge(
+                    x, shuffled_jacobian.flatten(1), cases, test_x
+                )
+                predicted_vector, vector_cv = crossfit_ridge(x, vector, cases, test_x)
+                state_vector, state_vector_cv = crossfit_ridge(
+                    x_response, vector, cases, test_response
+                )
+                shuffled_vector = vector[
+                    torch.randperm(len(vector), generator=generator)
+                ]
+                wrong_vector, wrong_vector_cv = crossfit_ridge(
+                    x, shuffled_vector, cases, test_x
+                )
+                predicted_residual, transport_residual_cv = crossfit_ridge(
+                    x, residual, cases, test_x
+                )
+                state_residual, state_residual_cv = crossfit_ridge(
+                    x_response, residual, cases, test_response
+                )
+                shuffled_residual_target = residual[
+                    torch.randperm(len(residual), generator=generator)
+                ]
+                wrong_transport_residual, wrong_transport_residual_cv = crossfit_ridge(
+                    x, shuffled_residual_target, cases, test_x
+                )
                 state_coefficient, state_cv = crossfit_ridge(
                     x_response, coefficient, cases, test_response
+                )
+                train_coefficient = out_of_layout_predictions(
+                    x, coefficient, cases, coefficient_cv["ridge"]
+                )
+                train_residual = out_of_layout_predictions(
+                    x, residual, cases, transport_residual_cv["ridge"]
+                )
+                residual_ratio, residual_ratio_cv = select_residual_ratio(
+                    train_coefficient.clamp(0, 1) * train_predicted_response,
+                    train_residual,
+                    train_predicted_response,
+                    target,
                 )
                 state_train_prediction = out_of_layout_predictions(
                     x_response, coefficient, cases, state_cv["ridge"]
@@ -619,6 +797,41 @@ def evaluate_records(
                     * predicted_response,
                     "shuffled_event_coupling": shuffled_event_coefficient
                     * predicted_response,
+                    "jacobian_coupling": apply_transport_jacobian(
+                        predicted_jacobian, predicted_response
+                    ),
+                    "state_action_jacobian_coupling": apply_transport_jacobian(
+                        state_jacobian, predicted_response
+                    ),
+                    "shuffled_jacobian_coupling": apply_transport_jacobian(
+                        wrong_jacobian, predicted_response
+                    ),
+                    "vector_coupling": apply_transport_vector(
+                        predicted_vector, predicted_response
+                    ),
+                    "state_action_vector_coupling": apply_transport_vector(
+                        state_vector, predicted_response
+                    ),
+                    "shuffled_vector_coupling": apply_transport_vector(
+                        wrong_vector, predicted_response
+                    ),
+                    "residual_coupling": apply_transport_residual(
+                        coupled, predicted_residual, predicted_response
+                    ),
+                    "adaptive_residual_coupling": apply_transport_residual(
+                        coupled,
+                        predicted_residual,
+                        predicted_response,
+                        max_response_ratio=residual_ratio,
+                    ),
+                    "state_action_residual_coupling": apply_transport_residual(
+                        state_coefficient.clamp(0, 1) * predicted_response,
+                        state_residual,
+                        predicted_response,
+                    ),
+                    "shuffled_transport_residual_coupling": apply_transport_residual(
+                        coupled, wrong_transport_residual, predicted_response
+                    ),
                     "state_action_direct": state_direct,
                     "shuffled_coupling": wrong_coefficient.clamp(0, 1)
                     * predicted_response,
@@ -658,6 +871,17 @@ def evaluate_records(
                         "gated_action_cv": gated_action_cv,
                         "gated_state_action_cv": gated_state_cv,
                         "shuffled_event_cv": shuffled_event_cv,
+                        "jacobian_cv": jacobian_cv,
+                        "state_action_jacobian_cv": state_jacobian_cv,
+                        "shuffled_jacobian_cv": wrong_jacobian_cv,
+                        "vector_cv": vector_cv,
+                        "state_action_vector_cv": state_vector_cv,
+                        "shuffled_vector_cv": wrong_vector_cv,
+                        "residual_cv": transport_residual_cv,
+                        "state_action_residual_cv": state_residual_cv,
+                        "shuffled_transport_residual_cv": wrong_transport_residual_cv,
+                        "adaptive_residual_ratio": residual_ratio,
+                        "adaptive_residual_ratio_train_layout_cv_mse": residual_ratio_cv,
                         "state_action_direct_cv": state_direct_cv,
                         "layout_comparison": layout_comparison(
                             arms,
@@ -695,6 +919,51 @@ def evaluate_records(
                                 "coupled",
                                 "gated_state_action_coupling",
                                 "shuffled_event_coupling",
+                            ),
+                        ),
+                        "jacobian_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="jacobian_coupling",
+                            comparators=(
+                                "coupled",
+                                "state_action_jacobian_coupling",
+                                "shuffled_jacobian_coupling",
+                            ),
+                        ),
+                        "vector_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="vector_coupling",
+                            comparators=(
+                                "coupled",
+                                "state_action_vector_coupling",
+                                "shuffled_vector_coupling",
+                            ),
+                        ),
+                        "residual_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="residual_coupling",
+                            comparators=(
+                                "coupled",
+                                "direct",
+                                "state_action_residual_coupling",
+                                "shuffled_transport_residual_coupling",
+                            ),
+                        ),
+                        "adaptive_residual_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="adaptive_residual_coupling",
+                            comparators=(
+                                "coupled",
+                                "residual_coupling",
+                                "direct",
                             ),
                         ),
                     }

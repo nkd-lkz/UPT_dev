@@ -686,6 +686,9 @@ def test_paired_case_batches_cover_layouts_once_and_preserve_split():
 def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     from toolkits.rlt.physrlt.transport_probe import (
         active_object_labels,
+        apply_transport_jacobian,
+        apply_transport_residual,
+        apply_transport_vector,
         assert_disjoint_records,
         classification_layout_comparison,
         classification_report,
@@ -693,6 +696,10 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
         layout_comparison,
         out_of_layout_predictions,
         phase_expand,
+        select_residual_ratio,
+        transport_jacobian,
+        transport_residual,
+        transport_vector,
     )
 
     target = torch.zeros(4, 3)
@@ -796,6 +803,58 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     assert coefficient.shape == (4, 1)
     assert torch.all((0 <= coefficient) & (coefficient <= 1))
     assert audit["moving_rows"] == 2
+    all_moving, moving_audit = gated_coefficient(
+        x,
+        x,
+        torch.tensor([[0.1], [0.2], [0.3], [0.4]], dtype=torch.double),
+        torch.ones(4, dtype=torch.bool),
+        ["a", "a", "b", "b"],
+    )
+    assert all_moving.shape == (4, 1)
+    assert moving_audit["event_cv"] == {"constant_label": 1}
+    no_motion, stationary_audit = gated_coefficient(
+        x,
+        x,
+        torch.zeros(4, 1, dtype=torch.double),
+        torch.zeros(4, dtype=torch.bool),
+        ["a", "a", "b", "b"],
+    )
+    torch.testing.assert_close(no_motion, torch.zeros(4, 1, dtype=torch.double))
+    assert stationary_audit["event_cv"] == {"constant_label": 0}
+    response = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    effect = torch.tensor([[0.0, 0.5, 0.0], [0.0, 2.0, 0.0]])
+    jacobian = transport_jacobian(response, effect)
+    transported = apply_transport_jacobian(jacobian, response)
+    torch.testing.assert_close(
+        transported,
+        torch.tensor([[0.0, 0.5, 0.0], [0.0, 1.0, 0.0]]),
+    )
+    vector = transport_vector(response, effect)
+    torch.testing.assert_close(
+        apply_transport_vector(vector, response),
+        torch.tensor([[0.0, 0.5, 0.0], [0.0, 1.0, 0.0]]),
+    )
+    residual = transport_residual(response, effect)
+    torch.testing.assert_close(residual, effect)
+    torch.testing.assert_close(
+        apply_transport_residual(torch.zeros_like(effect), residual, response),
+        torch.tensor([[0.0, 0.5, 0.0], [0.0, 1.0, 0.0]]),
+    )
+    ratio, losses = select_residual_ratio(
+        torch.zeros_like(effect), residual, response, effect
+    )
+    assert ratio == 1.0
+    assert losses["1.0"] < losses["0.0"]
+    torch.testing.assert_close(
+        apply_transport_residual(
+            torch.zeros_like(effect), residual, response, max_response_ratio=0
+        ),
+        torch.zeros_like(effect),
+    )
+    with pytest.raises(ValueError, match="nonnegative"):
+        apply_transport_residual(
+            torch.zeros_like(effect), residual, response, max_response_ratio=-1
+        )
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
