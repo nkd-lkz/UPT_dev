@@ -36,7 +36,11 @@ from toolkits.rlt.physrlt.control import (
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
 from toolkits.rlt.physrlt.control_report import summarize as summarize_control_runs
-from toolkits.rlt.physrlt.critic_audit import binary_auc, discounted_success_returns
+from toolkits.rlt.physrlt.critic_audit import (
+    binary_auc,
+    discounted_success_returns,
+    ranking_concordance,
+)
 from toolkits.rlt.physrlt.data import (
     check_split,
     compact_features,
@@ -52,6 +56,10 @@ from toolkits.rlt.physrlt.effect_probe import (
 )
 from toolkits.rlt.physrlt.effect_probe import (
     run as run_effect_probe,
+)
+from toolkits.rlt.physrlt.episode_fold_gate import (
+    complete_positive_episodes,
+    leave_one_episode_out_folds,
 )
 from toolkits.rlt.physrlt.gain_probe import (
     realized_translation_score,
@@ -113,6 +121,15 @@ def test_causal_response_matrix_starts_at_identity_without_future_data():
     assert torch.allclose(estimator.predict(expected), expected)
     assert torch.equal(estimator.support(), torch.zeros(3))
     assert estimator.token().shape == (12,)
+
+
+def test_continuous_return_ranking_concordance_is_tie_aware():
+    assert ranking_concordance([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 1.0
+    assert ranking_concordance([3.0, 2.0, 1.0], [1.0, 2.0, 3.0]) == 0.0
+    assert ranking_concordance([1.0, 1.0], [0.0, 1.0]) == 0.5
+    assert ranking_concordance([1.0, 2.0], [0.0, 0.0]) is None
+    with pytest.raises(ValueError, match="equal length"):
+        ranking_concordance([1.0], [1.0, 2.0])
 
 
 def test_causal_response_matrix_recovers_coupled_execution_map():
@@ -1282,6 +1299,62 @@ def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
     torch.save(physical, physical_path)
     with pytest.raises(ValueError, match="traces differ"):
         load_consequence_gate_replay(base_path, physical_path)
+
+
+def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():
+    replay = []
+    for episode in range(3):
+        for step in range(2):
+            replay.append(
+                {
+                    "z": torch.full((128,), float(episode)),
+                    "ref": torch.zeros(10, 7),
+                    "prop": torch.zeros(8),
+                    "action": torch.full((10, 7), 0.01 * episode),
+                    "accepted_commands": torch.full((10, 7), 0.01 * episode),
+                    "next_z": torch.full((128,), float(episode + 1)),
+                    "next_ref": torch.zeros(10, 7),
+                    "next_prop": torch.zeros(8),
+                    "ticks": 10,
+                    "terminal": step == 1,
+                    "reward": 5.0 if step == 1 else 0.0,
+                }
+            )
+    open_tail = copy.deepcopy(replay[0])
+    open_tail.update(terminal=False, reward=0.0, ticks=7)
+    replay.append(open_tail)
+    episodes = complete_positive_episodes(replay)
+    assert [len(episode) for episode in episodes] == [2, 2, 2]
+    folds = leave_one_episode_out_folds(replay)
+    assert len(folds) == 3
+    assert all(len(fold["train"]) == 4 for fold in folds)
+    assert all(len(fold["evaluation"]) == 2 for fold in folds)
+    assert all(
+        fold["train_summary"]["trace_sha256"]
+        != fold["evaluation_summary"]["trace_sha256"]
+        for fold in folds
+    )
+
+
+def test_episode_fold_gate_requires_three_complete_successful_episodes():
+    replay = []
+    for episode in range(2):
+        row = {
+            "z": torch.full((128,), float(episode)),
+            "ref": torch.zeros(10, 7),
+            "prop": torch.zeros(8),
+            "action": torch.full((10, 7), 0.01 * episode),
+            "accepted_commands": torch.full((10, 7), 0.01 * episode),
+            "next_z": torch.full((128,), float(episode + 1)),
+            "next_ref": torch.zeros(10, 7),
+            "next_prop": torch.zeros(8),
+            "ticks": 10,
+            "terminal": True,
+            "reward": 5.0,
+        }
+        replay.append(row)
+    with pytest.raises(ValueError, match="at least three"):
+        leave_one_episode_out_folds(replay)
 
 
 def test_actor_replay_view_has_a_capacity_matched_control():

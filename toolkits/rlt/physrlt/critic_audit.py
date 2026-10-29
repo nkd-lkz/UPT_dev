@@ -67,6 +67,24 @@ def binary_auc(scores: list[float], labels: list[bool]) -> float | None:
     return wins / (len(positives) * len(negatives))
 
 
+def ranking_concordance(scores: list[float], targets: list[float]) -> float | None:
+    """Return tie-aware pairwise concordance for unequal continuous targets."""
+    if len(scores) != len(targets):
+        raise ValueError("Scores and targets must have equal length")
+    wins = 0.0
+    comparisons = 0
+    for first in range(len(scores)):
+        for second in range(first + 1, len(scores)):
+            target_delta = targets[first] - targets[second]
+            if target_delta == 0:
+                continue
+            score_delta = scores[first] - scores[second]
+            wins += float(score_delta * target_delta > 0)
+            wins += 0.5 * float(score_delta == 0)
+            comparisons += 1
+    return wins / comparisons if comparisons else None
+
+
 def _parse_evaluations(specs: list[str]) -> dict[tuple[str, str], Path]:
     evaluations = {}
     for spec in specs:
@@ -214,8 +232,11 @@ def audit_replay(
         "transitions": len(replay),
         "positive_return_transitions": sum(labels),
         "return_ranking_auc": binary_auc(q1_values, labels),
+        "return_order_concordance": ranking_concordance(q1_values, returns),
         "positive_q1_mean": (sum(positive_q) / len(positive_q) if positive_q else None),
-        "zero_return_q1_mean": sum(negative_q) / len(negative_q),
+        "zero_return_q1_mean": (
+            sum(negative_q) / len(negative_q) if negative_q else None
+        ),
         "mc_return_mse": sum(
             (prediction - target) ** 2 for prediction, target in zip(q1_values, returns)
         )
