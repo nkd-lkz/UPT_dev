@@ -68,6 +68,66 @@ class _ResponseAuxiliaryCritic(nn.Module):
         )
 
 
+class _ConsequenceDuelingCritic(nn.Module):
+    """Route every action-dependent Q difference through physical outcomes.
+
+    The first half of the conditioned token is the frozen semantic state and
+    the second half is the predicted candidate-minus-reference consequence.
+    A state-value branch sees only the former.  The advantage branch sees both,
+    but is centered at a zero consequence so the reference action has exactly
+    zero learned advantage.
+    """
+
+    def __init__(self, token_dim: int, prop_dim: int = 8, hidden_dim: int = 512):
+        super().__init__()
+        if token_dim % 2:
+            raise ValueError("Consequence-dueling critic needs two equal channels")
+        self.base_dim = token_dim // 2
+        value_input = self.base_dim + prop_dim
+        advantage_input = token_dim + prop_dim
+
+        def mlp(width: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Linear(width, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
+
+        self.v1, self.v2 = mlp(value_input), mlp(value_input)
+        self.a1, self.a2 = mlp(advantage_input), mlp(advantage_input)
+
+    def _inputs(
+        self, token: torch.Tensor, prop: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if token.dim() == 3:
+            token = token.squeeze(1)
+        if token.ndim != 2 or token.shape[-1] != 2 * self.base_dim:
+            raise ValueError("Invalid consequence-dueling token")
+        base, consequence = token.split(self.base_dim, dim=-1)
+        value_input = torch.cat((base, prop), dim=-1)
+        advantage_input = torch.cat((base, consequence, prop), dim=-1)
+        zero_input = torch.cat((base, torch.zeros_like(consequence), prop), dim=-1)
+        return value_input, advantage_input, zero_input
+
+    def _q(self, token, prop, value, advantage):
+        value_input, advantage_input, zero_input = self._inputs(token, prop)
+        return (
+            value(value_input) + advantage(advantage_input) - advantage(zero_input)
+        ).squeeze(-1)
+
+    def forward(self, token, action, prop):
+        del action
+        return self._q(token, prop, self.v1, self.a1), self._q(
+            token, prop, self.v2, self.a2
+        )
+
+    def q1_forward(self, token, action, prop):
+        del action
+        return self._q(token, prop, self.v1, self.a1)
+
+
 def td_target(
     rewards: torch.Tensor,
     ticks: torch.Tensor,
@@ -150,6 +210,7 @@ class AcceptanceLearner:
         candidate_uncertainty_penalty: float = 0.0,
         critic_response_aux_weight: float = 0.0,
         critic_response_aux_shuffled: bool = False,
+        critic_consequence_dueling: bool = False,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -201,6 +262,14 @@ class AcceptanceLearner:
             raise ValueError("Critic response auxiliary weight must be nonnegative")
         if critic_response_aux_shuffled and critic_response_aux_weight == 0:
             raise ValueError("Shuffled response supervision requires a positive weight")
+        if critic_consequence_dueling and (
+            critic_conditioner is None or critic_bottleneck_dim != 2 * bottleneck_dim
+        ):
+            raise ValueError(
+                "Consequence-dueling critic requires an equal-width consequence channel"
+            )
+        if critic_consequence_dueling and critic_response_aux_weight > 0:
+            raise ValueError("Consequence dueling and response auxiliary are disjoint")
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
@@ -215,6 +284,7 @@ class AcceptanceLearner:
         self.candidate_uncertainty_penalty = candidate_uncertainty_penalty
         self.critic_response_aux_weight = critic_response_aux_weight
         self.critic_response_aux_shuffled = critic_response_aux_shuffled
+        self.critic_consequence_dueling = critic_consequence_dueling
         self.last_command_diagnostics: dict | None = None
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
@@ -238,13 +308,17 @@ class AcceptanceLearner:
             if actor_physical_gate
             else actor
         )
-        critic = ActionTokenQCritic(
-            bottleneck_dim=critic_bottleneck_dim,
-            action_dim=7,
-            chunk_len=chunk_len,
-            hidden_dim=512,
-            prop_dim=8,
-        ).to(device)
+        critic = (
+            _ConsequenceDuelingCritic(critic_bottleneck_dim).to(device)
+            if critic_consequence_dueling
+            else ActionTokenQCritic(
+                bottleneck_dim=critic_bottleneck_dim,
+                action_dim=7,
+                chunk_len=chunk_len,
+                hidden_dim=512,
+                prop_dim=8,
+            ).to(device)
+        )
         self.critic = (
             _ResponseAuxiliaryCritic(critic, response_dim=8).to(device)
             if critic_response_aux_weight > 0
@@ -621,6 +695,7 @@ class AcceptanceLearner:
             "residual_output": self.residual_output,
             "critic_response_aux_weight": self.critic_response_aux_weight,
             "critic_response_aux_shuffled": self.critic_response_aux_shuffled,
+            "critic_consequence_dueling": self.critic_consequence_dueling,
             "candidate_selection_count": self.candidate_selection_count,
             "candidate_selection_margin": self.candidate_selection_margin,
             "candidate_uncertainty_penalty": self.candidate_uncertainty_penalty,
@@ -653,6 +728,10 @@ class AcceptanceLearner:
             self.critic_response_aux_shuffled
         ):
             raise ValueError("Checkpoint critic-response contract differs")
+        if state.get("critic_consequence_dueling", False) != (
+            self.critic_consequence_dueling
+        ):
+            raise ValueError("Checkpoint consequence-dueling contract differs")
         selection_contract = (
             "candidate_selection_count",
             "candidate_selection_margin",

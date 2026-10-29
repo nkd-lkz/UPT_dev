@@ -134,6 +134,7 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
         critic_response_aux_shuffled=checkpoint.get(
             "critic_response_aux_shuffled", False
         ),
+        critic_consequence_dueling=checkpoint.get("critic_consequence_dueling", False),
     )
     learner.load_state_dict(checkpoint)
     learner.actor.eval()

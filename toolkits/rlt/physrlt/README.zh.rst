@@ -147,6 +147,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 当 actor gradient 对稀疏奖励 critic 过于敏感时，``--conservative-selectors`` 提供不改变训练数据的冻结评估诊断。它在 reference 与 actor 提议之间生成固定数量的插值候选，以双 Q 较小值减去 Q 分歧惩罚作为分数；只有最佳候选相对 reference 超过 ``--candidate-selection-margin`` 才执行修正，否则回退到 reference。选择器只在 critic 已更新且采用确定性评估时生效，并记录非 reference 选择比例、平均插值尺度和分数增量。action control 与 Physical Token 必须使用相同候选数、margin、分歧惩罚和 checkpoint；该实验只能检验物理条件化是否改善候选排序，不能视为额外在线数据带来的收益。
 
+``--critic-consequence-dueling`` 是针对 ``--concat-relative-critics`` 的更严格 value-function 消融。state value 分支只接收冻结语义 token；以 reference 为零点的 advantage 分支接收候选动作相对 reference 的预测物理后果。原始候选动作不再直接进入 Q 网络，因此所有动作相关的 Q 差异都必须经过冻结后果预测器。进入闭环前，``consequence_critic_gate`` 会在完全一致的 replay、优化 batch 与网络容量下比较正确、反向和全零后果通道。
+
 ``--actor-zero-concat`` 与 ``--actor-physical-concat`` 用于检验 grounded readout 是否必须直接进入动作生成路径，而不只是进入 critic。两组 actor 输入均为 256 维：容量对照将完整 128 维 base token 与零向量拼接，物理组将同一 base token 与独立的 128 维 Physical Token 拼接；两组的实际 replay、actor／critic 更新次数和 base token 完全匹配。只有物理组跨多个优化 seed 优于零通道对照，才能支持物理表征收益；若只优于原 128 维 actor，无法排除模型容量增加带来的影响。
 
 ``--actor-physical-outcomes-concat`` 保持同一个 256 维接口，但将受物理监督的 encoder latent 替换为冻结 decoder 对 reference 动作预测的显式归一化后果，以区分“监督塑造的 latent”和类似 WAM 的预测后果表征。部署时只使用当前观测、本体状态、reference chunk 与冻结模型预测；实测未来响应和特权几何仍只作为训练标签。只有同时比较零通道对照、physical latent 与 explicit outcomes，才能把收益归因于显式物理量。

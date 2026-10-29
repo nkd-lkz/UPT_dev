@@ -233,6 +233,55 @@ def test_critic_response_auxiliary_is_shared_and_checkpointed(source):
         AcceptanceLearner("cpu", critic_response_aux_shuffled=True)
 
 
+def test_consequence_dueling_critic_routes_action_signal_through_outcomes(source):
+    class Conditioner(torch.nn.Module):
+        def forward(self, token, action, reference):
+            effect = (action - reference).mean((-2, -1))[:, None]
+            return torch.cat((token, effect.expand_as(token)), dim=-1)
+
+    learner = AcceptanceLearner(
+        "cpu",
+        critic_conditioner=Conditioner(),
+        critic_conditioning="candidate_relative_concat",
+        critic_bottleneck_dim=512,
+        critic_consequence_dueling=True,
+    )
+    replay = rows()
+    token = torch.stack([row["z"] for row in replay[:2]])
+    prop = torch.stack([row["prop"] for row in replay[:2]])
+    reference = torch.stack([row["ref"] for row in replay[:2]])
+    candidate = reference.clone().requires_grad_(True)
+    candidate.data[1, :, 0] += 0.2
+    conditioned = learner._critic_token(token, candidate, reference)
+    q = learner.critic.q1_forward(conditioned, candidate, prop)
+    q.sum().backward()
+    assert candidate.grad is not None and candidate.grad[1].abs().sum() > 0
+    same_condition = conditioned.detach()
+    torch.testing.assert_close(
+        learner.critic.q1_forward(same_condition, candidate.detach(), prop),
+        learner.critic.q1_forward(same_condition, torch.zeros_like(candidate), prop),
+        rtol=0,
+        atol=0,
+    )
+    state = learner.state_dict()
+    AcceptanceLearner(
+        "cpu",
+        critic_conditioner=Conditioner(),
+        critic_conditioning="candidate_relative_concat",
+        critic_bottleneck_dim=512,
+        critic_consequence_dueling=True,
+    ).load_state_dict(state)
+    with pytest.raises(ValueError, match="consequence-dueling contract"):
+        AcceptanceLearner(
+            "cpu",
+            critic_conditioner=Conditioner(),
+            critic_conditioning="candidate_relative_concat",
+            critic_bottleneck_dim=512,
+        ).load_state_dict(state)
+    with pytest.raises(ValueError, match="equal-width consequence channel"):
+        AcceptanceLearner("cpu", critic_consequence_dueling=True)
+
+
 def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(source):
     class Conditioner(torch.nn.Module):
         def __init__(self):

@@ -203,6 +203,7 @@ def warmup(
     critic_conditioner_override: torch.nn.Module | None = None,
     critic_response_aux_weight: float = 0.0,
     critic_response_aux_shuffled: bool = False,
+    critic_consequence_dueling: bool = False,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -254,6 +255,7 @@ def warmup(
         candidate_uncertainty_penalty=candidate_uncertainty_penalty,
         critic_response_aux_weight=critic_response_aux_weight,
         critic_response_aux_shuffled=critic_response_aux_shuffled,
+        critic_consequence_dueling=critic_consequence_dueling,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -758,12 +760,17 @@ def run(args):
     shuffled_response_aux_critics = set(
         getattr(args, "critic_response_aux_shuffled", [])
     )
+    consequence_dueling_critics = set(getattr(args, "critic_consequence_dueling", []))
     if response_aux_critics & shuffled_response_aux_critics:
         raise ValueError("Correct and shuffled response supervision must be disjoint")
     if not (response_aux_critics | shuffled_response_aux_critics).issubset(
         args.methods
     ):
         raise ValueError("Critic response supervision requires a requested method")
+    if not consequence_dueling_critics.issubset(concat_relative_critics):
+        raise ValueError(
+            "Consequence-dueling critics require relative-consequence conditioning"
+        )
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -904,6 +911,7 @@ def run(args):
                     ),
                     "critic_response_aux_shuffled": method
                     in shuffled_response_aux_critics,
+                    "critic_consequence_dueling": method in consequence_dueling_critics,
                     "consequence_checkpoint": (
                         str(critic_readouts[method])
                         if method in critic_readouts
@@ -952,6 +960,7 @@ def run(args):
                     else 0.0
                 ),
                 critic_response_aux_shuffled=method in shuffled_response_aux_critics,
+                critic_consequence_dueling=method in consequence_dueling_critics,
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -1230,6 +1239,15 @@ def main():
         help="Use rolled response labels as a matched negative control",
     )
     parser.add_argument("--critic-response-aux-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--critic-consequence-dueling",
+        nargs="*",
+        default=[],
+        help=(
+            "Force selected relative-consequence critics to express every "
+            "action advantage through the predicted physical outcome"
+        ),
+    )
     parser.add_argument("--conservative-selectors", nargs="*", default=[])
     parser.add_argument("--candidate-selection-count", type=int, default=5)
     parser.add_argument("--candidate-selection-margin", type=float, default=0.0)

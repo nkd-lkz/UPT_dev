@@ -19,6 +19,12 @@ from toolkits.rlt.physrlt.conditioning import (
     differentiable_env_commands,
     load_sparse_motion_conditioner,
 )
+from toolkits.rlt.physrlt.consequence_critic_gate import (
+    load_replay as load_consequence_gate_replay,
+)
+from toolkits.rlt.physrlt.consequence_critic_gate import (
+    parse_evaluations as parse_consequence_gate_evaluations,
+)
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
     deferred_update_summary,
@@ -1203,6 +1209,41 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
+
+
+def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
+    base = [
+        {
+            "z": torch.zeros(128),
+            "ref": torch.zeros(10, 7),
+            "prop": torch.zeros(8),
+            "action": torch.zeros(10, 7),
+            "accepted_commands": torch.zeros(10, 7),
+            "next_z": torch.ones(128),
+            "next_ref": torch.zeros(10, 7),
+            "next_prop": torch.zeros(8),
+            "ticks": 10,
+            "terminal": False,
+            "reward": 0.0,
+        }
+    ]
+    physical = copy.deepcopy(base)
+    physical[0]["critic_z"] = torch.full((128,), 2.0)
+    physical[0]["next_critic_z"] = torch.full((128,), 3.0)
+    base_path, physical_path = tmp_path / "base.pt", tmp_path / "physical.pt"
+    torch.save(base, base_path)
+    torch.save(physical, physical_path)
+    parsed = parse_consequence_gate_evaluations(
+        [f"heldout={base_path},{physical_path}"]
+    )
+    assert parsed == {"heldout": (base_path, physical_path)}
+    merged = load_consequence_gate_replay(base_path, physical_path)
+    torch.testing.assert_close(merged[0]["z"], base[0]["z"])
+    torch.testing.assert_close(merged[0]["critic_z"], physical[0]["critic_z"])
+    physical[0]["action"][0, 0] = 0.1
+    torch.save(physical, physical_path)
+    with pytest.raises(ValueError, match="traces differ"):
+        load_consequence_gate_replay(base_path, physical_path)
 
 
 def test_actor_replay_view_has_a_capacity_matched_control():
