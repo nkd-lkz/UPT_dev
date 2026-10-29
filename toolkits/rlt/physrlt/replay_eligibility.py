@@ -45,6 +45,7 @@ def main() -> None:
     args = parser.parse_args()
     replay = torch.load(args.replay, map_location="cpu", weights_only=True)
     result = evaluate(replay)
+    result["replay"] = str(args.replay.resolve())
     write_json(args.output, result)
     print(json.dumps(result, indent=2))
     if not result["eligible_for_independent_critic_gate"]:
