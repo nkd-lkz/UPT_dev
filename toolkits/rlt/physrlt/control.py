@@ -421,16 +421,20 @@ def merge_replay_views(base: list[dict], consequence: list[dict]) -> list[dict]:
         raise ValueError("Base and physical replay traces differ")
     merged = []
     for base_row, consequence_row in zip(base, consequence):
+        critic_z = consequence_row.get("critic_z", consequence_row["z"])
+        next_critic_z = consequence_row.get(
+            "next_critic_z", consequence_row["next_z"]
+        )
         if (
-            base_row["z"].shape != consequence_row["z"].shape
-            or base_row["next_z"].shape != consequence_row["next_z"].shape
+            base_row["z"].shape != critic_z.shape
+            or base_row["next_z"].shape != next_critic_z.shape
         ):
             raise ValueError("Base and physical replay token shapes differ")
         merged.append(
             base_row
             | {
-                "critic_z": consequence_row["z"].clone(),
-                "next_critic_z": consequence_row["next_z"].clone(),
+                "critic_z": critic_z.clone(),
+                "next_critic_z": next_critic_z.clone(),
             }
         )
     return merged

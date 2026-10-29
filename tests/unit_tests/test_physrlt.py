@@ -1420,6 +1420,14 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     torch.testing.assert_close(merged[0]["z"], base[0]["z"])
     torch.testing.assert_close(merged[0]["critic_z"], physical[0]["z"])
     assert "critic_z" not in base[0]
+    matched = copy.deepcopy(base)
+    matched[0]["critic_z"] = torch.full((128,), 3.0)
+    matched[0]["next_critic_z"] = torch.full((128,), 4.0)
+    merged = merge_replay_views(base, matched)
+    torch.testing.assert_close(merged[0]["critic_z"], matched[0]["critic_z"])
+    torch.testing.assert_close(
+        merged[0]["next_critic_z"], matched[0]["next_critic_z"]
+    )
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
