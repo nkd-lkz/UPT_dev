@@ -131,37 +131,38 @@ def run(args: argparse.Namespace) -> dict:
     rows = []
     for fold in folds:
         for seed in args.seeds:
+            random.seed(seed)
+            torch.manual_seed(seed)
+            conditioner = SignedCandidateConsequence(
+                readout.candidate_conditioner(
+                    args.conditioning_mode, component=args.consequence_component
+                ),
+                1,
+            )
+            learner = AcceptanceLearner(
+                "cpu",
+                "q_bc",
+                ref_dropout=0,
+                bottleneck_dim=128,
+                chunk_len=10,
+                gripper_threshold=0,
+                critic_conditioner=conditioner,
+                critic_conditioning=f"candidate_{args.conditioning_mode}",
+                critic_bottleneck_dim=256,
+                correction_limit=0.1,
+                correction_axes=(0,),
+                residual_output=True,
+                critic_consequence_dueling=True,
+            )
+            trace = []
+            random.seed(seed)
+            torch.manual_seed(seed)
+            for step in range(args.steps):
+                metrics = learner.update(fold["train"])
+                if step in {0, args.steps - 1}:
+                    trace.append({"step": step + 1, **metrics})
             for arm, sign in (("correct", 1), ("reversed", -1), ("zero", 0)):
-                random.seed(seed)
-                torch.manual_seed(seed)
-                conditioner = SignedCandidateConsequence(
-                    readout.candidate_conditioner(
-                        args.conditioning_mode, component=args.consequence_component
-                    ),
-                    sign,
-                )
-                learner = AcceptanceLearner(
-                    "cpu",
-                    "q_bc",
-                    ref_dropout=0,
-                    bottleneck_dim=128,
-                    chunk_len=10,
-                    gripper_threshold=0,
-                    critic_conditioner=conditioner,
-                    critic_conditioning=f"candidate_{args.conditioning_mode}",
-                    critic_bottleneck_dim=256,
-                    correction_limit=0.1,
-                    correction_axes=(0,),
-                    residual_output=True,
-                    critic_consequence_dueling=True,
-                )
-                trace = []
-                random.seed(seed)
-                torch.manual_seed(seed)
-                for step in range(args.steps):
-                    metrics = learner.update(fold["train"])
-                    if step in {0, args.steps - 1}:
-                        trace.append({"step": step + 1, **metrics})
+                conditioner.sign = sign
                 rows.append(
                     {
                         "fold": fold["fold"],
@@ -172,14 +173,17 @@ def run(args: argparse.Namespace) -> dict:
                         **audit_replay(learner, fold["evaluation"]),
                     }
                 )
+            conditioner.sign = 1
     summaries, passes_strict_screen = _summaries(rows)
     result = {
         "state": "complete",
         "protocol": (
             "leave one complete successful episode trace out; fit on the other "
-            "complete successful episodes from the same collection run; only the "
-            "physical consequence sign changes"
+            "complete successful episodes from the same collection run using the "
+            "correct consequence; freeze weights and intervene on the consequence "
+            "sign only during held-out evaluation"
         ),
+        "causal_protocol": "train_correct_once_freeze_weights_intervene_input_sign",
         "limitation": (
             "Held-out episode traces are disjoint but share one collection run; "
             "this screen does not replace an independently collected replay gate."

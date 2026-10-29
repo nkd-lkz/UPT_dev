@@ -1508,9 +1508,11 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     consequence.write_bytes(b"physical")
     checkpoint = tmp_path / "checkpoint.pt"
     payload = {
+        "schema": 2,
         "state_dict": {"value": torch.tensor(1)},
         "gate_passed": True,
-        "arm": "correct",
+        "training_arm": "correct",
+        "evaluation_arms": ["correct", "reversed", "zero"],
         "optimizer_seed": 31,
         "train_trace_sha256": "trace",
         "base_readout_sha256": file_sha256(base),
@@ -1536,9 +1538,9 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
             base_readout=base,
             consequence_readout=consequence,
         )
-    payload["arm"] = "reversed"
+    payload["training_arm"] = "reversed"
     torch.save(payload, checkpoint)
-    with pytest.raises(ValueError, match="arm differs"):
+    with pytest.raises(ValueError, match="not trained on correct"):
         load_gated_online_checkpoint(
             checkpoint,
             expected_arm="correct",
@@ -1547,15 +1549,19 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
             base_readout=base,
             consequence_readout=consequence,
         )
-    loaded = load_gated_online_checkpoint(
-        checkpoint,
-        expected_arm="reversed",
-        expected_component="joint",
-        optimizer_seed=31,
-        base_readout=base,
-        consequence_readout=consequence,
-    )
-    assert loaded["arm"] == "reversed"
+    payload["training_arm"] = "correct"
+    payload["evaluation_arms"] = ["correct", "zero"]
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="does not permit"):
+        load_gated_online_checkpoint(
+            checkpoint,
+            expected_arm="reversed",
+            expected_component="joint",
+            optimizer_seed=31,
+            base_readout=base,
+            consequence_readout=consequence,
+        )
+    payload["evaluation_arms"] = ["correct", "reversed", "zero"]
     payload["gate_passed"] = False
     torch.save(payload, checkpoint)
     with pytest.raises(ValueError, match="not emitted"):
@@ -1695,6 +1701,9 @@ def test_consequence_component_report_requires_matched_causal_gates():
             "trace_sha256": {"train": "a", "independent": "b"},
             "base_readout_sha256": "base",
             "consequence_readout_sha256": "physical",
+            "causal_protocol": (
+                "train_correct_once_freeze_weights_intervene_input_sign"
+            ),
             "seeds": [31],
             "gate_summaries": copy.deepcopy(gate_rows),
             "passes_strict_screen": True,
@@ -1738,6 +1747,7 @@ def test_consequence_component_report_combines_matched_episode_folds():
         "base_readout": "base-readout.pt",
         "consequence_readout": "consequence-readout.pt",
         "conditioning_mode": "relative_concat",
+        "causal_protocol": "train_correct_once_freeze_weights_intervene_input_sign",
         "complete_successful_episodes": 3,
         "folds": [{"fold": 0}],
         "seeds": [31, 47, 59],

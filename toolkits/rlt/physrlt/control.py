@@ -368,16 +368,18 @@ def load_gated_online_checkpoint(
     base_readout: Path,
     consequence_readout: Path,
 ) -> dict:
-    """Load one exact critic arm emitted by a passed consequence gate."""
+    """Load one correct-trained critic for a frozen causal input intervention."""
     if expected_arm not in {"correct", "reversed", "zero"}:
         raise ValueError("Expected checkpoint arm must be correct, reversed or zero")
     if expected_component not in {"joint", "response", "geometry"}:
         raise ValueError("Expected component must be joint, response or geometry")
     payload = torch.load(path, map_location="cpu", weights_only=True)
     required = {
+        "schema",
         "state_dict",
         "gate_passed",
-        "arm",
+        "training_arm",
+        "evaluation_arms",
         "optimizer_seed",
         "train_trace_sha256",
         "base_readout_sha256",
@@ -386,10 +388,14 @@ def load_gated_online_checkpoint(
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
+    if payload["schema"] != 2:
+        raise ValueError("Gated online checkpoint schema differs")
     if not payload["gate_passed"]:
         raise ValueError("Gated online checkpoint was not emitted by a passed gate")
-    if payload["arm"] != expected_arm:
-        raise ValueError("Gated online checkpoint arm differs")
+    if payload["training_arm"] != "correct":
+        raise ValueError("Gated online checkpoint was not trained on correct effects")
+    if expected_arm not in payload["evaluation_arms"]:
+        raise ValueError("Gated online checkpoint does not permit this evaluation arm")
     if payload["consequence_component"] != expected_component:
         raise ValueError("Gated online checkpoint physical component differs")
     if int(payload["optimizer_seed"]) != optimizer_seed:
@@ -1138,7 +1144,8 @@ def run(args):
                             "source": str(online_checkpoints[method]),
                             "source_sha256": file_sha256(online_checkpoints[method]),
                             "optimizer_seed": args.seed,
-                            "arm": checkpoint_payload["arm"],
+                            "arm": online_checkpoint_arms[method],
+                            "training_arm": checkpoint_payload["training_arm"],
                             "consequence_component": checkpoint_payload[
                                 "consequence_component"
                             ],

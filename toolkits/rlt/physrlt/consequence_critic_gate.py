@@ -176,7 +176,7 @@ def _write_gate_table(output: Path, summaries: list[dict]) -> None:
 
 
 def run(args: argparse.Namespace) -> dict:
-    """Fit matched critic arms and audit unseen executed replay traces."""
+    """Fit correct-conditioned critics and audit frozen causal interventions."""
     if (
         args.output.exists()
         or args.steps < 1
@@ -216,43 +216,44 @@ def run(args: argparse.Namespace) -> dict:
             )
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
-    arm_states = {}
+    seed_states = {}
     for seed in args.seeds:
+        random.seed(seed)
+        torch.manual_seed(seed)
+        conditioner = SignedCandidateConsequence(
+            readout.candidate_conditioner(
+                "relative_concat", component=args.consequence_component
+            ),
+            1,
+        )
+        learner = AcceptanceLearner(
+            "cpu",
+            "q_bc",
+            ref_dropout=0,
+            bottleneck_dim=128,
+            chunk_len=10,
+            gripper_threshold=0,
+            critic_conditioner=conditioner,
+            critic_conditioning="candidate_relative_concat",
+            critic_bottleneck_dim=256,
+            correction_limit=0.1,
+            correction_axes=(0,),
+            residual_output=True,
+            critic_consequence_dueling=True,
+            candidate_selection_count=5,
+            candidate_selection_margin=0.0,
+            candidate_uncertainty_penalty=1.0,
+        )
+        trace = []
+        random.seed(seed)
+        torch.manual_seed(seed)
+        for step in range(args.steps):
+            metrics = learner.update(train)
+            if step in {0, args.steps - 1}:
+                trace.append({"step": step + 1, **metrics})
+        seed_states[seed] = learner.state_dict()
         for arm, sign in (("correct", 1), ("reversed", -1), ("zero", 0)):
-            random.seed(seed)
-            torch.manual_seed(seed)
-            conditioner = SignedCandidateConsequence(
-                readout.candidate_conditioner(
-                    "relative_concat", component=args.consequence_component
-                ),
-                sign,
-            )
-            learner = AcceptanceLearner(
-                "cpu",
-                "q_bc",
-                ref_dropout=0,
-                bottleneck_dim=128,
-                chunk_len=10,
-                gripper_threshold=0,
-                critic_conditioner=conditioner,
-                critic_conditioning="candidate_relative_concat",
-                critic_bottleneck_dim=256,
-                correction_limit=0.1,
-                correction_axes=(0,),
-                residual_output=True,
-                critic_consequence_dueling=True,
-                candidate_selection_count=5,
-                candidate_selection_margin=0.0,
-                candidate_uncertainty_penalty=1.0,
-            )
-            trace = []
-            random.seed(seed)
-            torch.manual_seed(seed)
-            for step in range(args.steps):
-                metrics = learner.update(train)
-                if step in {0, args.steps - 1}:
-                    trace.append({"step": step + 1, **metrics})
-            arm_states[(arm, seed)] = learner.state_dict()
+            conditioner.sign = sign
             for label, replay in evaluations.items():
                 rows.append(
                     {
@@ -264,15 +265,18 @@ def run(args: argparse.Namespace) -> dict:
                         **audit_replay(learner, replay),
                     }
                 )
+        conditioner.sign = 1
     summaries, passes_strict_screen = summarize_gate(rows)
     base_readout_sha256 = _file_sha256(args.base_readout)
     consequence_readout_sha256 = _file_sha256(args.consequence_readout)
     result = {
         "state": "complete",
         "protocol": (
-            "same train replay, architecture, optimizer batches and held-out "
-            "replays; only the physical consequence sign changes"
+            "one correct-conditioned critic is trained per optimizer seed; its "
+            "weights remain frozen while correct, reversed and zero physical "
+            "consequence inputs are evaluated on distinct held-out replays"
         ),
+        "causal_protocol": "train_correct_once_freeze_weights_intervene_input_sign",
         "train_base_replay": str(args.train_base_replay),
         "train_physical_replay": str(args.train_physical_replay),
         "trace_sha256": trace_hashes,
@@ -296,13 +300,15 @@ def run(args: argparse.Namespace) -> dict:
     }
     args.output.mkdir(parents=True)
     if passes_strict_screen:
-        for (arm, seed), state in arm_states.items():
-            checkpoint = args.output / f"{arm}-seed{seed}.pt"
+        for seed, state in seed_states.items():
+            checkpoint = args.output / f"correct-trained-seed{seed}.pt"
             torch.save(
                 {
+                    "schema": 2,
                     "state_dict": state,
                     "gate_passed": True,
-                    "arm": arm,
+                    "training_arm": "correct",
+                    "evaluation_arms": ["correct", "reversed", "zero"],
                     "optimizer_seed": seed,
                     "train_trace_sha256": trace_hashes["train"],
                     "base_readout_sha256": base_readout_sha256,
@@ -314,7 +320,8 @@ def run(args: argparse.Namespace) -> dict:
                 },
                 checkpoint,
             )
-            result["checkpoints"][arm][str(seed)] = str(checkpoint)
+            for arm in ("correct", "reversed", "zero"):
+                result["checkpoints"][arm][str(seed)] = str(checkpoint)
         result["correct_checkpoints"] = result["checkpoints"]["correct"]
     write_json(args.output / "result.json", result)
     _write_gate_table(args.output, summaries)

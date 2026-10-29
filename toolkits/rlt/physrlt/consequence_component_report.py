@@ -43,6 +43,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "trace_sha256",
         "base_readout_sha256",
         "consequence_readout_sha256",
+        "causal_protocol",
         "seeds",
     )
     rows = []
@@ -74,8 +75,10 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "report_type": "independent_replay",
         "protocol": (
             "same independent replay traces, readouts, optimizer seeds and critic "
-            "capacity; only the retained physical consequence coordinates differ"
+            "capacity; each critic is trained once on correct consequences, then "
+            "frozen while only the input sign and retained coordinates differ"
         ),
+        "causal_protocol": reference["causal_protocol"],
         "trace_sha256": reference["trace_sha256"],
         "base_readout_sha256": reference["base_readout_sha256"],
         "consequence_readout_sha256": reference["consequence_readout_sha256"],
@@ -97,6 +100,7 @@ def summarize_episode_folds(payloads: dict[str, dict]) -> dict:
         "base_readout",
         "consequence_readout",
         "conditioning_mode",
+        "causal_protocol",
         "complete_successful_episodes",
         "folds",
         "seeds",
@@ -141,8 +145,10 @@ def summarize_episode_folds(payloads: dict[str, dict]) -> dict:
         "report_type": "same_run_episode_fold",
         "protocol": (
             "same collection run, episode folds, readouts, optimizer seeds and "
-            "critic capacity; only retained consequence coordinates differ"
+            "critic capacity; each critic is trained once on correct consequences, "
+            "then frozen while only the input sign and retained coordinates differ"
         ),
+        "causal_protocol": reference["causal_protocol"],
         "limitation": reference.get("limitation"),
         "source_trace_sha256": reference["source_trace_sha256"],
         "seeds": reference["seeds"],
