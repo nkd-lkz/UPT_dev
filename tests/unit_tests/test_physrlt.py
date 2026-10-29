@@ -697,8 +697,11 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
         out_of_layout_gated_predictions,
         out_of_layout_predictions,
         phase_expand,
+        phase_ratio_tensor,
         select_incremental_ratio,
+        select_phase_incremental_ratios,
         select_residual_ratio,
+        stratified_scores,
         transport_jacobian,
         transport_residual,
         transport_vector,
@@ -842,6 +845,46 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     )
     assert ratio == 1.0
     assert losses["1.0"] == 0.0
+    phase_records = [{"start_tick": tick} for tick in (40, 90, 140, 190, 240, 290)]
+    phase_ratio, phase_audit = select_phase_incremental_ratios(
+        torch.full((6, 1), 0.2, dtype=torch.double),
+        torch.full((6, 1), 0.2, dtype=torch.double),
+        torch.tensor([[1.0, 0.0, 0.0]] * 6, dtype=torch.double),
+        torch.full((6, 3), 0.0, dtype=torch.double).index_fill(
+            1, torch.tensor([0]), 0.4
+        ),
+        phase_records,
+    )
+    assert phase_ratio == {"early": 1.0, "late": 1.0, "mid": 1.0}
+    assert set(phase_audit) == {"early", "late", "mid"}
+    torch.testing.assert_close(
+        phase_ratio_tensor(
+            [{"start_tick": 40}, {"start_tick": 140}],
+            {"mid": 0.5},
+            torch.zeros(2, 1, dtype=torch.double),
+        ),
+        torch.tensor([[0.0], [0.5]], dtype=torch.double),
+    )
+    stratified = stratified_scores(
+        {"candidate": torch.zeros(3, 3, dtype=torch.double)},
+        torch.ones(3, 3, dtype=torch.double),
+        [
+            {
+                "start_tick": tick,
+                "branches": {
+                    -1: {"commands": torch.zeros(2, 3)},
+                    1: {
+                        "commands": torch.nn.functional.one_hot(
+                            torch.tensor([axis, axis]), 3
+                        ).float()
+                    },
+                },
+            }
+            for tick, axis in ((40, 0), (140, 1), (240, 1))
+        ],
+    )
+    assert stratified["axis"]["axis1"]["pairs"] == 2
+    assert stratified["phase"]["late"]["pairs"] == 1
     response = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     effect = torch.tensor([[0.0, 0.5, 0.0], [0.0, 2.0, 0.0]])
     jacobian = transport_jacobian(response, effect)

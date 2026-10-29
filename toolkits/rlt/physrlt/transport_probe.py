@@ -172,6 +172,48 @@ def select_incremental_ratio(
     return selected, losses
 
 
+def episode_phase(record: dict) -> str:
+    """Map an intervention state to a coarse execution phase."""
+    tick = int(record["start_tick"])
+    return "early" if tick < 100 else "mid" if tick < 200 else "late"
+
+
+def select_phase_incremental_ratios(
+    coefficient: torch.Tensor,
+    correction: torch.Tensor,
+    response: torch.Tensor,
+    target: torch.Tensor,
+    records: list[dict],
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Select correction strength per phase from training predictions only."""
+    if len(records) != len(coefficient):
+        raise ValueError("Phase calibration requires one record per coefficient")
+    phases = [episode_phase(record) for record in records]
+    ratios, audits = {}, {}
+    for phase in sorted(set(phases)):
+        mask = torch.tensor([value == phase for value in phases])
+        ratios[phase], audits[phase] = select_incremental_ratio(
+            coefficient[mask], correction[mask], response[mask], target[mask]
+        )
+    return ratios, audits
+
+
+def phase_ratio_tensor(
+    records: list[dict],
+    ratios: dict[str, float],
+    reference: torch.Tensor,
+    *,
+    unseen_ratio: float = 0.0,
+) -> torch.Tensor:
+    """Expand phase ratios and disable corrections in unseen phases."""
+    if unseen_ratio < 0:
+        raise ValueError("Unseen phase ratio must be nonnegative")
+    phases = [episode_phase(record) for record in records]
+    return reference.new_tensor([ratios.get(phase, unseen_ratio) for phase in phases])[
+        :, None
+    ]
+
+
 def crossfit_ridge(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -331,6 +373,41 @@ def score_prediction(prediction: torch.Tensor, target: torch.Tensor) -> dict:
         "zero_rmse_mm": zero * 1000,
         "improvement_vs_zero_pct": 100 * (1 - error / zero) if zero > 0 else None,
     }
+
+
+def stratified_scores(
+    predictions: dict[str, torch.Tensor],
+    target: torch.Tensor,
+    records: list[dict],
+) -> dict[str, dict[str, dict]]:
+    """Report diagnostic errors by intervention axis and episode phase."""
+    if len(records) != len(target) or not records:
+        raise ValueError("Stratified scores require one record per target")
+    for prediction in predictions.values():
+        if prediction.shape != target.shape:
+            raise ValueError("Stratified predictions must match targets")
+    labels = {"axis": [], "phase": []}
+    for record in records:
+        delta = (
+            (record["branches"][1]["commands"] - record["branches"][-1]["commands"])
+            .abs()
+            .mean(0)
+        )
+        labels["axis"].append(f"axis{int(delta.argmax())}")
+        labels["phase"].append(episode_phase(record))
+    result = {}
+    for field, values in labels.items():
+        result[field] = {}
+        for value in sorted(set(values)):
+            mask = torch.tensor([label == value for label in values])
+            result[field][value] = {
+                "pairs": int(mask.sum()),
+                "arms": {
+                    name: score_prediction(prediction[mask], target[mask])
+                    for name, prediction in predictions.items()
+                },
+            }
+    return result
 
 
 def layout_comparison(
@@ -818,6 +895,18 @@ def evaluate_records(
                     train_predicted_response,
                     target,
                 )
+                phase_incremental_ratios, phase_incremental_cv = (
+                    select_phase_incremental_ratios(
+                        state_train_prediction,
+                        train_residual_correction,
+                        train_predicted_response,
+                        target,
+                        train,
+                    )
+                )
+                phase_incremental_scale = phase_ratio_tensor(
+                    evaluation, phase_incremental_ratios, residual_correction
+                )
                 shuffled_residual = residual_target[
                     torch.randperm(len(residual_target), generator=generator)
                 ]
@@ -837,6 +926,18 @@ def evaluate_records(
                         train_predicted_response,
                         target,
                     )
+                )
+                phase_shuffled_ratios, phase_shuffled_cv = (
+                    select_phase_incremental_ratios(
+                        state_train_prediction,
+                        train_shuffled_residual_correction,
+                        train_predicted_response,
+                        target,
+                        train,
+                    )
+                )
+                phase_shuffled_scale = phase_ratio_tensor(
+                    evaluation, phase_shuffled_ratios, shuffled_residual_correction
                 )
                 phase_state_coefficient, phase_state_cv = crossfit_ridge(
                     phase_response, coefficient, cases, test_phase_response
@@ -889,6 +990,11 @@ def evaluate_records(
                         state_coefficient + incremental_ratio * residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
+                    "phase_adaptive_incremental_coupling": (
+                        state_coefficient
+                        + phase_incremental_scale * residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
                     "shuffled_incremental_coupling": (
                         state_coefficient + shuffled_residual_correction
                     ).clamp(0, 1)
@@ -896,6 +1002,11 @@ def evaluate_records(
                     "adaptive_shuffled_incremental_coupling": (
                         state_coefficient
                         + shuffled_incremental_ratio * shuffled_residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "phase_adaptive_shuffled_coupling": (
+                        state_coefficient
+                        + phase_shuffled_scale * shuffled_residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
                     "gated_action_coupling": gated_action_coefficient
@@ -974,6 +1085,20 @@ def evaluate_records(
                             name: score_prediction(prediction, truth)
                             for name, prediction in arms.items()
                         },
+                        "stratified_results": stratified_scores(
+                            {
+                                name: arms[name]
+                                for name in (
+                                    "coupled",
+                                    "state_action_coupling",
+                                    "incremental_action_coupling",
+                                    "gated_incremental_action_coupling",
+                                    "shuffled_gated_incremental_coupling",
+                                )
+                            },
+                            truth,
+                            evaluation,
+                        ),
                         "direct_cv": direct_cv,
                         "coefficient_cv": coefficient_cv,
                         "shuffled_cv": wrong_cv,
@@ -987,6 +1112,10 @@ def evaluate_records(
                         "adaptive_incremental_ratio_train_layout_cv_mse": incremental_ratio_cv,
                         "adaptive_shuffled_incremental_ratio": shuffled_incremental_ratio,
                         "adaptive_shuffled_incremental_ratio_train_layout_cv_mse": shuffled_incremental_ratio_cv,
+                        "phase_adaptive_incremental_ratios": phase_incremental_ratios,
+                        "phase_adaptive_incremental_train_cv_mse": phase_incremental_cv,
+                        "phase_adaptive_shuffled_ratios": phase_shuffled_ratios,
+                        "phase_adaptive_shuffled_train_cv_mse": phase_shuffled_cv,
                         "gated_action_cv": gated_action_cv,
                         "gated_state_action_cv": gated_state_cv,
                         "gated_incremental_action_cv": gated_residual_cv,
@@ -1040,6 +1169,18 @@ def evaluate_records(
                                 "state_action_coupling",
                                 "incremental_action_coupling",
                                 "adaptive_shuffled_incremental_coupling",
+                            ),
+                        ),
+                        "phase_adaptive_incremental_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="phase_adaptive_incremental_coupling",
+                            comparators=(
+                                "state_action_coupling",
+                                "incremental_action_coupling",
+                                "adaptive_incremental_action_coupling",
+                                "phase_adaptive_shuffled_coupling",
                             ),
                         ),
                         "gated_layout_comparison": layout_comparison(
