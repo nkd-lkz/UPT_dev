@@ -1820,13 +1820,39 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         "reversed": "reversed_method",
         "zero": "zero_method",
     }
+    for arm, method in arms.items():
+        (run / f"{method}-online-checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "source": "shared.pt",
+                    "source_sha256": "checkpoint",
+                    "optimizer_seed": 31,
+                    "arm": arm,
+                    "training_arm": "correct",
+                    "consequence_component": "joint",
+                    "train_trace_sha256": "train",
+                }
+            )
+        )
     result = evaluate_causal_control([run], arms)
     assert result["passes_causal_closed_loop_gate"]
+    assert result["checkpoint_audits"][0]["evaluation_arms"] == [
+        "correct",
+        "reversed",
+        "zero",
+    ]
     rows[-3]["success"] = False
     rows[-2]["success"] = True
     (run / "episodes.json").write_text(json.dumps(rows))
     result = evaluate_causal_control([run], arms)
     assert not result["passes_causal_closed_loop_gate"]
+    mismatched = json.loads(
+        (run / "reversed_method-online-checkpoint.json").read_text()
+    )
+    mismatched["source_sha256"] = "different"
+    (run / "reversed_method-online-checkpoint.json").write_text(json.dumps(mismatched))
+    with pytest.raises(ValueError, match="one frozen checkpoint"):
+        evaluate_causal_control([run], arms)
 
 
 def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():

@@ -78,6 +78,50 @@ def _paired_row(
     }
 
 
+def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
+    """Require all causal arms to intervene on one correct-trained checkpoint."""
+    records = {}
+    for arm, method in arms.items():
+        path = run / f"{method}-online-checkpoint.json"
+        if not path.is_file():
+            raise ValueError("Every causal arm needs checkpoint provenance")
+        payload = json.loads(path.read_text())
+        required = {
+            "source",
+            "source_sha256",
+            "optimizer_seed",
+            "arm",
+            "training_arm",
+            "consequence_component",
+            "train_trace_sha256",
+        }
+        if required - set(payload):
+            raise ValueError("Causal arm checkpoint provenance is incomplete")
+        if (
+            payload["arm"] != arm
+            or payload["training_arm"] != "correct"
+            or int(payload["optimizer_seed"]) != seed
+        ):
+            raise ValueError("Causal arm checkpoint contract differs")
+        records[arm] = payload
+    shared_fields = (
+        "source",
+        "source_sha256",
+        "training_arm",
+        "consequence_component",
+        "train_trace_sha256",
+    )
+    for field in shared_fields:
+        if len({records[arm][field] for arm in records}) != 1:
+            raise ValueError("Causal arms do not share one frozen checkpoint")
+    reference = records["correct"]
+    return {
+        "seed": seed,
+        **{field: reference[field] for field in shared_fields},
+        "evaluation_arms": sorted(records),
+    }
+
+
 def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
     """Require causal superiority without a split-level success regression."""
     if not runs:
@@ -86,6 +130,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
     correct_method = arms["correct"]
     seen_seeds = set()
     correct_nonreference = []
+    checkpoint_audits = []
     for run in runs:
         result = json.loads((run / "result.json").read_text())
         episodes = json.loads((run / "episodes.json").read_text())
@@ -97,6 +142,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         if seed in seen_seeds:
             raise ValueError("Causal control runs require unique optimizer seeds")
         seen_seeds.add(seed)
+        checkpoint_audits.append(_checkpoint_audit(run, arms, seed))
         for split in ("validation", "development"):
             correct = _episode_map(
                 episodes, correct_method, "online_frozen_eval", split
@@ -169,6 +215,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         ),
         "arms": arms,
         "seeds": sorted(seen_seeds),
+        "checkpoint_audits": checkpoint_audits,
         "rows": rows,
         "comparisons": comparisons,
         "correct_candidate_nonreference_fraction_mean": (
