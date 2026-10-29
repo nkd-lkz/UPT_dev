@@ -3,6 +3,7 @@
 """Physical readout causality, units, split isolation and experiment contracts."""
 
 import copy
+import hashlib
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -1996,12 +1997,15 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         "reversed": "reversed_method",
         "zero": "zero_method",
     }
+    shared_checkpoint = tmp_path / "shared.pt"
+    shared_checkpoint.write_bytes(b"shared checkpoint")
+    shared_sha256 = hashlib.sha256(shared_checkpoint.read_bytes()).hexdigest()
     for arm, method in arms.items():
         (run / f"{method}-online-checkpoint.json").write_text(
             json.dumps(
                 {
-                    "source": "shared.pt",
-                    "source_sha256": "checkpoint",
+                    "source": str(shared_checkpoint),
+                    "source_sha256": shared_sha256,
                     "gate_revision": "test-revision",
                     "optimizer_seed": 31,
                     "arm": arm,
@@ -2050,7 +2054,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     )
     mismatched["source_sha256"] = "different"
     (run / "reversed_method-online-checkpoint.json").write_text(json.dumps(mismatched))
-    with pytest.raises(ValueError, match="one frozen checkpoint"):
+    with pytest.raises(ValueError, match="source hash differs"):
         evaluate_causal_control([run], arms)
 
     identical_rows = copy.deepcopy(passing_rows)
@@ -2058,7 +2062,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         if row["method"] in arms.values():
             row["candidate_selected_indices"] = [0, 1]
     (run / "episodes.json").write_text(json.dumps(identical_rows))
-    mismatched["source_sha256"] = "checkpoint"
+    mismatched["source_sha256"] = shared_sha256
     (run / "reversed_method-online-checkpoint.json").write_text(json.dumps(mismatched))
     result = evaluate_causal_control([run], arms)
     assert not result["passes_causal_closed_loop_gate"]

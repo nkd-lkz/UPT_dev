@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import statistics
@@ -213,6 +214,13 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
         }
         if required - set(payload):
             raise ValueError("Causal arm checkpoint provenance is incomplete")
+        source = Path(payload["source"])
+        if not source.is_absolute() or not source.is_file():
+            raise ValueError("Causal arm checkpoint source must be an existing path")
+        with source.open("rb") as stream:
+            source_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        if source_sha256 != payload["source_sha256"]:
+            raise ValueError("Causal arm checkpoint source hash differs")
         if (
             payload["arm"] != arm
             or payload["training_arm"] != "correct"
