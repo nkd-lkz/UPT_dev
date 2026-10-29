@@ -30,12 +30,15 @@ from toolkits.rlt.physrlt.consequence_component_report import (
     summarize_episode_folds as summarize_episode_fold_components,
 )
 from toolkits.rlt.physrlt.consequence_critic_gate import (
+    audit_replay_set,
+    summarize_gate,
+)
+from toolkits.rlt.physrlt.consequence_critic_gate import (
     load_replay as load_consequence_gate_replay,
 )
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     parse_evaluations as parse_consequence_gate_evaluations,
 )
-from toolkits.rlt.physrlt.consequence_critic_gate import summarize_gate
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
     deferred_update_summary,
@@ -1689,6 +1692,36 @@ def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
     torch.save(physical, physical_path)
     with pytest.raises(ValueError, match="traces differ"):
         load_consequence_gate_replay(base_path, physical_path)
+
+
+def test_consequence_gate_replay_set_requires_informative_distinct_traces():
+    template = {
+        "z": torch.zeros(128),
+        "ref": torch.zeros(10, 7),
+        "prop": torch.zeros(8),
+        "action": torch.zeros(10, 7),
+        "accepted_commands": torch.zeros(10, 7),
+        "next_z": torch.ones(128),
+        "next_ref": torch.zeros(10, 7),
+        "next_prop": torch.zeros(8),
+        "ticks": 10,
+        "terminal": True,
+        "reward": 0.0,
+    }
+    failed, succeeded = copy.deepcopy(template), copy.deepcopy(template)
+    succeeded["reward"] = 5.0
+    train = [failed, succeeded]
+    evaluation = copy.deepcopy(train)
+    evaluation[0]["accepted_commands"][0, 0] = 0.1
+    hashes, summaries = audit_replay_set(train, {"heldout": evaluation})
+    assert hashes["train"] != hashes["heldout"]
+    assert summaries["train"]["zero_return_transitions"] == 1
+    assert summaries["heldout"]["positive_return_transitions"] == 1
+
+    with pytest.raises(ValueError, match="distinct traces"):
+        audit_replay_set(train, {"heldout": copy.deepcopy(train)})
+    with pytest.raises(ValueError, match="ineligible"):
+        audit_replay_set([succeeded, copy.deepcopy(succeeded)], {"heldout": evaluation})
 
 
 def test_consequence_critic_gate_requires_correct_arm_best_in_every_seed():

@@ -17,10 +17,10 @@ from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
 from toolkits.rlt.physrlt.conditioning import SignedCandidateConsequence
 from toolkits.rlt.physrlt.control import (
     FrozenReadout,
-    replay_trace_sha256,
     validate_fixed_replay,
 )
-from toolkits.rlt.physrlt.critic_audit import audit_replay, discounted_success_returns
+from toolkits.rlt.physrlt.critic_audit import audit_replay
+from toolkits.rlt.physrlt.replay_eligibility import evaluate as evaluate_replay
 from toolkits.rlt.pi05_baseline import configure_source, write_json
 
 
@@ -79,6 +79,27 @@ def load_replay(base_path: Path, physical_path: Path) -> list[dict]:
         }
         for row in merged
     ]
+
+
+def audit_replay_set(
+    train: list[dict], evaluations: dict[str, list[dict]]
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """Require informative and trace-independent train/evaluation replays."""
+    replays = {"train": train, **evaluations}
+    summaries = {label: evaluate_replay(replay) for label, replay in replays.items()}
+    rejected = {
+        label: summary["rejection_reasons"]
+        for label, summary in summaries.items()
+        if not summary["eligible_for_independent_critic_gate"]
+    }
+    if rejected:
+        raise ValueError(f"Critic gate replays are ineligible: {rejected}")
+    trace_hashes = {
+        label: str(summary["trace_sha256"]) for label, summary in summaries.items()
+    }
+    if len(set(trace_hashes.values())) != len(trace_hashes):
+        raise ValueError("Train and evaluation replays must have distinct traces")
+    return trace_hashes, summaries
 
 
 def summarize_gate(rows: list[dict]) -> tuple[list[dict], bool]:
@@ -192,28 +213,7 @@ def run(args: argparse.Namespace) -> dict:
         label: load_replay(*paths)
         for label, paths in parse_evaluations(args.evaluations).items()
     }
-    trace_hashes = {"train": replay_trace_sha256(train)} | {
-        label: replay_trace_sha256(replay) for label, replay in evaluations.items()
-    }
-    if len(set(trace_hashes.values())) != len(trace_hashes):
-        raise ValueError("Train and evaluation replays must have distinct traces")
-    replay_summaries = {"train": validate_fixed_replay(train)} | {
-        label: validate_fixed_replay(replay) for label, replay in evaluations.items()
-    }
-    if any(
-        summary["positive_transitions"] == 0 for summary in replay_summaries.values()
-    ):
-        raise ValueError(
-            "Every train and evaluation replay needs a positive transition"
-        )
-    for label, replay in evaluations.items():
-        returns = discounted_success_returns(replay)
-        positive_returns = sum(value > 0 for value in returns)
-        replay_summaries[label]["positive_return_transitions"] = positive_returns
-        if positive_returns == 0 or positive_returns == len(returns):
-            raise ValueError(
-                "Every evaluation replay needs positive and zero-return transitions"
-            )
+    trace_hashes, replay_summaries = audit_replay_set(train, evaluations)
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
     seed_states = {}
