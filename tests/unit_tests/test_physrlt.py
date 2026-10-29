@@ -89,6 +89,7 @@ from toolkits.rlt.physrlt.response_adaptation import (
 from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
+from toolkits.rlt.physrlt.response_matrix import CausalResponseMatrix
 from toolkits.rlt.physrlt.sparse_motion_report import aggregate
 from toolkits.rlt.physrlt.tick_selection import select_ticks
 from toolkits.rlt.pi05_baseline import env_commands
@@ -102,6 +103,43 @@ def test_realized_translation_score_uses_issued_command_direction():
     assert realized_translation_score(commands, response) == pytest.approx(0.5)
     response[7] = -0.15
     assert realized_translation_score(commands, response) == pytest.approx(-0.5)
+
+
+def test_causal_response_matrix_starts_at_identity_without_future_data():
+    estimator = CausalResponseMatrix(ridge=1e-3)
+    expected = torch.tensor([0.01, -0.02, 0.03])
+    assert estimator.observations == 0
+    assert torch.allclose(estimator.matrix(), torch.eye(3))
+    assert torch.allclose(estimator.predict(expected), expected)
+    assert torch.equal(estimator.support(), torch.zeros(3))
+    assert estimator.token().shape == (12,)
+
+
+def test_causal_response_matrix_recovers_coupled_execution_map():
+    estimator = CausalResponseMatrix(ridge=1e-6)
+    physical = torch.tensor([[0.5, 0.1, 0.0], [0.0, 1.2, -0.2], [0.1, 0.0, 0.8]])
+    observations = torch.tensor(
+        [[0.03, 0.00, 0.00], [0.00, 0.04, 0.00], [0.00, 0.00, 0.05]]
+    )
+    for expected in observations:
+        estimator.observe(expected, expected @ physical)
+    probe = torch.tensor([0.02, -0.01, 0.03])
+    assert estimator.observations == 3
+    assert torch.allclose(estimator.predict(probe), probe @ physical, atol=2e-4)
+    assert torch.all(estimator.support() > 0)
+
+
+@pytest.mark.parametrize(
+    ("expected", "measured"),
+    [
+        (torch.zeros(2), torch.zeros(3)),
+        (torch.zeros(3), torch.zeros(4)),
+        (torch.tensor([0.0, float("nan"), 0.0]), torch.zeros(3)),
+    ],
+)
+def test_causal_response_matrix_rejects_invalid_observations(expected, measured):
+    with pytest.raises(ValueError):
+        CausalResponseMatrix().observe(expected, measured)
 
 
 def test_gain_probe_gate_uses_only_paired_development_records():
