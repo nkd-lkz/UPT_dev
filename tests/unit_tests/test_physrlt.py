@@ -2823,3 +2823,103 @@ def test_gpu_lease_survives_parent_release_until_child_exits(tmp_path):
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_geometry_evidence_clusters_layouts_before_readout_seeds(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.geometry_evidence import (
+        load_geometry_arms,
+        summarize_geometry,
+    )
+
+    def row(method, seed, coupled, direct):
+        return {
+            "method": method,
+            "seed": seed,
+            "object": "object_pos",
+            "rank": 0,
+            "layout_comparison": {
+                "layouts": ["layout-a", "layout-b"],
+                "mse_mm2_by_layout": {
+                    "coupled": coupled,
+                    "direct": direct,
+                    "shuffled_coupling": [9.0, 16.0],
+                    "state_action_coupling": [4.0, 9.0],
+                },
+            },
+        }
+
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "state": "complete",
+                "split": "confirmation",
+                "results": [
+                    row("joint", 1, [1.0, 4.0], [4.0, 9.0]),
+                    row("joint", 2, [1.0, 4.0], [4.0, 9.0]),
+                    row("state_action_joint", 1, [4.0, 9.0], [4.0, 9.0]),
+                    row("state_action_joint", 2, [4.0, 9.0], [4.0, 9.0]),
+                ],
+            }
+        )
+    )
+    result = summarize_geometry(
+        load_geometry_arms("task", path), draws=1000, seed=7
+    )
+    coupled = next(
+        arm
+        for arm in result["arms"]
+        if arm["readout"] == "joint" and arm["metric"] == "coupled"
+    )
+    assert coupled["readout_seed_count"] == 2
+    assert coupled["layout_count"] == 2
+    assert coupled["equal_layout_rmse_mm"] == pytest.approx(2.5**0.5)
+    direct = next(
+        contrast
+        for contrast in result["contrasts"]
+        if contrast["contrast"] == "response_transport_vs_direct"
+        and contrast["target_readout"] == "joint"
+    )
+    assert direct["rmse_improvement_mm"] == pytest.approx(6.5**0.5 - 2.5**0.5)
+    assert direct["interval_excludes_zero"]
+    assert not direct["confirmation_screen_eligible"]
+    assert direct["evidence_tier"] == "pilot"
+    semantic = next(
+        contrast
+        for contrast in result["contrasts"]
+        if contrast["contrast"] == "action_readout_vs_state_action_readout"
+    )
+    assert semantic["interval_excludes_zero"]
+
+
+def test_geometry_evidence_rejects_seed_layout_mismatch(tmp_path):
+    import json
+
+    from toolkits.rlt.physrlt.geometry_evidence import load_geometry_arms
+
+    def row(seed, layouts):
+        return {
+            "method": "joint",
+            "seed": seed,
+            "object": "object_pos",
+            "rank": 0,
+            "layout_comparison": {
+                "layouts": layouts,
+                "mse_mm2_by_layout": {"coupled": [1.0, 2.0]},
+            },
+        }
+
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "state": "complete",
+                "split": "development",
+                "results": [row(1, ["a", "b"]), row(2, ["a", "c"])],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="Layout identities differ"):
+        load_geometry_arms("task", path)
