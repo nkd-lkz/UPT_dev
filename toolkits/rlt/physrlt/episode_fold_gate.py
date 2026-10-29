@@ -130,7 +130,10 @@ def run(args: argparse.Namespace) -> dict:
                 random.seed(seed)
                 torch.manual_seed(seed)
                 conditioner = SignedCandidateConsequence(
-                    readout.candidate_conditioner("relative_concat"), sign
+                    readout.candidate_conditioner(
+                        "relative_concat", component=args.consequence_component
+                    ),
+                    sign,
                 )
                 learner = AcceptanceLearner(
                     "cpu",
@@ -192,6 +195,7 @@ def run(args: argparse.Namespace) -> dict:
         ],
         "base_readout": str(args.base_readout),
         "consequence_readout": str(args.consequence_readout),
+        "consequence_component": args.consequence_component,
         "seeds": args.seeds,
         "strict_screen": (
             "correct mean return-order concordance must exceed reversed and zero "
@@ -214,6 +218,11 @@ def main() -> None:
     parser.add_argument("--physical-replay", type=Path, required=True)
     parser.add_argument("--base-readout", type=Path, required=True)
     parser.add_argument("--consequence-readout", type=Path, required=True)
+    parser.add_argument(
+        "--consequence-component",
+        choices=("joint", "response", "geometry"),
+        default="joint",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=105)
     parser.add_argument("--seeds", type=int, nargs="+", default=[31, 47, 59])
