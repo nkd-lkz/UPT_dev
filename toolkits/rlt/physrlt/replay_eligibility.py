@@ -18,6 +18,50 @@ MIN_SUCCESS_EPISODES = 2
 MIN_FAILURE_EPISODES = 2
 
 
+def collection_provenance(replay_path: Path) -> dict:
+    """Require a complete protocol-v3 replay from one clean code revision."""
+    root = replay_path.resolve().parent
+    manifest_path = root / "run_manifest.json"
+    result_path = root / "result.json"
+    reasons = []
+    manifest = {}
+    result = {}
+    if not manifest_path.is_file():
+        reasons.append("missing_collection_manifest")
+    else:
+        manifest = json.loads(manifest_path.read_text())
+    if not result_path.is_file():
+        reasons.append("missing_collection_result")
+    else:
+        result = json.loads(result_path.read_text())
+    if manifest and result:
+        if (
+            manifest.get("control_protocol_version") != 3
+            or result.get("control_protocol_version") != 3
+        ):
+            reasons.append("collection_protocol_is_not_v3")
+        if not manifest.get("revision") or result.get("revision") != manifest.get(
+            "revision"
+        ):
+            reasons.append("collection_revision_mismatch")
+        if (
+            manifest.get("worktree_clean") is not True
+            or result.get("worktree_clean") is not True
+        ):
+            reasons.append("collection_worktree_not_verified_clean")
+        if result.get("state") != "complete" or result.get("complete") is not True:
+            reasons.append("collection_run_incomplete")
+    return {
+        "eligible": not reasons,
+        "replay": str(replay_path.resolve()),
+        "root": str(root),
+        "revision": manifest.get("revision"),
+        "control_protocol_version": manifest.get("control_protocol_version"),
+        "worktree_clean": manifest.get("worktree_clean"),
+        "rejection_reasons": reasons,
+    }
+
+
 def episode_outcomes(replay: list[dict], episode_tick_cap: int = 520) -> dict:
     """Count complete success/failure episodes without promoting a partial tail."""
     if not replay or episode_tick_cap < 1:
@@ -133,6 +177,13 @@ def main() -> None:
         replay = torch.load(args.replay, map_location="cpu", weights_only=True)
         result = evaluate(replay)
         result["replay"] = str(args.replay.resolve())
+        provenance = collection_provenance(args.replay)
+        result["collection_provenance"] = provenance
+        if not provenance["eligible"]:
+            result["robust_rejection_reasons"].extend(
+                f"collection:{reason}" for reason in provenance["rejection_reasons"]
+            )
+            result["eligible_for_robust_independent_critic_gate"] = False
     else:
         train_replay = torch.load(
             args.train_replay, map_location="cpu", weights_only=True
@@ -143,6 +194,25 @@ def main() -> None:
         result = evaluate_pair(train_replay, evaluation_replay)
         result["train_replay"] = str(args.train_replay.resolve())
         result["evaluation_replay"] = str(args.evaluation_replay.resolve())
+        provenance = {
+            "train": collection_provenance(args.train_replay),
+            "evaluation": collection_provenance(args.evaluation_replay),
+        }
+        result["collection_provenance"] = provenance
+        for label, audit in provenance.items():
+            result["robust_rejection_reasons"].extend(
+                f"{label}_collection:{reason}" for reason in audit["rejection_reasons"]
+            )
+        revisions = {
+            audit["revision"] for audit in provenance.values() if audit["eligible"]
+        }
+        if len(revisions) > 1:
+            result["robust_rejection_reasons"].append(
+                "collection_revisions_do_not_match"
+            )
+        result["eligible_for_robust_independent_critic_gate"] = not result[
+            "robust_rejection_reasons"
+        ]
     write_json(args.output, result)
     print(json.dumps(result, indent=2))
     if not result["eligible_for_independent_critic_gate"]:

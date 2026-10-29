@@ -113,6 +113,7 @@ from toolkits.rlt.physrlt.probe import (
     run,
     tensor_data,
 )
+from toolkits.rlt.physrlt.replay_eligibility import collection_provenance
 from toolkits.rlt.physrlt.replay_eligibility import evaluate as evaluate_replay
 from toolkits.rlt.physrlt.replay_eligibility import (
     evaluate_pair as evaluate_replay_pair,
@@ -1574,6 +1575,39 @@ def test_independent_critic_replay_pair_requires_distinct_execution_traces():
     )
 
 
+def test_robust_replay_collection_provenance_requires_clean_v3_run(tmp_path):
+    replay = tmp_path / "method-replay.pt"
+    replay.write_bytes(b"replay")
+    (tmp_path / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "revision": "abc123",
+                "worktree_clean": True,
+                "control_protocol_version": 3,
+            }
+        )
+    )
+    (tmp_path / "result.json").write_text(
+        json.dumps(
+            {
+                "state": "complete",
+                "complete": True,
+                "revision": "abc123",
+                "worktree_clean": True,
+                "control_protocol_version": 3,
+            }
+        )
+    )
+    audit = collection_provenance(replay)
+    assert audit["eligible"] and audit["revision"] == "abc123"
+    result = json.loads((tmp_path / "result.json").read_text())
+    result["worktree_clean"] = False
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    audit = collection_provenance(replay)
+    assert not audit["eligible"]
+    assert "collection_worktree_not_verified_clean" in audit["rejection_reasons"]
+
+
 def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     from toolkits.rlt.physrlt.control import file_sha256
 
@@ -1840,6 +1874,7 @@ def test_consequence_component_report_requires_matched_causal_gates(tmp_path):
             "worktree_clean": True,
             "consequence_component": component,
             "trace_sha256": {"train": "a", "independent": "b"},
+            "collection_provenance": {"train": {"revision": "test-revision"}},
             "base_readout_sha256": "base",
             "consequence_readout_sha256": "physical",
             "consequence_conditioning": "relative_concat",

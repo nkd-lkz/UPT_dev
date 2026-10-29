@@ -21,6 +21,7 @@ from toolkits.rlt.physrlt.control import (
     validate_fixed_replay,
 )
 from toolkits.rlt.physrlt.critic_audit import audit_replay
+from toolkits.rlt.physrlt.replay_eligibility import collection_provenance
 from toolkits.rlt.physrlt.replay_eligibility import evaluate as evaluate_replay
 from toolkits.rlt.pi05_baseline import configure_source, write_json
 
@@ -221,10 +222,38 @@ def run(args: argparse.Namespace) -> dict:
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
         raise RuntimeError("Critic gate requires a clean Git worktree")
+    evaluation_paths = parse_evaluations(args.evaluations)
+    replay_paths = {
+        "train_base": args.train_base_replay,
+        "train_physical": args.train_physical_replay,
+        **{
+            f"{label}_{view}": path
+            for label, paths in evaluation_paths.items()
+            for view, path in zip(("base", "physical"), paths)
+        },
+    }
+    collection_audits = {
+        label: collection_provenance(path) for label, path in replay_paths.items()
+    }
+    if args.require_robust_replay:
+        rejected = {
+            label: audit["rejection_reasons"]
+            for label, audit in collection_audits.items()
+            if not audit["eligible"]
+        }
+        revisions = {
+            audit["revision"]
+            for audit in collection_audits.values()
+            if audit["eligible"]
+        }
+        if rejected or len(revisions) != 1:
+            raise ValueError(
+                "Robust critic gate requires matched clean collection provenance: "
+                f"rejected={rejected}, revisions={sorted(str(value) for value in revisions)}"
+            )
     train = load_replay(args.train_base_replay, args.train_physical_replay)
     evaluations = {
-        label: load_replay(*paths)
-        for label, paths in parse_evaluations(args.evaluations).items()
+        label: load_replay(*paths) for label, paths in evaluation_paths.items()
     }
     trace_hashes, replay_summaries = audit_replay_set(
         train,
@@ -301,6 +330,7 @@ def run(args: argparse.Namespace) -> dict:
         "train_physical_replay": str(args.train_physical_replay),
         "trace_sha256": trace_hashes,
         "replay_summaries": replay_summaries,
+        "collection_provenance": collection_audits,
         "base_readout": str(args.base_readout),
         "base_readout_sha256": base_readout_sha256,
         "consequence_readout": str(args.consequence_readout),
