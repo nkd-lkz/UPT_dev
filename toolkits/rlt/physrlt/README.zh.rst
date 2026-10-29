@@ -139,6 +139,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 闭环成功数很少时，还要检查 critic 是否真的学会了回报排序。``critic_audit`` 从不可变 online checkpoint 读取一个未参与优化的 replay，按 episode 边界重建稀疏成功回报，报告 Q 排序 AUC、Monte Carlo 回报误差、双 Q 分歧及 actor 相对 reference 的 Q 增量。全零 replay 只用于检查虚假高分，不能计算 AUC。该审计不把训练 replay 上的拟合度当作泛化证据，也不使用 validation／development 闭环结果更新模型。
 
+``--critic-response-aux`` 为两支 Q 网络加入共享物理辅助目标，预测每条完整 replay transition 的实测本体状态变化；``--critic-response-aux-shuffled`` 改用下一条 replay 的响应，作为模型容量和 loss 形式匹配的负对照。响应标签只用训练 replay 统计量标准化，不进入当前 policy 输入。三组必须使用同一条不可变 replay；只有正确标签相对打乱标签同时改善 held-out Q 排序和冻结闭环结果，才能说明该辅助目标有效。
+
 原有 ``candidate_relative`` 为保持 128 维 critic 输入，会用 64 维相对后果替换一半 latent；这同时改变了物理信息和原始表征容量。``--concat-control-critics`` 与 ``--concat-relative-critics`` 提供容量匹配的诊断：两组 critic 都接收完整 128 维 token 和额外 128 维通道，对照通道恒为零，物理通道为候选动作相对 reference 的预测后果。actor 仍只读取原始 token，训练 replay 与更新预算保持不变。只有物理组相对零通道对照改善 held-out Q 排序并带来跨 seed 闭环收益，才能说明显式物理后果对 critic 有用。
 
 物理后果通道还可能与 base token 存在尺度差异。``--unit-concat-relative-critics`` 只归一化 68 个有效相对后果坐标的方向，critic 仍从原始候选动作读取幅度；符号反转 decoder 必须作为负对照，防止把任意放大信号误认为物理收益。若要避免物理监督同时改变 actor 的 base token，使用 ``--critic-readouts LABEL=PATH`` 指定独立 Physical Token encoder；固定 replay 还需用 ``--fixed-critic-replays`` 提供逐行匹配的物理视图。加载器要求 base 与物理 replay 的动作、控制器命令、奖励和终止哈希完全一致，actor 始终读取 base token，只有候选后果 decoder 读取 Physical Token。

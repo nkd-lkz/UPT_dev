@@ -201,6 +201,8 @@ def warmup(
     candidate_selection_margin: float = 0.0,
     candidate_uncertainty_penalty: float = 0.0,
     critic_conditioner_override: torch.nn.Module | None = None,
+    critic_response_aux_weight: float = 0.0,
+    critic_response_aux_shuffled: bool = False,
 ):
     """Fit the same upstream AlphaBrain actor on each frozen representation."""
     random.seed(seed)
@@ -250,6 +252,8 @@ def warmup(
         candidate_selection_count=candidate_selection_count,
         candidate_selection_margin=candidate_selection_margin,
         candidate_uncertainty_penalty=candidate_uncertainty_penalty,
+        critic_response_aux_weight=critic_response_aux_weight,
+        critic_response_aux_shuffled=critic_response_aux_shuffled,
     )
     train, validation = [], []
     for row in dataset["rows"]:
@@ -337,6 +341,7 @@ def deferred_update_summary(metrics: list[dict], replay: list[dict]) -> dict:
     """Summarize delayed learning without discarding drift diagnostics."""
     names = (
         "critic_loss",
+        "critic_response_aux_loss",
         "q_mean",
         "target_mean",
         "actor_loss",
@@ -749,6 +754,16 @@ def run(args):
         getattr(args, "actor_physical_outcomes_concat", [])
     )
     actor_physical_gates = set(getattr(args, "actor_physical_gates", []))
+    response_aux_critics = set(getattr(args, "critic_response_aux", []))
+    shuffled_response_aux_critics = set(
+        getattr(args, "critic_response_aux_shuffled", [])
+    )
+    if response_aux_critics & shuffled_response_aux_critics:
+        raise ValueError("Correct and shuffled response supervision must be disjoint")
+    if not (response_aux_critics | shuffled_response_aux_critics).issubset(
+        args.methods
+    ):
+        raise ValueError("Critic response supervision requires a requested method")
     critic_groups = (
         candidate_critics,
         relative_critics,
@@ -881,6 +896,14 @@ def run(args):
                     "candidate_uncertainty_penalty": getattr(
                         args, "candidate_uncertainty_penalty", 0.0
                     ),
+                    "critic_response_aux_weight": (
+                        getattr(args, "critic_response_aux_weight", 0.0)
+                        if method
+                        in response_aux_critics | shuffled_response_aux_critics
+                        else 0.0
+                    ),
+                    "critic_response_aux_shuffled": method
+                    in shuffled_response_aux_critics,
                     "consequence_checkpoint": (
                         str(critic_readouts[method])
                         if method in critic_readouts
@@ -923,6 +946,12 @@ def run(args):
                 getattr(args, "candidate_selection_margin", 0.0),
                 getattr(args, "candidate_uncertainty_penalty", 0.0),
                 critic_conditioner_override=sparse_conditioner,
+                critic_response_aux_weight=(
+                    getattr(args, "critic_response_aux_weight", 0.0)
+                    if method in response_aux_critics | shuffled_response_aux_critics
+                    else 0.0
+                ),
+                critic_response_aux_shuffled=method in shuffled_response_aux_critics,
             )
             write_json(args.output / f"{method}-warmup.json", fidelity)
             torch.save(learner.state_dict(), args.output / f"{method}-warmup.pt")
@@ -1061,6 +1090,11 @@ def run(args):
         "correction_axes": getattr(args, "correction_axes", None),
         "residual_output": getattr(args, "residual_output", False),
         "actor_physical_gates": getattr(args, "actor_physical_gates", []),
+        "critic_response_aux": getattr(args, "critic_response_aux", []),
+        "critic_response_aux_shuffled": getattr(
+            args, "critic_response_aux_shuffled", []
+        ),
+        "critic_response_aux_weight": getattr(args, "critic_response_aux_weight", 0.0),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "require_positive_replay": getattr(args, "require_positive_replay", False),
         "conservative_selectors": getattr(args, "conservative_selectors", []),
@@ -1183,6 +1217,19 @@ def main():
         default=[],
         help="Learn a zero-initialized scalar gate for an appended actor channel",
     )
+    parser.add_argument(
+        "--critic-response-aux",
+        nargs="*",
+        default=[],
+        help="Train selected critics to predict measured state response",
+    )
+    parser.add_argument(
+        "--critic-response-aux-shuffled",
+        nargs="*",
+        default=[],
+        help="Use rolled response labels as a matched negative control",
+    )
+    parser.add_argument("--critic-response-aux-weight", type=float, default=0.1)
     parser.add_argument("--conservative-selectors", nargs="*", default=[])
     parser.add_argument("--candidate-selection-count", type=int, default=5)
     parser.add_argument("--candidate-selection-margin", type=float, default=0.0)

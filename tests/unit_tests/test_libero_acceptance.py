@@ -204,6 +204,28 @@ def test_bc_actor_ignores_critic_values_while_q_bc_uses_them(source):
     assert any(not torch.equal(actors[0][key], actors[2][key]) for key in actors[0])
 
 
+def test_critic_response_auxiliary_is_shared_and_checkpointed(source):
+    replay = rows()
+    for index, row in enumerate(replay):
+        row["next_prop"] = torch.ones(8) * (index + 1) / 100
+    learner = AcceptanceLearner("cpu", critic_response_aux_weight=0.1)
+    result = learner.update(replay)
+    assert result["critic_response_aux_loss"] > 0
+    assert any(name.startswith("response1") for name in learner.critic.state_dict())
+    state = learner.state_dict()
+    AcceptanceLearner("cpu", critic_response_aux_weight=0.1).load_state_dict(state)
+    with pytest.raises(ValueError, match="critic-response contract"):
+        AcceptanceLearner("cpu").load_state_dict(state)
+    shuffled = AcceptanceLearner(
+        "cpu",
+        critic_response_aux_weight=0.1,
+        critic_response_aux_shuffled=True,
+    )
+    assert shuffled.update(replay)["critic_response_aux_loss"] > 0
+    with pytest.raises(ValueError, match="positive weight"):
+        AcceptanceLearner("cpu", critic_response_aux_shuffled=True)
+
+
 def test_candidate_conditioner_is_used_and_checkpoint_contract_is_explicit(source):
     class Conditioner(torch.nn.Module):
         def __init__(self):

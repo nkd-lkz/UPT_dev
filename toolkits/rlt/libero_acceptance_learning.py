@@ -32,6 +32,42 @@ class _GatedActor(nn.Module):
         return self.gate_logit.tanh()
 
 
+class _ResponseAuxiliaryCritic(nn.Module):
+    """Share each Q trunk with a short-horizon execution-response decoder."""
+
+    def __init__(self, critic: nn.Module, response_dim: int) -> None:
+        super().__init__()
+        if not hasattr(critic, "q1") or not hasattr(critic, "q2"):
+            raise ValueError("Response auxiliary loss requires a twin MLP critic")
+        self.critic = critic
+        hidden_dim = critic.q1[-1].in_features
+        self.response1 = nn.Linear(hidden_dim, response_dim)
+        self.response2 = nn.Linear(hidden_dim, response_dim)
+
+    def _input(
+        self,
+        token: torch.Tensor,
+        action: torch.Tensor,
+        prop: torch.Tensor,
+    ) -> torch.Tensor:
+        if token.dim() == 3:
+            token = token.squeeze(1)
+        return torch.cat((token, prop, action.flatten(1)), dim=-1)
+
+    def forward(self, token, action, prop):
+        return self.critic(token, action, prop)
+
+    def q1_forward(self, token, action, prop):
+        return self.critic.q1_forward(token, action, prop)
+
+    def response(self, token, action, prop) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predict normalized measured state change from both Q trunks."""
+        value = self._input(token, action, prop)
+        return self.response1(self.critic.q1[:-1](value)), self.response2(
+            self.critic.q2[:-1](value)
+        )
+
+
 def td_target(
     rewards: torch.Tensor,
     ticks: torch.Tensor,
@@ -91,6 +127,8 @@ class AcceptanceLearner:
         candidate_selection_count: int = 0,
         candidate_selection_margin: float = 0.0,
         candidate_uncertainty_penalty: float = 0.0,
+        critic_response_aux_weight: float = 0.0,
+        critic_response_aux_shuffled: bool = False,
     ) -> None:
         from AlphaBrain.training.reinforcement_learning.algos.RLT_a.action_token_actor_critic import (
             ActionTokenActor,
@@ -138,6 +176,10 @@ class AcceptanceLearner:
             )
         if candidate_selection_margin < 0 or candidate_uncertainty_penalty < 0:
             raise ValueError("Candidate selection penalties must be nonnegative")
+        if critic_response_aux_weight < 0:
+            raise ValueError("Critic response auxiliary weight must be nonnegative")
+        if critic_response_aux_shuffled and critic_response_aux_weight == 0:
+            raise ValueError("Shuffled response supervision requires a positive weight")
         self.chunk_len = chunk_len
         self.gripper_threshold = gripper_threshold
         self.critic_conditioning = critic_conditioning
@@ -150,6 +192,8 @@ class AcceptanceLearner:
         self.candidate_selection_count = candidate_selection_count
         self.candidate_selection_margin = candidate_selection_margin
         self.candidate_uncertainty_penalty = candidate_uncertainty_penalty
+        self.critic_response_aux_weight = critic_response_aux_weight
+        self.critic_response_aux_shuffled = critic_response_aux_shuffled
         self.last_command_diagnostics: dict | None = None
         self.critic_conditioner = (
             critic_conditioner.to(device).eval().requires_grad_(False)
@@ -173,13 +217,18 @@ class AcceptanceLearner:
             if actor_physical_gate
             else actor
         )
-        self.critic = ActionTokenQCritic(
+        critic = ActionTokenQCritic(
             bottleneck_dim=critic_bottleneck_dim,
             action_dim=7,
             chunk_len=chunk_len,
             hidden_dim=512,
             prop_dim=8,
         ).to(device)
+        self.critic = (
+            _ResponseAuxiliaryCritic(critic, response_dim=8).to(device)
+            if critic_response_aux_weight > 0
+            else critic
+        )
         self.target_actor = copy.deepcopy(self.actor).eval().requires_grad_(False)
         self.target_critic = copy.deepcopy(self.critic).eval().requires_grad_(False)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
@@ -369,6 +418,43 @@ class AcceptanceLearner:
                 batch["prop"],
             )
             critic_loss = ((q1 - target).square() + (q2 - target).square()).mean()
+            response_aux_loss = None
+            if self.critic_response_aux_weight > 0:
+                response_target = batch["next_prop"] - batch["prop"]
+                replay_responses = torch.stack(
+                    [row["next_prop"] - row["prop"] for row in eligible]
+                ).to(self.device)
+                response_scale = replay_responses.std(0, unbiased=False).clamp_min(1e-3)
+                if self.critic_response_aux_shuffled:
+                    if len(eligible) < 2:
+                        raise ValueError("Shuffled response supervision needs two rows")
+                    following = {
+                        id(row): eligible[(index + 1) % len(eligible)]
+                        for index, row in enumerate(eligible)
+                    }
+                    response_target = torch.stack(
+                        [
+                            following[id(row)]["next_prop"] - following[id(row)]["prop"]
+                            for row in rows
+                        ]
+                    ).to(self.device)
+                response_target = response_target / response_scale
+                response1, response2 = self.critic.response(
+                    self._critic_token(
+                        batch["z"],
+                        batch["action"],
+                        batch["ref"],
+                        batch.get("critic_z"),
+                    ),
+                    batch["action"],
+                    batch["prop"],
+                )
+                response_aux_loss = (response1 - response_target).square().mean() + (
+                    response2 - response_target
+                ).square().mean()
+                critic_loss = (
+                    critic_loss + self.critic_response_aux_weight * response_aux_loss
+                )
             if not torch.isfinite(critic_loss):
                 raise FloatingPointError("Nonfinite critic loss")
             self.critic_opt.zero_grad(set_to_none=True)
@@ -382,6 +468,8 @@ class AcceptanceLearner:
                 target_mean=target.mean().item(),
                 critic_grad=float(critic_grad),
             )
+            if response_aux_loss is not None:
+                metrics["critic_response_aux_loss"] = response_aux_loss.item()
         if warmup or self.critic_updates % 2 == 0:
             self.actor.train()
             self.critic.requires_grad_(False)
@@ -518,6 +606,8 @@ class AcceptanceLearner:
             "correction_limit": self.correction_limit,
             "correction_axes": self.correction_axes,
             "residual_output": self.residual_output,
+            "critic_response_aux_weight": self.critic_response_aux_weight,
+            "critic_response_aux_shuffled": self.critic_response_aux_shuffled,
             "candidate_selection_count": self.candidate_selection_count,
             "candidate_selection_margin": self.candidate_selection_margin,
             "candidate_uncertainty_penalty": self.candidate_uncertainty_penalty,
@@ -544,6 +634,12 @@ class AcceptanceLearner:
             raise ValueError("Checkpoint correction axes differ from the learner")
         if state.get("residual_output", False) != self.residual_output:
             raise ValueError("Checkpoint residual-output mode differs from the learner")
+        if state.get("critic_response_aux_weight", 0.0) != (
+            self.critic_response_aux_weight
+        ) or state.get("critic_response_aux_shuffled", False) != (
+            self.critic_response_aux_shuffled
+        ):
+            raise ValueError("Checkpoint critic-response contract differs")
         selection_contract = (
             "candidate_selection_count",
             "candidate_selection_margin",
