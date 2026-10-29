@@ -320,6 +320,37 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def load_gated_online_checkpoint(
+    path: Path,
+    *,
+    optimizer_seed: int,
+    base_readout: Path,
+    consequence_readout: Path,
+) -> dict:
+    """Load an exact correct-arm critic checkpoint that passed the strict gate."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    required = {
+        "state_dict",
+        "gate_passed",
+        "arm",
+        "optimizer_seed",
+        "train_trace_sha256",
+        "base_readout_sha256",
+        "consequence_readout_sha256",
+    }
+    if required - set(payload):
+        raise ValueError("Gated online checkpoint lacks provenance fields")
+    if not payload["gate_passed"] or payload["arm"] != "correct":
+        raise ValueError("Gated online checkpoint did not pass as the correct arm")
+    if int(payload["optimizer_seed"]) != optimizer_seed:
+        raise ValueError("Gated online checkpoint optimizer seed differs")
+    if payload["base_readout_sha256"] != file_sha256(base_readout):
+        raise ValueError("Gated online checkpoint base readout differs")
+    if payload["consequence_readout_sha256"] != file_sha256(consequence_readout):
+        raise ValueError("Gated online checkpoint consequence readout differs")
+    return payload
+
+
 def replay_trace_sha256(replay: list[dict]) -> str:
     """Hash executed evidence while excluding representation-specific fields."""
     digest = hashlib.sha256()
@@ -731,6 +762,9 @@ def run(args):
     fixed_critic_replays = parse_external_readouts(
         getattr(args, "fixed_critic_replays", [])
     )
+    online_checkpoints = parse_external_readouts(
+        getattr(args, "online_checkpoints", [])
+    )
     sparse_motion_heads = parse_external_readouts(
         getattr(args, "sparse_motion_heads", [])
     )
@@ -790,6 +824,14 @@ def run(args):
         raise ValueError("Candidate critic labels must also be requested methods")
     if not conservative_selectors.issubset(args.methods):
         raise ValueError("Conservative selector labels must also be requested methods")
+    if not set(online_checkpoints).issubset(
+        conservative_selectors & concat_relative_critics & consequence_dueling_critics
+    ):
+        raise ValueError(
+            "Online checkpoints require conservative consequence-dueling selectors"
+        )
+    if not set(online_checkpoints).issubset(critic_readouts):
+        raise ValueError("Online checkpoints require a matched consequence readout")
     if not sparse_zero_controls.issubset(sparse_motion_heads):
         raise ValueError("Sparse zero controls require a sparse-motion head")
     actor_groups = (
@@ -996,7 +1038,33 @@ def run(args):
                 write_json(args.output / "episodes.json", records)
             if gate and args.online_ticks:
                 replay, count = [], 0
-                if method in fixed_replays:
+                if method in online_checkpoints:
+                    checkpoint_payload = load_gated_online_checkpoint(
+                        online_checkpoints[method],
+                        optimizer_seed=args.seed,
+                        base_readout=path,
+                        consequence_readout=critic_readouts[method],
+                    )
+                    learner.load_state_dict(checkpoint_payload["state_dict"])
+                    write_json(
+                        args.output / f"{method}-online-checkpoint.json",
+                        {
+                            "source": str(online_checkpoints[method]),
+                            "source_sha256": file_sha256(online_checkpoints[method]),
+                            "optimizer_seed": args.seed,
+                            "train_trace_sha256": checkpoint_payload[
+                                "train_trace_sha256"
+                            ],
+                            "safety_rule": (
+                                "checkpoint contract preserves a 0.1 bounded residual "
+                                "on action axis 0; all other axes remain reference"
+                            ),
+                        },
+                    )
+                    torch.save(
+                        learner.state_dict(), args.output / f"{method}-online.pt"
+                    )
+                elif method in fixed_replays:
                     source = fixed_replays[method]
                     replay = torch.load(source, map_location="cpu", weights_only=True)
                     critic_source = fixed_critic_replays.get(method)
@@ -1052,7 +1120,9 @@ def run(args):
                             learner.state_dict(), args.output / f"{method}-online.pt"
                         )
                         torch.save(replay, args.output / f"{method}-replay.pt")
-                if getattr(args, "deferred_online_updates", False):
+                if getattr(args, "deferred_online_updates", False) and method not in (
+                    online_checkpoints
+                ):
                     skip_updates = skip_deferred_updates(
                         replay,
                         getattr(args, "require_positive_replay", False),
@@ -1123,6 +1193,9 @@ def run(args):
                 getattr(args, "fixed_replays", [])
             ).items()
         },
+        "online_checkpoints": {
+            key: str(value) for key, value in online_checkpoints.items()
+        },
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -1188,6 +1261,13 @@ def main():
         default=[],
         metavar="LABEL=PATH",
         help="Attach matched physical-token views to immutable base replay",
+    )
+    parser.add_argument(
+        "--online-checkpoints",
+        nargs="*",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Evaluate exact correct-arm checkpoints emitted by a passed critic gate",
     )
     parser.add_argument(
         "--sparse-motion-heads",

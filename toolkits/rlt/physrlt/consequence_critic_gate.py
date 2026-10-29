@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -21,6 +22,11 @@ from toolkits.rlt.physrlt.control import (
 )
 from toolkits.rlt.physrlt.critic_audit import audit_replay, discounted_success_returns
 from toolkits.rlt.pi05_baseline import configure_source, write_json
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 class SignedConsequence(nn.Module):
@@ -232,6 +238,7 @@ def run(args: argparse.Namespace) -> dict:
             )
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
+    correct_states = {}
     for seed in args.seeds:
         for arm, sign in (("correct", 1), ("reversed", -1), ("zero", 0)):
             random.seed(seed)
@@ -253,6 +260,9 @@ def run(args: argparse.Namespace) -> dict:
                 correction_axes=(0,),
                 residual_output=True,
                 critic_consequence_dueling=True,
+                candidate_selection_count=5,
+                candidate_selection_margin=0.0,
+                candidate_uncertainty_penalty=1.0,
             )
             trace = []
             random.seed(seed)
@@ -261,6 +271,8 @@ def run(args: argparse.Namespace) -> dict:
                 metrics = learner.update(train)
                 if step in {0, args.steps - 1}:
                     trace.append({"step": step + 1, **metrics})
+            if arm == "correct":
+                correct_states[seed] = learner.state_dict()
             for label, replay in evaluations.items():
                 rows.append(
                     {
@@ -273,6 +285,8 @@ def run(args: argparse.Namespace) -> dict:
                     }
                 )
     summaries, passes_strict_screen = summarize_gate(rows)
+    base_readout_sha256 = _file_sha256(args.base_readout)
+    consequence_readout_sha256 = _file_sha256(args.consequence_readout)
     result = {
         "state": "complete",
         "protocol": (
@@ -284,7 +298,9 @@ def run(args: argparse.Namespace) -> dict:
         "trace_sha256": trace_hashes,
         "replay_summaries": replay_summaries,
         "base_readout": str(args.base_readout),
+        "base_readout_sha256": base_readout_sha256,
         "consequence_readout": str(args.consequence_readout),
+        "consequence_readout_sha256": consequence_readout_sha256,
         "seeds": args.seeds,
         "rows": rows,
         "gate_summaries": summaries,
@@ -294,8 +310,28 @@ def run(args: argparse.Namespace) -> dict:
             if passes_strict_screen
             else "stop_before_closed_loop"
         ),
+        "correct_checkpoints": {},
     }
     args.output.mkdir(parents=True)
+    if passes_strict_screen:
+        for seed, state in correct_states.items():
+            checkpoint = args.output / f"correct-seed{seed}.pt"
+            torch.save(
+                {
+                    "state_dict": state,
+                    "gate_passed": True,
+                    "arm": "correct",
+                    "optimizer_seed": seed,
+                    "train_trace_sha256": trace_hashes["train"],
+                    "base_readout_sha256": base_readout_sha256,
+                    "consequence_readout_sha256": consequence_readout_sha256,
+                    "candidate_selection_count": 5,
+                    "candidate_selection_margin": 0.0,
+                    "candidate_uncertainty_penalty": 1.0,
+                },
+                checkpoint,
+            )
+            result["correct_checkpoints"][str(seed)] = str(checkpoint)
     write_json(args.output / "result.json", result)
     _write_gate_table(args.output, summaries)
     return result

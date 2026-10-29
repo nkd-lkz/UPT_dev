@@ -30,6 +30,7 @@ from toolkits.rlt.physrlt.consequence_critic_gate import summarize_gate
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
     deferred_update_summary,
+    load_gated_online_checkpoint,
     merge_replay_views,
     parse_external_readouts,
     replay_trace_sha256,
@@ -1431,6 +1432,49 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
+
+
+def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
+    from toolkits.rlt.physrlt.control import file_sha256
+
+    base = tmp_path / "base.pt"
+    consequence = tmp_path / "consequence.pt"
+    base.write_bytes(b"base")
+    consequence.write_bytes(b"physical")
+    checkpoint = tmp_path / "checkpoint.pt"
+    payload = {
+        "state_dict": {"value": torch.tensor(1)},
+        "gate_passed": True,
+        "arm": "correct",
+        "optimizer_seed": 31,
+        "train_trace_sha256": "trace",
+        "base_readout_sha256": file_sha256(base),
+        "consequence_readout_sha256": file_sha256(consequence),
+    }
+    torch.save(payload, checkpoint)
+    loaded = load_gated_online_checkpoint(
+        checkpoint,
+        optimizer_seed=31,
+        base_readout=base,
+        consequence_readout=consequence,
+    )
+    assert loaded["train_trace_sha256"] == "trace"
+    with pytest.raises(ValueError, match="optimizer seed differs"):
+        load_gated_online_checkpoint(
+            checkpoint,
+            optimizer_seed=47,
+            base_readout=base,
+            consequence_readout=consequence,
+        )
+    payload["gate_passed"] = False
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="did not pass"):
+        load_gated_online_checkpoint(
+            checkpoint,
+            optimizer_seed=31,
+            base_readout=base,
+            consequence_readout=consequence,
+        )
 
 
 def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
