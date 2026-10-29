@@ -95,6 +95,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
             "consequence_component",
             "consequence_conditioning",
             "train_trace_sha256",
+            "replay_sampling",
         }
         if required - set(payload):
             raise ValueError("Causal arm checkpoint provenance is incomplete")
@@ -112,6 +113,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
         "consequence_component",
         "consequence_conditioning",
         "train_trace_sha256",
+        "replay_sampling",
     )
     for field in shared_fields:
         if len({records[arm][field] for arm in records}) != 1:

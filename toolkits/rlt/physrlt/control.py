@@ -404,10 +404,11 @@ def load_gated_online_checkpoint(
         "consequence_readout_sha256",
         "consequence_component",
         "consequence_conditioning",
+        "replay_sampling",
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
-    if payload["schema"] != 2:
+    if payload["schema"] != 3:
         raise ValueError("Gated online checkpoint schema differs")
     if not payload["gate_passed"]:
         raise ValueError("Gated online checkpoint was not emitted by a passed gate")
@@ -419,6 +420,8 @@ def load_gated_online_checkpoint(
         raise ValueError("Gated online checkpoint physical component differs")
     if payload["consequence_conditioning"] != expected_conditioning:
         raise ValueError("Gated online checkpoint conditioning differs")
+    if payload["replay_sampling"] != "td_eligible_transition_uniform":
+        raise ValueError("Gated online checkpoint replay sampling differs")
     if int(payload["optimizer_seed"]) != optimizer_seed:
         raise ValueError("Gated online checkpoint optimizer seed differs")
     if payload["base_readout_sha256"] != file_sha256(base_readout):
@@ -1203,6 +1206,7 @@ def run(args):
                             "train_trace_sha256": checkpoint_payload[
                                 "train_trace_sha256"
                             ],
+                            "replay_sampling": checkpoint_payload["replay_sampling"],
                             "safety_rule": (
                                 "checkpoint contract preserves a 0.1 bounded residual "
                                 "on action axis 0; all other axes remain reference"

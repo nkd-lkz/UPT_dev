@@ -1579,7 +1579,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     consequence.write_bytes(b"physical")
     checkpoint = tmp_path / "checkpoint.pt"
     payload = {
-        "schema": 2,
+        "schema": 3,
         "state_dict": {"value": torch.tensor(1)},
         "gate_passed": True,
         "training_arm": "correct",
@@ -1590,6 +1590,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         "consequence_readout_sha256": file_sha256(consequence),
         "consequence_component": "joint",
         "consequence_conditioning": "relative_concat",
+        "replay_sampling": "td_eligible_transition_uniform",
     }
     torch.save(payload, checkpoint)
     loaded = load_gated_online_checkpoint(
@@ -1601,6 +1602,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         consequence_readout=consequence,
     )
     assert loaded["train_trace_sha256"] == "trace"
+    assert loaded["replay_sampling"] == "td_eligible_transition_uniform"
     loaded = load_gated_online_checkpoint(
         checkpoint,
         expected_arm="reversed",
@@ -1619,6 +1621,18 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
             base_readout=base,
             consequence_readout=consequence,
         )
+    payload["replay_sampling"] = "episode_balanced"
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="replay sampling differs"):
+        load_gated_online_checkpoint(
+            checkpoint,
+            expected_arm="correct",
+            expected_component="joint",
+            optimizer_seed=31,
+            base_readout=base,
+            consequence_readout=consequence,
+        )
+    payload["replay_sampling"] = "td_eligible_transition_uniform"
     payload["training_arm"] = "reversed"
     torch.save(payload, checkpoint)
     with pytest.raises(ValueError, match="not trained on correct"):
@@ -1952,6 +1966,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                     "consequence_component": "joint",
                     "consequence_conditioning": "relative_concat",
                     "train_trace_sha256": "train",
+                    "replay_sampling": "td_eligible_transition_uniform",
                 }
             )
         )

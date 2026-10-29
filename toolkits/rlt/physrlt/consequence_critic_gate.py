@@ -321,7 +321,7 @@ def run(args: argparse.Namespace) -> dict:
             checkpoint = args.output / f"correct-trained-seed{seed}.pt"
             torch.save(
                 {
-                    "schema": 2,
+                    "schema": 3,
                     "state_dict": state,
                     "gate_passed": True,
                     "training_arm": "correct",
