@@ -163,8 +163,19 @@ def inputs(data: dict, stats: dict, method: str) -> tuple:
     return feature, prop, data["ref"]
 
 
-def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: int):
+def fit_readout(
+    data: dict,
+    train: torch.Tensor,
+    method: str,
+    seed: int,
+    steps: int,
+    *,
+    geometry_weight: float = 1.0,
+    reconstruction_weight: float = 0.1,
+):
     """Train fixed-budget, equal-capacity variants; future states are labels only."""
+    if geometry_weight < 0 or reconstruction_weight < 0:
+        raise ValueError("Physical objective weights must be nonnegative")
     torch.manual_seed(seed)
     model = PhysicalReadout(
         data["response"].shape[-1],
@@ -218,11 +229,13 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                     terms[key] = execution_response_loss(
                         pred[key], target, mask, method
                     )
-                loss = loss + terms[key]
+                weight = geometry_weight if key == "geometry" else 1.0
+                loss = loss + weight * terms[key]
             if method in {"joint_recon", "factorized_recon"}:
                 loss = (
                     loss
-                    + 0.1 * (model.reconstruct(z) - features[selected]).square().mean()
+                    + reconstruction_weight
+                    * (model.reconstruct(z) - features[selected]).square().mean()
                 )
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite {method} objective at {step}")
@@ -374,6 +387,10 @@ def run(args: argparse.Namespace) -> list[dict]:
     train = torch.tensor([r["split"] == "train" for r in rows])
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     data_digest = dataset_sha256(args.dataset)
+    geometry_weight = getattr(args, "geometry_weight", 1.0)
+    reconstruction_weight = getattr(args, "reconstruction_weight", 0.1)
+    if geometry_weight < 0 or reconstruction_weight < 0:
+        raise ValueError("Physical objective weights must be nonnegative")
     args.output.mkdir(parents=True, exist_ok=True)
     all_results = []
     for seed in args.seeds:
@@ -384,7 +401,15 @@ def run(args: argparse.Namespace) -> list[dict]:
                 all_results.append(json.loads((run_dir / "result.json").read_text()))
                 continue
             started = time.monotonic()
-            model, stats, losses = fit_readout(data, train, method, seed, args.steps)
+            model, stats, losses = fit_readout(
+                data,
+                train,
+                method,
+                seed,
+                args.steps,
+                geometry_weight=geometry_weight,
+                reconstruction_weight=reconstruction_weight,
+            )
             evaluation = evaluate_representation(model, data, stats, method, rows)
             result = {
                 "state": "complete",
@@ -405,6 +430,8 @@ def run(args: argparse.Namespace) -> list[dict]:
                 if method == "balanced_joint"
                 else "equal_selected_dimensions",
                 "steps": args.steps,
+                "geometry_weight": geometry_weight,
+                "reconstruction_weight": reconstruction_weight,
                 "training_rows": int(train.sum()),
                 "all_rows": len(rows),
                 "seconds": time.monotonic() - started,
@@ -426,6 +453,8 @@ def run(args: argparse.Namespace) -> list[dict]:
                     "response_target": result["response_target"],
                     "response_supervision": result["response_supervision"],
                     "response_weighting": result["response_weighting"],
+                    "geometry_weight": geometry_weight,
+                    "reconstruction_weight": reconstruction_weight,
                     "response_dim": data["response"].shape[-1],
                     "geometry_dim": data["geometry"].shape[-1],
                     "dataset": str(args.dataset),
@@ -486,9 +515,13 @@ def main() -> None:
     parser.add_argument("--seeds", nargs="+", type=int, default=[31, 47, 59])
     parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--geometry-weight", type=float, default=1.0)
+    parser.add_argument("--reconstruction-weight", type=float, default=0.1)
     args = parser.parse_args()
     if args.steps < 1 or args.threads < 1:
         parser.error("Positive steps/threads required")
+    if args.geometry_weight < 0 or args.reconstruction_weight < 0:
+        parser.error("Physical objective weights must be nonnegative")
     run(args)
 
 

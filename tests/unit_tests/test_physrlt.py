@@ -1974,6 +1974,8 @@ def test_followup_methods_fit_and_restore(tmp_path, method):
     assert encoded["z"].shape == (128,)
     assert torch.isfinite(encoded["z"]).all()
     assert readout.model.factorized == method.startswith("factorized_")
+    assert readout.payload["geometry_weight"] == 1.0
+    assert readout.payload["reconstruction_weight"] == 0.1
 
 
 @pytest.mark.parametrize("limit", [7, 10])
