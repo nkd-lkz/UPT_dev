@@ -141,6 +141,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 ``--fixed-replays LABEL=PATH ...`` 用于离线隔离优化 seed。它要求启用 deferred 更新，并为每个方法显式提供 replay；加载器会拒绝不完整 chunk、非有限 tensor 和缺失字段，记录源文件摘要，并继续执行轨迹哈希审计。不同表征必须使用同一条物理轨迹各自重新编码后的 replay，不能直接复用另一种表征的 latent。该协议检验“面对相同正奖励证据，哪种表征更易学习”，不代表在线探索性能。
 
+新采集的 fixed replay 还必须先通过 ``replay_eligibility``。该检查要求 replay 同时包含正奖励 transition、正折扣回报 transition 和零回报 transition，并写出执行轨迹哈希；全零奖励或只有成功回报的数据不能进入独立 critic gate。后台队列只以 ``replay_eligibility.json`` 中的布尔字段为完成信号，普通 ``result.json`` 的存在不会阻止预注册 fallback seed，避免一次无信息采集卡住整条审计链路。
+
 闭环成功数很少时，还要检查 critic 是否真的学会了回报排序。``critic_audit`` 从不可变 online checkpoint 读取一个未参与优化的 replay，按 episode 边界重建稀疏成功回报，报告 Q 排序 AUC、Monte Carlo 回报误差、双 Q 分歧及 actor 相对 reference 的 Q 增量。全零 replay 只用于检查虚假高分，不能计算 AUC。该审计不把训练 replay 上的拟合度当作泛化证据，也不使用 validation／development 闭环结果更新模型。
 
 ``--critic-response-aux`` 为两支 Q 网络加入共享物理辅助目标，预测每条完整 replay transition 的实测本体状态变化；``--critic-response-aux-shuffled`` 改用下一条 replay 的响应，作为模型容量和 loss 形式匹配的负对照。响应标签只用训练 replay 统计量标准化，不进入当前 policy 输入。三组必须使用同一条不可变 replay；只有正确标签相对打乱标签同时改善 held-out Q 排序和冻结闭环结果，才能说明该辅助目标有效。

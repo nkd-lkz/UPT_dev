@@ -94,6 +94,7 @@ from toolkits.rlt.physrlt.probe import (
     run,
     tensor_data,
 )
+from toolkits.rlt.physrlt.replay_eligibility import evaluate as evaluate_replay
 from toolkits.rlt.physrlt.response_adaptation import (
     AxisTranslationCalibrator,
     DiagonalResponseRegressor,
@@ -1461,6 +1462,34 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
+
+
+def test_critic_replay_eligibility_requires_positive_and_zero_returns():
+    template = {
+        "z": torch.zeros(128),
+        "ref": torch.zeros(10, 7),
+        "prop": torch.zeros(8),
+        "action": torch.zeros(10, 7),
+        "accepted_commands": torch.zeros(10, 7),
+        "next_z": torch.ones(128),
+        "next_ref": torch.zeros(10, 7),
+        "next_prop": torch.zeros(8),
+        "ticks": 10,
+        "terminal": True,
+        "reward": 0.0,
+    }
+    failed, succeeded = copy.deepcopy(template), copy.deepcopy(template)
+    succeeded["reward"] = 5.0
+    result = evaluate_replay([failed, succeeded])
+    assert result["eligible_for_independent_critic_gate"]
+    assert result["positive_return_transitions"] == 1
+    assert result["zero_return_transitions"] == 1
+    all_failed = evaluate_replay([failed, copy.deepcopy(failed)])
+    assert not all_failed["eligible_for_independent_critic_gate"]
+    assert "no_positive_reward_transition" in all_failed["rejection_reasons"]
+    all_succeeded = evaluate_replay([succeeded, copy.deepcopy(succeeded)])
+    assert not all_succeeded["eligible_for_independent_critic_gate"]
+    assert "no_zero_return_transition" in all_succeeded["rejection_reasons"]
 
 
 def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
