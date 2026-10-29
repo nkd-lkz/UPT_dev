@@ -22,6 +22,9 @@ from toolkits.rlt.physrlt.conditioning import (
     load_sparse_motion_conditioner,
     physical_quantities,
 )
+from toolkits.rlt.physrlt.consequence_component_report import (
+    summarize as summarize_consequence_components,
+)
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     load_replay as load_consequence_gate_replay,
 )
@@ -1667,6 +1670,39 @@ def test_consequence_critic_gate_requires_correct_arm_best_in_every_seed():
     )["return_ranking_auc"] = None
     _, passes = summarize_gate(rows)
     assert not passes
+
+
+def test_consequence_component_report_requires_matched_causal_gates():
+    gate_rows = [
+        {
+            "evaluation": "independent",
+            "optimizer_seed": 31,
+            "metric": "return_ranking_auc",
+            "correct": 0.7,
+            "reversed": 0.6,
+            "zero": 0.5,
+            "correct_best": True,
+        }
+    ]
+    payloads = {
+        component: {
+            "state": "complete",
+            "consequence_component": component,
+            "trace_sha256": {"train": "a", "independent": "b"},
+            "base_readout_sha256": "base",
+            "consequence_readout_sha256": "physical",
+            "seeds": [31],
+            "gate_summaries": copy.deepcopy(gate_rows),
+            "passes_strict_screen": True,
+        }
+        for component in ("joint", "response", "geometry")
+    }
+    result = summarize_consequence_components(payloads)
+    assert len(result["rows"]) == 3
+    assert all(row["passes_strict_screen"] for row in result["component_summary"])
+    payloads["geometry"]["trace_sha256"]["independent"] = "different"
+    with pytest.raises(ValueError, match="same protocol evidence"):
+        summarize_consequence_components(payloads)
 
 
 def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():
