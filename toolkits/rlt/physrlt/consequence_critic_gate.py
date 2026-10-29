@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 from pathlib import Path
@@ -18,7 +19,7 @@ from toolkits.rlt.physrlt.control import (
     replay_trace_sha256,
     validate_fixed_replay,
 )
-from toolkits.rlt.physrlt.critic_audit import audit_replay
+from toolkits.rlt.physrlt.critic_audit import audit_replay, discounted_success_returns
 from toolkits.rlt.pi05_baseline import configure_source, write_json
 
 
@@ -96,10 +97,111 @@ def load_replay(base_path: Path, physical_path: Path) -> list[dict]:
     ]
 
 
+def summarize_gate(rows: list[dict]) -> tuple[list[dict], bool]:
+    """Require the correct consequence to rank returns best in every cell."""
+    if not rows:
+        raise ValueError("Critic gate requires audit rows")
+    evaluations = sorted({str(row["evaluation"]) for row in rows})
+    seeds = sorted({int(row["optimizer_seed"]) for row in rows})
+    metrics = ("return_ranking_auc", "return_order_concordance")
+    summaries = []
+    strict_checks = []
+    for evaluation in evaluations:
+        for seed in seeds:
+            cell = [
+                row
+                for row in rows
+                if row["evaluation"] == evaluation
+                and int(row["optimizer_seed"]) == seed
+            ]
+            by_arm = {str(row["arm"]): row for row in cell}
+            if set(by_arm) != {"correct", "reversed", "zero"} or len(cell) != 3:
+                raise ValueError("Every critic gate cell requires three unique arms")
+            for metric in metrics:
+                values = {arm: by_arm[arm].get(metric) for arm in by_arm}
+                passes = all(value is not None for value in values.values()) and (
+                    float(values["correct"])
+                    > max(float(values["reversed"]), float(values["zero"]))
+                )
+                strict_checks.append(passes)
+                summaries.append(
+                    {
+                        "evaluation": evaluation,
+                        "optimizer_seed": seed,
+                        "metric": metric,
+                        **values,
+                        "correct_best": passes,
+                    }
+                )
+        for metric in metrics:
+            values = {}
+            for arm in ("correct", "reversed", "zero"):
+                current = [
+                    row.get(metric)
+                    for row in rows
+                    if row["evaluation"] == evaluation and row["arm"] == arm
+                ]
+                values[arm] = (
+                    sum(float(value) for value in current) / len(current)
+                    if current and all(value is not None for value in current)
+                    else None
+                )
+            passes = all(value is not None for value in values.values()) and (
+                float(values["correct"])
+                > max(float(values["reversed"]), float(values["zero"]))
+            )
+            strict_checks.append(passes)
+            summaries.append(
+                {
+                    "evaluation": evaluation,
+                    "optimizer_seed": "aggregate",
+                    "metric": metric,
+                    **values,
+                    "correct_best": passes,
+                }
+            )
+    return summaries, all(strict_checks)
+
+
+def _write_gate_table(output: Path, summaries: list[dict]) -> None:
+    fields = list(summaries[0])
+    with (output / "comparison.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(summaries)
+    lines = [
+        "# Consequence critic gate",
+        "",
+        "Correct physical direction must strictly outperform reversed and zero "
+        "controls in every optimizer seed and in the seed aggregate.",
+        "",
+        "| Evaluation | Seed | Metric | Correct | Reversed | Zero | Best |",
+        "|---|---:|---|---:|---:|---:|:---:|",
+    ]
+    for row in summaries:
+        values = [
+            "NA" if row[arm] is None else f"{float(row[arm]):.6f}"
+            for arm in ("correct", "reversed", "zero")
+        ]
+        lines.append(
+            f"| {row['evaluation']} | {row['optimizer_seed']} | {row['metric']} | "
+            f"{values[0]} | {values[1]} | {values[2]} | "
+            f"{'yes' if row['correct_best'] else 'no'} |"
+        )
+    (output / "comparison.md").write_text("\n".join(lines) + "\n")
+
+
 def run(args: argparse.Namespace) -> dict:
     """Fit matched critic arms and audit unseen executed replay traces."""
-    if args.output.exists() or args.steps < 1 or not args.seeds:
-        raise ValueError("Require a new output, positive steps and optimizer seeds")
+    if (
+        args.output.exists()
+        or args.steps < 1
+        or len(args.seeds) < 3
+        or len(set(args.seeds)) != len(args.seeds)
+    ):
+        raise ValueError(
+            "Require a new output, positive steps and three unique optimizer seeds"
+        )
     configure_source(args.source)
     train = load_replay(args.train_base_replay, args.train_physical_replay)
     evaluations = {
@@ -120,6 +222,14 @@ def run(args: argparse.Namespace) -> dict:
         raise ValueError(
             "Every train and evaluation replay needs a positive transition"
         )
+    for label, replay in evaluations.items():
+        returns = discounted_success_returns(replay)
+        positive_returns = sum(value > 0 for value in returns)
+        replay_summaries[label]["positive_return_transitions"] = positive_returns
+        if positive_returns == 0 or positive_returns == len(returns):
+            raise ValueError(
+                "Every evaluation replay needs positive and zero-return transitions"
+            )
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
     for seed in args.seeds:
@@ -162,6 +272,7 @@ def run(args: argparse.Namespace) -> dict:
                         **audit_replay(learner, replay),
                     }
                 )
+    summaries, passes_strict_screen = summarize_gate(rows)
     result = {
         "state": "complete",
         "protocol": (
@@ -176,9 +287,17 @@ def run(args: argparse.Namespace) -> dict:
         "consequence_readout": str(args.consequence_readout),
         "seeds": args.seeds,
         "rows": rows,
+        "gate_summaries": summaries,
+        "passes_strict_screen": passes_strict_screen,
+        "decision": (
+            "eligible_for_conservative_candidate_control"
+            if passes_strict_screen
+            else "stop_before_closed_loop"
+        ),
     }
     args.output.mkdir(parents=True)
     write_json(args.output / "result.json", result)
+    _write_gate_table(args.output, summaries)
     return result
 
 

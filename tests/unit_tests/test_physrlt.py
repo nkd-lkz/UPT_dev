@@ -26,6 +26,7 @@ from toolkits.rlt.physrlt.consequence_critic_gate import (
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     parse_evaluations as parse_consequence_gate_evaluations,
 )
+from toolkits.rlt.physrlt.consequence_critic_gate import summarize_gate
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
     deferred_update_summary,
@@ -1457,6 +1458,49 @@ def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
     torch.save(physical, physical_path)
     with pytest.raises(ValueError, match="traces differ"):
         load_consequence_gate_replay(base_path, physical_path)
+
+
+def test_consequence_critic_gate_requires_correct_arm_best_in_every_seed():
+    rows = []
+    for seed in (31, 47, 59):
+        for arm, auc, concordance in (
+            ("correct", 0.8, 0.7),
+            ("reversed", 0.6, 0.5),
+            ("zero", 0.55, 0.45),
+        ):
+            rows.append(
+                {
+                    "evaluation": "heldout",
+                    "optimizer_seed": seed,
+                    "arm": arm,
+                    "return_ranking_auc": auc,
+                    "return_order_concordance": concordance,
+                }
+            )
+    summaries, passes = summarize_gate(rows)
+    assert passes
+    assert len(summaries) == 8
+    assert all(row["correct_best"] for row in summaries)
+    next(
+        row
+        for row in rows
+        if row["optimizer_seed"] == 47 and row["arm"] == "reversed"
+    )["return_order_concordance"] = 0.9
+    summaries, passes = summarize_gate(rows)
+    assert not passes
+    failed = [row for row in summaries if not row["correct_best"]]
+    assert any(
+        row["optimizer_seed"] == 47
+        and row["metric"] == "return_order_concordance"
+        for row in failed
+    )
+    next(
+        row
+        for row in rows
+        if row["optimizer_seed"] == 31 and row["arm"] == "correct"
+    )["return_ranking_auc"] = None
+    _, passes = summarize_gate(rows)
+    assert not passes
 
 
 def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():
