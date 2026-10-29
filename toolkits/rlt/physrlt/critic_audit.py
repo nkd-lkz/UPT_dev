@@ -130,6 +130,10 @@ def _learner(run: Path, method: str, device: str) -> AcceptanceLearner:
         candidate_uncertainty_penalty=checkpoint.get(
             "candidate_uncertainty_penalty", 0.0
         ),
+        critic_response_aux_weight=checkpoint.get("critic_response_aux_weight", 0.0),
+        critic_response_aux_shuffled=checkpoint.get(
+            "critic_response_aux_shuffled", False
+        ),
     )
     learner.load_state_dict(checkpoint)
     learner.actor.eval()
