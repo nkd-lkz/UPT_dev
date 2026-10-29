@@ -82,15 +82,24 @@ def load_replay(base_path: Path, physical_path: Path) -> list[dict]:
 
 
 def audit_replay_set(
-    train: list[dict], evaluations: dict[str, list[dict]]
+    train: list[dict],
+    evaluations: dict[str, list[dict]],
+    *,
+    require_robust: bool = False,
 ) -> tuple[dict[str, str], dict[str, dict]]:
     """Require informative and trace-independent train/evaluation replays."""
     replays = {"train": train, **evaluations}
     summaries = {label: evaluate_replay(replay) for label, replay in replays.items()}
+    eligibility_key = (
+        "eligible_for_robust_independent_critic_gate"
+        if require_robust
+        else "eligible_for_independent_critic_gate"
+    )
+    reasons_key = "robust_rejection_reasons" if require_robust else "rejection_reasons"
     rejected = {
-        label: summary["rejection_reasons"]
+        label: summary[reasons_key]
         for label, summary in summaries.items()
-        if not summary["eligible_for_independent_critic_gate"]
+        if not summary[eligibility_key]
     }
     if rejected:
         raise ValueError(f"Critic gate replays are ineligible: {rejected}")
@@ -213,7 +222,11 @@ def run(args: argparse.Namespace) -> dict:
         label: load_replay(*paths)
         for label, paths in parse_evaluations(args.evaluations).items()
     }
-    trace_hashes, replay_summaries = audit_replay_set(train, evaluations)
+    trace_hashes, replay_summaries = audit_replay_set(
+        train,
+        evaluations,
+        require_robust=args.require_robust_replay,
+    )
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
     seed_states = {}
@@ -288,6 +301,7 @@ def run(args: argparse.Namespace) -> dict:
         "consequence_readout_sha256": consequence_readout_sha256,
         "consequence_component": args.consequence_component,
         "consequence_conditioning": args.consequence_conditioning,
+        "require_robust_replay": args.require_robust_replay,
         "seeds": args.seeds,
         "rows": rows,
         "gate_summaries": summaries,
@@ -354,6 +368,11 @@ def main() -> None:
         ),
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--require-robust-replay",
+        action="store_true",
+        help="Require at least two complete success and failure episodes per replay.",
+    )
     parser.add_argument("--steps", type=int, default=105)
     parser.add_argument("--seeds", type=int, nargs="+", default=[31, 47, 59])
     args = parser.parse_args()

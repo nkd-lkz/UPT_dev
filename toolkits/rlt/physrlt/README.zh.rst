@@ -143,6 +143,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 新采集的 fixed replay 还必须先通过 ``replay_eligibility``。该检查要求 replay 同时包含正奖励 transition、正折扣回报 transition 和零回报 transition，并写出执行轨迹哈希；全零奖励或只有成功回报的数据不能进入独立 critic gate。后台队列只以 ``replay_eligibility.json`` 中的布尔字段为完成信号，普通 ``result.json`` 的存在不会阻止预注册 fallback seed，避免一次无信息采集卡住整条审计链路。
 
+用于 fresh 确认的 replay 还应读取 ``eligible_for_robust_independent_critic_gate``：每条 replay 至少包含 2 个完整成功 episode 和 2 个达到终止或 520 ticks 上限的完整失败 episode；全局预算截断产生的尾段不会被提升为失败 episode。``consequence_critic_gate --require-robust-replay`` 会在 gate 内再次执行同一检查，防止调度脚本与直接调用出现协议差异。旧开发 replay 仍可在不传该 flag 时按原最低门槛复现，但不能冒充 fresh 确认证据。
+
 独立 train/evaluation replay 应在一次命令中成对审计：``python -m toolkits.rlt.physrlt.replay_eligibility --train-replay TRAIN.pt --evaluation-replay EVAL.pt --output pair.json``。两条 replay 除了各自满足正、零回报要求，还必须具有不同的执行轨迹哈希；目录名、采集 seed 或不同表征视图不能代替这一检查。成对审计失败时命令返回非零状态，不允许后续 critic gate 启动。
 
 闭环成功数很少时，还要检查 critic 是否真的学会了回报排序。``critic_audit`` 从不可变 online checkpoint 读取一个未参与优化的 replay，按 episode 边界重建稀疏成功回报，报告 Q 排序 AUC、Monte Carlo 回报误差、双 Q 分歧及 actor 相对 reference 的 Q 增量。全零 replay 只用于检查虚假高分，不能计算 AUC。该审计不把训练 replay 上的拟合度当作泛化证据，也不使用 validation／development 闭环结果更新模型。

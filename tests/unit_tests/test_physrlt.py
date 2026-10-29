@@ -1512,8 +1512,17 @@ def test_critic_replay_eligibility_requires_positive_and_zero_returns():
     succeeded["reward"] = 5.0
     result = evaluate_replay([failed, succeeded])
     assert result["eligible_for_independent_critic_gate"]
+    assert not result["eligible_for_robust_independent_critic_gate"]
+    assert result["successful_episodes"] == 1
+    assert result["failed_episodes"] == 1
     assert result["positive_return_transitions"] == 1
     assert result["zero_return_transitions"] == 1
+    robust = evaluate_replay(
+        [failed, succeeded, copy.deepcopy(failed), copy.deepcopy(succeeded)]
+    )
+    assert robust["eligible_for_robust_independent_critic_gate"]
+    assert robust["complete_episodes"] == 4
+    assert robust["incomplete_tail_transitions"] == 0
     all_failed = evaluate_replay([failed, copy.deepcopy(failed)])
     assert not all_failed["eligible_for_independent_critic_gate"]
     assert "no_positive_reward_transition" in all_failed["rejection_reasons"]
@@ -1550,6 +1559,7 @@ def test_independent_critic_replay_pair_requires_distinct_execution_traces():
     evaluation[0]["accepted_commands"][0, 0] = 0.1
     independent = evaluate_replay_pair(train, evaluation)
     assert independent["eligible_for_independent_critic_gate"]
+    assert not independent["eligible_for_robust_independent_critic_gate"]
     assert independent["distinct_execution_traces"]
     assert (
         independent["train"]["trace_sha256"]
@@ -1740,6 +1750,8 @@ def test_consequence_gate_replay_set_requires_informative_distinct_traces():
     assert hashes["train"] != hashes["heldout"]
     assert summaries["train"]["zero_return_transitions"] == 1
     assert summaries["heldout"]["positive_return_transitions"] == 1
+    with pytest.raises(ValueError, match="ineligible"):
+        audit_replay_set(train, {"heldout": evaluation}, require_robust=True)
 
     with pytest.raises(ValueError, match="distinct traces"):
         audit_replay_set(train, {"heldout": copy.deepcopy(train)})
@@ -1805,6 +1817,7 @@ def test_consequence_component_report_requires_matched_causal_gates():
             "base_readout_sha256": "base",
             "consequence_readout_sha256": "physical",
             "consequence_conditioning": "relative_concat",
+            "require_robust_replay": True,
             "causal_protocol": (
                 "train_correct_once_freeze_weights_intervene_input_sign"
             ),
