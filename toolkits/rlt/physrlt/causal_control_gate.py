@@ -248,17 +248,34 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
     seen_seeds = set()
     correct_nonreference = []
     checkpoint_audits = []
+    run_audits = []
     for run in runs:
         result = json.loads((run / "result.json").read_text())
+        manifest = json.loads((run / "run_manifest.json").read_text())
         episodes = json.loads((run / "episodes.json").read_text())
         if isinstance(episodes, dict):
             episodes = episodes.get("episodes", [])
         if result.get("state") != "complete" or not result.get("complete"):
             raise ValueError("Causal control run is incomplete")
+        if (
+            result.get("control_protocol_version") != 3
+            or manifest.get("control_protocol_version") != 3
+            or not manifest.get("revision")
+        ):
+            raise ValueError("Causal control requires version 3 run provenance")
         seed = int(result["seed"])
         if seed in seen_seeds:
             raise ValueError("Causal control runs require unique optimizer seeds")
         seen_seeds.add(seed)
+        run_audits.append(
+            {
+                "seed": seed,
+                "run": str(run.resolve()),
+                "revision": str(manifest["revision"]),
+                "control_protocol_version": 3,
+                "reset_pairing_protocol": manifest.get("reset_pairing_protocol"),
+            }
+        )
         checkpoint_audits.append(_checkpoint_audit(run, arms, seed))
         for split in ("validation", "development"):
             correct = _episode_map(
@@ -382,6 +399,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         ),
         "arms": arms,
         "seeds": sorted(seen_seeds),
+        "run_audits": run_audits,
         "checkpoint_audits": checkpoint_audits,
         "rows": rows,
         "comparisons": comparisons,

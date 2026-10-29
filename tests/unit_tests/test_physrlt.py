@@ -1924,7 +1924,23 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     run = tmp_path / "seed31"
     run.mkdir()
     (run / "result.json").write_text(
-        json.dumps({"state": "complete", "complete": True, "seed": 31})
+        json.dumps(
+            {
+                "state": "complete",
+                "complete": True,
+                "seed": 31,
+                "control_protocol_version": 3,
+            }
+        )
+    )
+    (run / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "revision": "test-revision",
+                "control_protocol_version": 3,
+                "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
+            }
+        )
     )
     rows = []
     for split in ("validation", "development"):
@@ -2005,11 +2021,20 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         "reversed",
         "zero",
     ]
+    assert result["run_audits"][0]["revision"] == "test-revision"
     report = tmp_path / "causal-report"
     write_causal_control_report(report, result)
     markdown = (report / "comparison.md").read_text()
     assert "Native-command divergences" in markdown
     assert "Unattributed outcomes" in markdown
+
+    old_result = json.loads((run / "result.json").read_text())
+    old_result["control_protocol_version"] = 2
+    (run / "result.json").write_text(json.dumps(old_result))
+    with pytest.raises(ValueError, match="version 3"):
+        evaluate_causal_control([run], arms)
+    old_result["control_protocol_version"] = 3
+    (run / "result.json").write_text(json.dumps(old_result))
     rows[-3]["success"] = False
     rows[-2]["success"] = True
     (run / "episodes.json").write_text(json.dumps(rows))
