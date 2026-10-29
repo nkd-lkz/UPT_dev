@@ -1737,6 +1737,7 @@ def test_consequence_component_report_combines_matched_episode_folds():
         "physical_replay": "physical.pt",
         "base_readout": "base-readout.pt",
         "consequence_readout": "consequence-readout.pt",
+        "conditioning_mode": "relative_concat",
         "complete_successful_episodes": 3,
         "folds": [{"fold": 0}],
         "seeds": [31, 47, 59],

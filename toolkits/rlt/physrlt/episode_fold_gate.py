@@ -117,7 +117,12 @@ def _summaries(rows: list[dict]) -> tuple[list[dict], bool]:
 
 def run(args: argparse.Namespace) -> dict:
     """Fit critic arms on successful episodes and audit the held-out episode."""
-    if args.output.exists() or args.steps < 1 or not args.seeds:
+    if (
+        args.output.exists()
+        or args.steps < 1
+        or not args.seeds
+        or args.conditioning_mode not in {"relative_concat", "relative_unit_concat"}
+    ):
         raise ValueError("Require a new output, positive steps and optimizer seeds")
     configure_source(args.source)
     replay = load_replay(args.base_replay, args.physical_replay)
@@ -131,7 +136,7 @@ def run(args: argparse.Namespace) -> dict:
                 torch.manual_seed(seed)
                 conditioner = SignedCandidateConsequence(
                     readout.candidate_conditioner(
-                        "relative_concat", component=args.consequence_component
+                        args.conditioning_mode, component=args.consequence_component
                     ),
                     sign,
                 )
@@ -143,7 +148,7 @@ def run(args: argparse.Namespace) -> dict:
                     chunk_len=10,
                     gripper_threshold=0,
                     critic_conditioner=conditioner,
-                    critic_conditioning="candidate_relative_concat",
+                    critic_conditioning=f"candidate_{args.conditioning_mode}",
                     critic_bottleneck_dim=256,
                     correction_limit=0.1,
                     correction_axes=(0,),
@@ -196,6 +201,7 @@ def run(args: argparse.Namespace) -> dict:
         "base_readout": str(args.base_readout),
         "consequence_readout": str(args.consequence_readout),
         "consequence_component": args.consequence_component,
+        "conditioning_mode": args.conditioning_mode,
         "seeds": args.seeds,
         "strict_screen": (
             "correct mean return-order concordance must exceed reversed and zero "
@@ -222,6 +228,11 @@ def main() -> None:
         "--consequence-component",
         choices=("joint", "response", "geometry"),
         default="joint",
+    )
+    parser.add_argument(
+        "--conditioning-mode",
+        choices=("relative_concat", "relative_unit_concat"),
+        default="relative_concat",
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=105)

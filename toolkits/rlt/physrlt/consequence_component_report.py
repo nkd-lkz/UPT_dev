@@ -96,6 +96,7 @@ def summarize_episode_folds(payloads: dict[str, dict]) -> dict:
         "physical_replay",
         "base_readout",
         "consequence_readout",
+        "conditioning_mode",
         "complete_successful_episodes",
         "folds",
         "seeds",
