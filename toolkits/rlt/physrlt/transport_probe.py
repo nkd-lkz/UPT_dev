@@ -62,6 +62,58 @@ def crossfit_ridge(
     }
 
 
+def out_of_layout_predictions(
+    x: torch.Tensor, y: torch.Tensor, cases: list[str], ridge: float
+) -> torch.Tensor:
+    """Predict every training row from models that exclude its entire layout."""
+    if len(x) != len(y) or len(x) != len(cases):
+        raise ValueError("Out-of-layout rows must align")
+    layouts = sorted(set(cases))
+    if len(layouts) < 2:
+        raise ValueError("Out-of-layout prediction requires multiple layouts")
+    prediction = torch.empty_like(y)
+    for layout in layouts:
+        heldout = torch.tensor([case == layout for case in cases])
+        prediction[heldout] = _ridge_predict(
+            x[~heldout], y[~heldout], x[heldout], ridge
+        )
+    return prediction
+
+
+def gated_coefficient(
+    train_x: torch.Tensor,
+    test_x: torch.Tensor,
+    coefficient: torch.Tensor,
+    moving: torch.Tensor,
+    cases: list[str],
+    *,
+    shuffle_seed: int | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """Predict motion probability times a coefficient fitted on motion events."""
+    if moving.dtype != torch.bool or moving.shape != (len(train_x),):
+        raise ValueError("Motion mask must align with coupling rows")
+    if int(moving.sum()) < 2 or int((~moving).sum()) < 2:
+        raise ValueError("Gated coupling requires moving and stationary examples")
+    event_target = moving.double()[:, None]
+    if shuffle_seed is not None:
+        generator = torch.Generator().manual_seed(shuffle_seed)
+        event_target = event_target[
+            torch.randperm(len(event_target), generator=generator)
+        ]
+    event, event_cv = crossfit_ridge(train_x, event_target, cases, test_x)
+    moving_cases = [case for case, active in zip(cases, moving, strict=True) if active]
+    conditional, conditional_cv = crossfit_ridge(
+        train_x[moving], coefficient[moving], moving_cases, test_x
+    )
+    return event.clamp(0, 1) * conditional.clamp(0, 1), {
+        "moving_rows": int(moving.sum()),
+        "stationary_rows": int((~moving).sum()),
+        "event_cv": event_cv,
+        "conditional_cv": conditional_cv,
+        "event_labels_shuffled": shuffle_seed is not None,
+    }
+
+
 def response_features(records: list[dict]) -> torch.Tensor:
     """Construct current-state and candidate-command inputs without outcomes."""
     return torch.stack(
@@ -103,7 +155,17 @@ def score_prediction(prediction: torch.Tensor, target: torch.Tensor) -> dict:
 
 
 def layout_comparison(
-    predictions: dict[str, torch.Tensor], target: torch.Tensor, cases: list[str]
+    predictions: dict[str, torch.Tensor],
+    target: torch.Tensor,
+    cases: list[str],
+    *,
+    reference: str = "coupled",
+    comparators: tuple[str, ...] = (
+        "direct",
+        "constant_coupling",
+        "state_action_coupling",
+        "shuffled_coupling",
+    ),
 ) -> dict:
     """Report paired errors with layouts, not correlated transitions, as clusters.
 
@@ -126,13 +188,10 @@ def layout_comparison(
     generator = torch.Generator().manual_seed(1028)
     draws = torch.randint(len(layouts), (2000, len(layouts)), generator=generator)
     comparisons = {}
-    for arm in (
-        "direct",
-        "constant_coupling",
-        "state_action_coupling",
-        "shuffled_coupling",
-    ):
-        differences = torch.tensor(errors[arm]) - torch.tensor(errors["coupled"])
+    if reference not in errors or any(arm not in errors for arm in comparators):
+        raise ValueError("Layout comparison arms are missing")
+    for arm in comparators:
+        differences = torch.tensor(errors[arm]) - torch.tensor(errors[reference])
         interval = torch.quantile(
             differences[draws].mean(-1), torch.tensor([0.025, 0.975])
         )
@@ -141,7 +200,194 @@ def layout_comparison(
             "exploratory_layout_bootstrap_95pct": interval.tolist(),
             "layouts_improved": int((differences > 0).sum()),
         }
-    return {"layouts": layouts, "mse_mm2_by_layout": errors, "coupled_vs": comparisons}
+    return {
+        "layouts": layouts,
+        "mse_mm2_by_layout": errors,
+        f"{reference}_vs": comparisons,
+    }
+
+
+def phase_expand(
+    features: torch.Tensor,
+    records: list[dict],
+    *,
+    shuffle_seed: int | None = None,
+) -> torch.Tensor:
+    """Add equal-capacity phase interactions using only pre-execution time."""
+    if features.ndim != 2 or len(features) != len(records):
+        raise ValueError("Phase features must align with paired records")
+    phases = torch.tensor(
+        [min(int(record["start_tick"]) // 100, 2) for record in records]
+    )
+    if shuffle_seed is not None:
+        generator = torch.Generator().manual_seed(shuffle_seed)
+        phases = phases[torch.randperm(len(phases), generator=generator)]
+    one_hot = torch.nn.functional.one_hot(phases, num_classes=3).to(features)
+    interactions = (features[:, :, None] * one_hot[:, None, :]).flatten(1)
+    return torch.cat((features, one_hot, interactions), dim=1)
+
+
+def active_object_labels(
+    records: list[dict], object_indices: list[int], motion_threshold_m: float
+) -> torch.Tensor:
+    """Label no motion or the object with the largest paired displacement."""
+    if len(object_indices) < 2 or not 0 < motion_threshold_m:
+        raise ValueError(
+            "Active-object labels require multiple objects and a threshold"
+        )
+    magnitudes = torch.stack(
+        [
+            torch.stack(
+                [object_effect(record, index).norm() for index in object_indices]
+            )
+            for record in records
+        ]
+    )
+    largest, labels = magnitudes.max(1)
+    return torch.where(largest > motion_threshold_m, labels + 1, 0)
+
+
+def classification_report(scores: torch.Tensor, labels: torch.Tensor) -> dict:
+    """Report accuracy and macro recall without treating rows as independent layouts."""
+    if scores.ndim != 2 or len(scores) != len(labels):
+        raise ValueError("Classification scores and labels must align")
+    prediction = scores.argmax(1)
+    classes = sorted(set(labels.tolist()))
+    recalls = []
+    confusion = torch.zeros(scores.shape[1], scores.shape[1], dtype=torch.int64)
+    for expected, actual in zip(labels, prediction, strict=True):
+        confusion[int(expected), int(actual)] += 1
+    for label in classes:
+        mask = labels == label
+        recalls.append(float((prediction[mask] == label).float().mean()))
+    return {
+        "examples": len(labels),
+        "accuracy_pct": float((prediction == labels).float().mean() * 100),
+        "macro_recall_pct": 100 * sum(recalls) / len(recalls),
+        "class_counts": {str(label): int((labels == label).sum()) for label in classes},
+        "confusion": confusion.tolist(),
+    }
+
+
+def classification_layout_comparison(
+    scores: dict[str, torch.Tensor], labels: torch.Tensor, cases: list[str]
+) -> dict:
+    """Compare active-object accuracy with layout-clustered uncertainty."""
+    if set(scores) != {
+        "action_side",
+        "state_action",
+        "time_phase",
+        "shuffled_labels",
+        "fixed_train_majority",
+    }:
+        raise ValueError("Active-object comparison arms are incomplete")
+    if len(cases) != len(labels):
+        raise ValueError("Active-object layouts must align with labels")
+    layouts = sorted(set(cases))
+    predictions = {name: value.argmax(1) for name, value in scores.items()}
+    accuracy = {}
+    for name, prediction in predictions.items():
+        accuracy[name] = [
+            float((prediction[mask] == labels[mask]).float().mean())
+            for layout in layouts
+            for mask in [torch.tensor([case == layout for case in cases])]
+        ]
+    generator = torch.Generator().manual_seed(1029)
+    draws = torch.randint(len(layouts), (2000, len(layouts)), generator=generator)
+    comparisons = {}
+    for name in scores:
+        if name == "action_side":
+            continue
+        difference = torch.tensor(accuracy["action_side"]) - torch.tensor(
+            accuracy[name]
+        )
+        interval = torch.quantile(
+            difference[draws].mean(-1), torch.tensor([0.025, 0.975])
+        )
+        comparisons[name] = {
+            "accuracy_advantage_pct": 100 * float(difference.mean()),
+            "exploratory_layout_bootstrap_95pct": (100 * interval).tolist(),
+            "layouts_improved": int((difference > 0).sum()),
+        }
+    return {
+        "layouts": layouts,
+        "accuracy_by_layout": accuracy,
+        "action_side_vs": comparisons,
+    }
+
+
+def active_object_probe(
+    train: list[dict],
+    evaluation: list[dict],
+    train_x: torch.Tensor,
+    evaluation_x: torch.Tensor,
+    train_state_action: torch.Tensor,
+    evaluation_state_action: torch.Tensor,
+    cases: list[str],
+    object_indices: list[int],
+    seed: int,
+    motion_threshold_m: float = 0.0001,
+) -> dict:
+    """Compare action-side active-object evidence with deployment-safe controls."""
+    train_labels = active_object_labels(train, object_indices, motion_threshold_m)
+    labels = active_object_labels(evaluation, object_indices, motion_threshold_m)
+    classes = len(object_indices) + 1
+    targets = torch.nn.functional.one_hot(train_labels, classes).double()
+    action_scores, action_cv = crossfit_ridge(train_x, targets, cases, evaluation_x)
+    state_scores, state_cv = crossfit_ridge(
+        train_state_action, targets, cases, evaluation_state_action
+    )
+    train_phase = torch.nn.functional.one_hot(
+        torch.tensor([min(int(row["start_tick"]) // 100, 2) for row in train]), 3
+    ).double()
+    evaluation_phase = torch.nn.functional.one_hot(
+        torch.tensor([min(int(row["start_tick"]) // 100, 2) for row in evaluation]),
+        3,
+    ).double()
+    phase_scores, phase_cv = crossfit_ridge(
+        train_phase, targets, cases, evaluation_phase
+    )
+    generator = torch.Generator().manual_seed(seed)
+    shuffled_targets = targets[torch.randperm(len(targets), generator=generator)]
+    shuffled_scores, shuffled_cv = crossfit_ridge(
+        train_x, shuffled_targets, cases, evaluation_x
+    )
+    majority = int(torch.bincount(train_labels, minlength=classes).argmax())
+    majority_scores = torch.zeros(len(labels), classes, dtype=torch.double)
+    majority_scores[:, majority] = 1
+    reports = {
+        "action_side": classification_report(action_scores, labels),
+        "state_action": classification_report(state_scores, labels),
+        "time_phase": classification_report(phase_scores, labels),
+        "shuffled_labels": classification_report(shuffled_scores, labels),
+        "fixed_train_majority": classification_report(majority_scores, labels),
+    }
+    score_map = {
+        "action_side": action_scores,
+        "state_action": state_scores,
+        "time_phase": phase_scores,
+        "shuffled_labels": shuffled_scores,
+        "fixed_train_majority": majority_scores,
+    }
+    return {
+        "motion_threshold_m": motion_threshold_m,
+        "object_indices": object_indices,
+        "label_meaning": {"0": "no_motion"}
+        | {
+            str(rank + 1): train[0]["row"]["object_keys"][index]
+            for rank, index in enumerate(object_indices)
+        },
+        **reports,
+        "layout_comparison": classification_layout_comparison(
+            score_map, labels, [record["case_id"] for record in evaluation]
+        ),
+        "cross_validation": {
+            "action_side": action_cv,
+            "state_action": state_cv,
+            "time_phase": phase_cv,
+            "shuffled_labels": shuffled_cv,
+        },
+    }
 
 
 def assert_disjoint_records(train: list[dict], evaluation: list[dict]) -> dict:
@@ -244,18 +490,45 @@ def evaluate_records(
         x_response, measured_train_response, cases, test_response
     )
     results = []
+    object_indices = [dominant_object(train, rank) for rank in object_ranks]
     for method in methods:
         for seed in (31, 47, 59):
             readout = load_audited_readout(probes / f"{method}-seed{seed}/readout.pt")
             with torch.no_grad():
-                x = torch.cat([_token(readout, record) for record in train]).double()
-                test_x = torch.cat(
+                token_x = torch.cat(
+                    [_token(readout, record) for record in train]
+                ).double()
+                test_token_x = torch.cat(
                     [_token(readout, record) for record in evaluation]
                 ).double()
+            x, test_x = token_x, test_token_x
             x = torch.cat((x, x_response), dim=1)
             test_x = torch.cat((test_x, test_response), dim=1)
+            phase_x = phase_expand(x, train)
+            test_phase_x = phase_expand(test_x, evaluation)
+            shuffled_phase_x = phase_expand(x, train, shuffle_seed=seed)
+            shuffled_test_phase_x = phase_expand(
+                test_x, evaluation, shuffle_seed=seed + 1000
+            )
+            phase_response = phase_expand(x_response, train)
+            test_phase_response = phase_expand(test_response, evaluation)
+            active_object = (
+                active_object_probe(
+                    train,
+                    evaluation,
+                    x,
+                    test_x,
+                    x_response,
+                    test_response,
+                    cases,
+                    object_indices,
+                    seed,
+                )
+                if len(object_indices) > 1
+                else None
+            )
             for rank in object_ranks:
-                index = dominant_object(train, rank)
+                index = object_indices[object_ranks.index(rank)]
                 key = train[0]["row"]["object_keys"][index]
                 if any(
                     record["row"]["object_keys"][index] != key
@@ -267,9 +540,19 @@ def evaluate_records(
                     [object_effect(record, index) for record in evaluation]
                 )
                 coefficient = transport_coefficient(measured_train_response, target)
+                moving = target.norm(dim=1) > 0.002
                 direct, direct_cv = crossfit_ridge(x, target, cases, test_x)
                 predicted_coefficient, coefficient_cv = crossfit_ridge(
                     x, coefficient, cases, test_x
+                )
+                phase_coefficient, phase_cv = crossfit_ridge(
+                    phase_x, coefficient, cases, test_phase_x
+                )
+                shuffled_phase_coefficient, shuffled_phase_cv = crossfit_ridge(
+                    shuffled_phase_x,
+                    coefficient,
+                    cases,
+                    shuffled_test_phase_x,
                 )
                 generator = torch.Generator().manual_seed(seed)
                 shuffled = coefficient[
@@ -278,6 +561,36 @@ def evaluate_records(
                 wrong_coefficient, wrong_cv = crossfit_ridge(x, shuffled, cases, test_x)
                 state_coefficient, state_cv = crossfit_ridge(
                     x_response, coefficient, cases, test_response
+                )
+                state_train_prediction = out_of_layout_predictions(
+                    x_response, coefficient, cases, state_cv["ridge"]
+                )
+                residual_target = coefficient - state_train_prediction
+                residual_correction, residual_cv = crossfit_ridge(
+                    token_x, residual_target, cases, test_token_x
+                )
+                shuffled_residual = residual_target[
+                    torch.randperm(len(residual_target), generator=generator)
+                ]
+                shuffled_residual_correction, shuffled_residual_cv = crossfit_ridge(
+                    token_x, shuffled_residual, cases, test_token_x
+                )
+                phase_state_coefficient, phase_state_cv = crossfit_ridge(
+                    phase_response, coefficient, cases, test_phase_response
+                )
+                gated_action_coefficient, gated_action_cv = gated_coefficient(
+                    x, test_x, coefficient, moving, cases
+                )
+                gated_state_coefficient, gated_state_cv = gated_coefficient(
+                    x_response, test_response, coefficient, moving, cases
+                )
+                shuffled_event_coefficient, shuffled_event_cv = gated_coefficient(
+                    x,
+                    test_x,
+                    coefficient,
+                    moving,
+                    cases,
+                    shuffle_seed=seed,
                 )
                 state_direct, state_direct_cv = crossfit_ridge(
                     x_response, target, cases, test_response
@@ -292,8 +605,28 @@ def evaluate_records(
                     "constant_coupling": coefficient.mean() * predicted_response,
                     "state_action_coupling": state_coefficient.clamp(0, 1)
                     * predicted_response,
+                    "incremental_action_coupling": (
+                        state_coefficient + residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "shuffled_incremental_coupling": (
+                        state_coefficient + shuffled_residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "gated_action_coupling": gated_action_coefficient
+                    * predicted_response,
+                    "gated_state_action_coupling": gated_state_coefficient
+                    * predicted_response,
+                    "shuffled_event_coupling": shuffled_event_coefficient
+                    * predicted_response,
                     "state_action_direct": state_direct,
                     "shuffled_coupling": wrong_coefficient.clamp(0, 1)
+                    * predicted_response,
+                    "phase_coupling": phase_coefficient.clamp(0, 1)
+                    * predicted_response,
+                    "phase_state_action_coupling": phase_state_coefficient.clamp(0, 1)
+                    * predicted_response,
+                    "shuffled_phase_coupling": shuffled_phase_coefficient.clamp(0, 1)
                     * predicted_response,
                     "predicted_coupling_oracle_response": predicted_coefficient.clamp(
                         0, 1
@@ -308,6 +641,7 @@ def evaluate_records(
                         "seed": seed,
                         "object": key,
                         "rank": rank,
+                        "active_object_probe": active_object,
                         "results": {
                             name: score_prediction(prediction, truth)
                             for name, prediction in arms.items()
@@ -315,12 +649,53 @@ def evaluate_records(
                         "direct_cv": direct_cv,
                         "coefficient_cv": coefficient_cv,
                         "shuffled_cv": wrong_cv,
+                        "phase_cv": phase_cv,
+                        "phase_state_action_cv": phase_state_cv,
+                        "shuffled_phase_cv": shuffled_phase_cv,
                         "state_action_cv": state_cv,
+                        "incremental_action_cv": residual_cv,
+                        "shuffled_incremental_cv": shuffled_residual_cv,
+                        "gated_action_cv": gated_action_cv,
+                        "gated_state_action_cv": gated_state_cv,
+                        "shuffled_event_cv": shuffled_event_cv,
                         "state_action_direct_cv": state_direct_cv,
                         "layout_comparison": layout_comparison(
                             arms,
                             truth,
                             [record["case_id"] for record in evaluation],
+                        ),
+                        "phase_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="phase_coupling",
+                            comparators=(
+                                "coupled",
+                                "phase_state_action_coupling",
+                                "shuffled_phase_coupling",
+                            ),
+                        ),
+                        "incremental_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="incremental_action_coupling",
+                            comparators=(
+                                "state_action_coupling",
+                                "coupled",
+                                "shuffled_incremental_coupling",
+                            ),
+                        ),
+                        "gated_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="gated_action_coupling",
+                            comparators=(
+                                "coupled",
+                                "gated_state_action_coupling",
+                                "shuffled_event_coupling",
+                            ),
                         ),
                     }
                 )

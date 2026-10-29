@@ -74,7 +74,7 @@ def _ridge_predict(
 ) -> torch.Tensor:
     """Fit a centred dual ridge model, efficient when features exceed samples."""
     mean = train_x.mean(0)
-    scale = train_x.std(0).clamp_min(1e-5)
+    scale = train_x.std(0, correction=0).clamp_min(1e-5)
     train_x = (train_x - mean) / scale
     test_x = (test_x - mean) / scale
     target_mean = train_y.mean(0, keepdim=True)

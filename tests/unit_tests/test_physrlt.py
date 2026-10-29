@@ -685,8 +685,14 @@ def test_paired_case_batches_cover_layouts_once_and_preserve_split():
 
 def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     from toolkits.rlt.physrlt.transport_probe import (
+        active_object_labels,
         assert_disjoint_records,
+        classification_layout_comparison,
+        classification_report,
+        gated_coefficient,
         layout_comparison,
+        out_of_layout_predictions,
+        phase_expand,
     )
 
     target = torch.zeros(4, 3)
@@ -722,6 +728,74 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
             [record("train", "same-reset")],
             [record("evaluation", "same-reset")],
         )
+
+    features = torch.tensor([[1.0], [2.0], [3.0]])
+    phased = phase_expand(
+        features,
+        [
+            {"start_tick": 40},
+            {"start_tick": 140},
+            {"start_tick": 240},
+        ],
+    )
+    assert phased.shape == (3, 7)
+    torch.testing.assert_close(phased[:, 1:4], torch.eye(3))
+    assert not torch.equal(
+        phased,
+        phase_expand(
+            features,
+            [
+                {"start_tick": 40},
+                {"start_tick": 140},
+                {"start_tick": 240},
+            ],
+            shuffle_seed=31,
+        ),
+    )
+
+    records = []
+    for first, second in ((0.0, 0.0), (0.002, 0.0), (0.0, 0.003)):
+        geometry = torch.zeros(2, 70)
+        branches = {}
+        for sign in (-1, 1):
+            branch_geometry = geometry.clone()
+            branch_geometry[-1, 64] = sign * first / 2
+            branch_geometry[-1, 67] = sign * second / 2
+            branches[sign] = {"geometry": branch_geometry}
+        records.append({"branches": branches})
+    labels = active_object_labels(records, [0, 1], 0.0001)
+    assert labels.tolist() == [0, 1, 2]
+    report = classification_report(torch.eye(3), labels)
+    assert report["accuracy_pct"] == 100
+    assert report["macro_recall_pct"] == 100
+    scores = {
+        "action_side": torch.eye(3),
+        "state_action": torch.zeros(3, 3),
+        "time_phase": torch.zeros(3, 3),
+        "shuffled_labels": torch.zeros(3, 3),
+        "fixed_train_majority": torch.zeros(3, 3),
+    }
+    comparison = classification_layout_comparison(scores, labels, ["a", "a", "b"])
+    assert comparison["action_side_vs"]["state_action"][
+        "accuracy_advantage_pct"
+    ] == pytest.approx(75)
+    x = torch.tensor([[0.0], [1.0], [2.0], [3.0]], dtype=torch.double)
+    y = 2 * x + 1
+    prediction = out_of_layout_predictions(x, y, ["a", "a", "b", "b"], 0.1)
+    assert prediction.shape == y.shape
+    assert torch.isfinite(prediction).all()
+    with pytest.raises(ValueError, match="multiple layouts"):
+        out_of_layout_predictions(x, y, ["a"] * 4, 0.1)
+    coefficient, audit = gated_coefficient(
+        x,
+        x,
+        torch.tensor([[0.0], [0.5], [0.0], [1.0]], dtype=torch.double),
+        torch.tensor([False, True, False, True]),
+        ["a", "a", "b", "b"],
+    )
+    assert coefficient.shape == (4, 1)
+    assert torch.all((0 <= coefficient) & (coefficient <= 1))
+    assert audit["moving_rows"] == 2
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
