@@ -222,7 +222,8 @@ def run(args: argparse.Namespace) -> dict:
         torch.manual_seed(seed)
         conditioner = SignedCandidateConsequence(
             readout.candidate_conditioner(
-                "relative_concat", component=args.consequence_component
+                args.consequence_conditioning,
+                component=args.consequence_component,
             ),
             1,
         )
@@ -234,7 +235,7 @@ def run(args: argparse.Namespace) -> dict:
             chunk_len=10,
             gripper_threshold=0,
             critic_conditioner=conditioner,
-            critic_conditioning="candidate_relative_concat",
+            critic_conditioning=f"candidate_{args.consequence_conditioning}",
             critic_bottleneck_dim=256,
             correction_limit=0.1,
             correction_axes=(0,),
@@ -286,6 +287,7 @@ def run(args: argparse.Namespace) -> dict:
         "consequence_readout": str(args.consequence_readout),
         "consequence_readout_sha256": consequence_readout_sha256,
         "consequence_component": args.consequence_component,
+        "consequence_conditioning": args.consequence_conditioning,
         "seeds": args.seeds,
         "rows": rows,
         "gate_summaries": summaries,
@@ -314,6 +316,7 @@ def run(args: argparse.Namespace) -> dict:
                     "base_readout_sha256": base_readout_sha256,
                     "consequence_readout_sha256": consequence_readout_sha256,
                     "consequence_component": args.consequence_component,
+                    "consequence_conditioning": args.consequence_conditioning,
                     "candidate_selection_count": 5,
                     "candidate_selection_margin": 0.0,
                     "candidate_uncertainty_penalty": 1.0,
@@ -340,6 +343,15 @@ def main() -> None:
         "--consequence-component",
         choices=("joint", "response", "geometry"),
         default="joint",
+    )
+    parser.add_argument(
+        "--consequence-conditioning",
+        choices=("relative_concat", "relative_unit_concat"),
+        default="relative_concat",
+        help=(
+            "Keep raw candidate-relative magnitudes or normalize each active "
+            "physical direction before critic training."
+        ),
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=105)

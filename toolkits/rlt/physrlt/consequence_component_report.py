@@ -43,6 +43,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "trace_sha256",
         "base_readout_sha256",
         "consequence_readout_sha256",
+        "consequence_conditioning",
         "causal_protocol",
         "seeds",
     )
@@ -82,6 +83,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "trace_sha256": reference["trace_sha256"],
         "base_readout_sha256": reference["base_readout_sha256"],
         "consequence_readout_sha256": reference["consequence_readout_sha256"],
+        "consequence_conditioning": reference["consequence_conditioning"],
         "seeds": reference["seeds"],
         "component_summary": component_summary,
         "rows": rows,

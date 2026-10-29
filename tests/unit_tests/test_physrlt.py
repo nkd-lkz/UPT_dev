@@ -47,6 +47,7 @@ from toolkits.rlt.physrlt.control import (
     parse_external_readouts,
     parse_online_checkpoint_arms,
     parse_online_checkpoint_components,
+    parse_online_checkpoint_conditionings,
     replay_trace_sha256,
     skip_deferred_updates,
     validate_fixed_replay,
@@ -1559,6 +1560,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         "base_readout_sha256": file_sha256(base),
         "consequence_readout_sha256": file_sha256(consequence),
         "consequence_component": "joint",
+        "consequence_conditioning": "relative_concat",
     }
     torch.save(payload, checkpoint)
     loaded = load_gated_online_checkpoint(
@@ -1657,6 +1659,11 @@ def test_online_checkpoint_arm_parser_is_explicit():
     ) == {"all": "joint", "robot": "response", "object": "geometry"}
     with pytest.raises(ValueError, match="Checkpoint components require"):
         parse_online_checkpoint_components(["method=unknown"])
+    assert parse_online_checkpoint_conditionings(
+        ["raw=relative_concat", "unit=relative_unit_concat"]
+    ) == {"raw": "relative_concat", "unit": "relative_unit_concat"}
+    with pytest.raises(ValueError, match="Checkpoint conditionings require"):
+        parse_online_checkpoint_conditionings(["method=unknown"])
 
 
 def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
@@ -1781,6 +1788,7 @@ def test_consequence_component_report_requires_matched_causal_gates():
             "trace_sha256": {"train": "a", "independent": "b"},
             "base_readout_sha256": "base",
             "consequence_readout_sha256": "physical",
+            "consequence_conditioning": "relative_concat",
             "causal_protocol": (
                 "train_correct_once_freeze_weights_intervene_input_sign"
             ),
@@ -1901,6 +1909,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                     "arm": arm,
                     "training_arm": "correct",
                     "consequence_component": "joint",
+                    "consequence_conditioning": "relative_concat",
                     "train_trace_sha256": "train",
                 }
             )

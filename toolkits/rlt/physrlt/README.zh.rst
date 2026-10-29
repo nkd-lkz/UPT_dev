@@ -161,6 +161,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 为了区分机器人执行响应与物体几何演变，``consequence_critic_gate --consequence-component`` 可固定为 ``response``、``geometry`` 或 ``joint``。三组使用同一个 joint readout，只把未选择的固定坐标置零，因此不会改变 critic 容量。gate 只有在每个优化 seed 及 seed 聚合上，正确方向的 return AUC 和连续回报排序都严格超过反向与全零输入时，才为每个 seed 保存一个 correct-trained checkpoint。闭环通过 ``--online-checkpoints`` 让三个因果臂加载同一个权重，并用 ``--online-checkpoint-arms`` 和 ``--online-checkpoint-components`` 显式设置评测输入方向与物理通道；checkpoint 会校验 schema、训练方向、允许的评测臂、优化 seed、readout 哈希和 gate 状态，任一不匹配都在 rollout 前失败。response-only 或 geometry-only 的预测误差改善不能替代这项价值排序和闭环检验。
 
+``--consequence-conditioning relative_unit_concat`` 是物理通道尺度诊断：它对每个候选的有效 consequence 方向归一化，动作幅度仍由候选动作输入保留。该变体必须继续使用“correct 训练一次、冻结权重、输入端切换符号”的协议，并先在开发 replay 上筛选，再由预先保留的 fresh replay 确认；同一评测 replay 上的改善不能直接触发闭环。
+
 ``--actor-zero-concat`` 与 ``--actor-physical-concat`` 用于检验 grounded readout 是否必须直接进入动作生成路径，而不只是进入 critic。两组 actor 输入均为 256 维：容量对照将完整 128 维 base token 与零向量拼接，物理组将同一 base token 与独立的 128 维 Physical Token 拼接；两组的实际 replay、actor／critic 更新次数和 base token 完全匹配。只有物理组跨多个优化 seed 优于零通道对照，才能支持物理表征收益；若只优于原 128 维 actor，无法排除模型容量增加带来的影响。
 
 ``--actor-physical-outcomes-concat`` 保持同一个 256 维接口，但将受物理监督的 encoder latent 替换为冻结 decoder 对 reference 动作预测的显式归一化后果，以区分“监督塑造的 latent”和类似 WAM 的预测后果表征。部署时只使用当前观测、本体状态、reference chunk 与冻结模型预测；实测未来响应和特权几何仍只作为训练标签。只有同时比较零通道对照、physical latent 与 explicit outcomes，才能把收益归因于显式物理量。

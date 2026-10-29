@@ -334,6 +334,21 @@ def parse_online_checkpoint_components(specs: list[str]) -> dict[str, str]:
     return result
 
 
+def parse_online_checkpoint_conditionings(specs: list[str]) -> dict[str, str]:
+    """Parse the exact physical-channel scaling used to train a checkpoint."""
+    result = {}
+    allowed = {"relative_concat", "relative_unit_concat"}
+    for spec in specs:
+        label, separator, conditioning = spec.partition("=")
+        if not separator or not label or conditioning not in allowed or label in result:
+            raise ValueError(
+                "Checkpoint conditionings require unique "
+                "LABEL=relative_concat|relative_unit_concat entries"
+            )
+        result[label] = conditioning
+    return result
+
+
 def warmup_gate(
     fidelity: dict, validation_results: list[dict], residual_output: bool
 ) -> tuple[bool, str]:
@@ -364,6 +379,7 @@ def load_gated_online_checkpoint(
     *,
     expected_arm: str,
     expected_component: str,
+    expected_conditioning: str = "relative_concat",
     optimizer_seed: int,
     base_readout: Path,
     consequence_readout: Path,
@@ -373,6 +389,8 @@ def load_gated_online_checkpoint(
         raise ValueError("Expected checkpoint arm must be correct, reversed or zero")
     if expected_component not in {"joint", "response", "geometry"}:
         raise ValueError("Expected component must be joint, response or geometry")
+    if expected_conditioning not in {"relative_concat", "relative_unit_concat"}:
+        raise ValueError("Expected checkpoint conditioning is unsupported")
     payload = torch.load(path, map_location="cpu", weights_only=True)
     required = {
         "schema",
@@ -385,6 +403,7 @@ def load_gated_online_checkpoint(
         "base_readout_sha256",
         "consequence_readout_sha256",
         "consequence_component",
+        "consequence_conditioning",
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
@@ -398,6 +417,8 @@ def load_gated_online_checkpoint(
         raise ValueError("Gated online checkpoint does not permit this evaluation arm")
     if payload["consequence_component"] != expected_component:
         raise ValueError("Gated online checkpoint physical component differs")
+    if payload["consequence_conditioning"] != expected_conditioning:
+        raise ValueError("Gated online checkpoint conditioning differs")
     if int(payload["optimizer_seed"]) != optimizer_seed:
         raise ValueError("Gated online checkpoint optimizer seed differs")
     if payload["base_readout_sha256"] != file_sha256(base_readout):
@@ -839,6 +860,17 @@ def run(args):
         label: online_checkpoint_components.get(label, "joint")
         for label in online_checkpoints
     }
+    online_checkpoint_conditionings = parse_online_checkpoint_conditionings(
+        getattr(args, "online_checkpoint_conditionings", [])
+    )
+    if not set(online_checkpoint_conditionings).issubset(online_checkpoints):
+        raise ValueError(
+            "Checkpoint conditioning labels require matching online checkpoints"
+        )
+    online_checkpoint_conditionings = {
+        label: online_checkpoint_conditionings.get(label, "relative_concat")
+        for label in online_checkpoints
+    }
     sparse_motion_heads = parse_external_readouts(
         getattr(args, "sparse_motion_heads", [])
     )
@@ -879,7 +911,9 @@ def run(args):
         args.methods
     ):
         raise ValueError("Critic response supervision requires a requested method")
-    if not consequence_dueling_critics.issubset(concat_relative_critics):
+    if not consequence_dueling_critics.issubset(
+        concat_relative_critics | unit_concat_relative_critics
+    ):
         raise ValueError(
             "Consequence-dueling critics require relative-consequence conditioning"
         )
@@ -899,11 +933,19 @@ def run(args):
     if not conservative_selectors.issubset(args.methods):
         raise ValueError("Conservative selector labels must also be requested methods")
     if not set(online_checkpoints).issubset(
-        conservative_selectors & concat_relative_critics & consequence_dueling_critics
+        conservative_selectors & consequence_dueling_critics
     ):
         raise ValueError(
             "Online checkpoints require conservative consequence-dueling selectors"
         )
+    for method, conditioning in online_checkpoint_conditionings.items():
+        required_group = (
+            concat_relative_critics
+            if conditioning == "relative_concat"
+            else unit_concat_relative_critics
+        )
+        if method not in required_group:
+            raise ValueError("Online checkpoint conditioning and critic group differ")
     if not set(online_checkpoints).issubset(critic_readouts):
         raise ValueError("Online checkpoints require a matched consequence readout")
     if not sparse_zero_controls.issubset(sparse_motion_heads):
@@ -996,15 +1038,17 @@ def run(args):
                 )
                 critic_conditioner_override = sparse_conditioner
             if method in online_checkpoints:
+                conditioning = online_checkpoint_conditionings[method]
                 critic_conditioner_override = SignedCandidateConsequence(
                     readout.candidate_conditioner(
-                        "relative_concat",
+                        conditioning,
                         component=online_checkpoint_components[method],
                     ),
                     {"correct": 1, "reversed": -1, "zero": 0}[
                         online_checkpoint_arms[method]
                     ],
                 )
+                critic_conditioning = f"candidate_{conditioning}"
             critic_bottleneck_dim = (
                 256 if critic_conditioning.endswith("_concat") else None
             )
@@ -1029,6 +1073,9 @@ def run(args):
                     "online_checkpoint_arm": online_checkpoint_arms.get(method),
                     "online_checkpoint_component": online_checkpoint_components.get(
                         method
+                    ),
+                    "online_checkpoint_conditioning": (
+                        online_checkpoint_conditionings.get(method)
                     ),
                     "candidate_selection_count": getattr(
                         args, "candidate_selection_count", 0
@@ -1133,6 +1180,7 @@ def run(args):
                         online_checkpoints[method],
                         expected_arm=online_checkpoint_arms[method],
                         expected_component=online_checkpoint_components[method],
+                        expected_conditioning=online_checkpoint_conditionings[method],
                         optimizer_seed=args.seed,
                         base_readout=path,
                         consequence_readout=critic_readouts[method],
@@ -1148,6 +1196,9 @@ def run(args):
                             "training_arm": checkpoint_payload["training_arm"],
                             "consequence_component": checkpoint_payload[
                                 "consequence_component"
+                            ],
+                            "consequence_conditioning": checkpoint_payload[
+                                "consequence_conditioning"
                             ],
                             "train_trace_sha256": checkpoint_payload[
                                 "train_trace_sha256"
@@ -1295,6 +1346,7 @@ def run(args):
         },
         "online_checkpoint_arms": online_checkpoint_arms,
         "online_checkpoint_components": online_checkpoint_components,
+        "online_checkpoint_conditionings": online_checkpoint_conditionings,
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -1381,6 +1433,13 @@ def main():
         default=[],
         metavar="LABEL=COMPONENT",
         help="Retain joint, response-only or geometry-only physical consequences",
+    )
+    parser.add_argument(
+        "--online-checkpoint-conditionings",
+        nargs="*",
+        default=[],
+        metavar="LABEL=CONDITIONING",
+        help="Match raw or unit-normalized consequence checkpoint conditioning",
     )
     parser.add_argument(
         "--sparse-motion-heads",

@@ -93,6 +93,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
             "arm",
             "training_arm",
             "consequence_component",
+            "consequence_conditioning",
             "train_trace_sha256",
         }
         if required - set(payload):
@@ -109,6 +110,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
         "source_sha256",
         "training_arm",
         "consequence_component",
+        "consequence_conditioning",
         "train_trace_sha256",
     )
     for field in shared_fields:
