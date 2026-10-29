@@ -25,7 +25,14 @@ def _metrics(rows: list[dict]) -> dict:
             "episodes": 0,
             "success_rate_pct": None,
             "mean_ticks": None,
+            "mean_failure_capped_ticks": None,
+            "successful_mean_ticks": None,
+            "mean_wall_seconds": None,
+            "successful_mean_wall_seconds": None,
+            "ticks_per_wall_second": None,
+            "candidate_selection_calls_total": None,
             "candidate_nonreference_fraction_mean": None,
+            "candidate_scale_mean": None,
             "candidate_score_improvement_mean": None,
         }
     successes = sum(bool(row["success"]) for row in rows)
@@ -39,18 +46,126 @@ def _metrics(rows: list[dict]) -> dict:
         for row in rows
         if row.get("candidate_score_improvement_mean") is not None
     ]
+    candidate_scales = [
+        float(row["candidate_scale_mean"])
+        for row in rows
+        if row.get("candidate_scale_mean") is not None
+    ]
+    timed_rows = [row for row in rows if row.get("seconds") is not None]
+    seconds = [float(row["seconds"]) for row in timed_rows]
+    successful_rows = [row for row in rows if row["success"]]
+    successful_seconds = [
+        float(row["seconds"])
+        for row in successful_rows
+        if row.get("seconds") is not None
+    ]
+    selection_calls = [
+        int(row["candidate_selection_calls"])
+        for row in rows
+        if row.get("candidate_selection_calls") is not None
+    ]
+    mean_ticks = statistics.mean(float(row["ticks"]) for row in rows)
     return {
         "successes": successes,
         "episodes": len(rows),
         "success_rate_pct": 100 * successes / len(rows),
-        "mean_ticks": statistics.mean(float(row["ticks"]) for row in rows),
+        "mean_ticks": mean_ticks,
+        "mean_failure_capped_ticks": mean_ticks,
+        "successful_mean_ticks": (
+            statistics.mean(float(row["ticks"]) for row in successful_rows)
+            if successful_rows
+            else None
+        ),
+        "mean_wall_seconds": statistics.mean(seconds) if seconds else None,
+        "successful_mean_wall_seconds": (
+            statistics.mean(successful_seconds) if successful_seconds else None
+        ),
+        "ticks_per_wall_second": (
+            sum(float(row["ticks"]) for row in timed_rows) / sum(seconds)
+            if seconds and sum(seconds) > 0
+            else None
+        ),
+        "candidate_selection_calls_total": (
+            sum(selection_calls) if selection_calls else None
+        ),
         "candidate_nonreference_fraction_mean": (
             statistics.mean(nonreference) if nonreference else None
+        ),
+        "candidate_scale_mean": (
+            statistics.mean(candidate_scales) if candidate_scales else None
         ),
         "candidate_score_improvement_mean": (
             statistics.mean(score_improvements) if score_improvements else None
         ),
     }
+
+
+def _paired_metrics(method_rows: list[dict], reference_rows: list[dict]) -> dict:
+    result = {}
+    for split in ("validation", "development"):
+        method_items = [
+            row
+            for row in method_rows
+            if row.get("stage") == "online_frozen_eval"
+            and row.get("split") == split
+        ]
+        reference_items = [
+            row
+            for row in reference_rows
+            if row.get("stage") == "frozen" and row.get("split") == split
+        ]
+        method = {str(row["case_id"]): row for row in method_items}
+        reference = {str(row["case_id"]): row for row in reference_items}
+        if len(method) != len(method_items) or len(reference) != len(reference_items):
+            raise ValueError("Control report contains duplicate case identities")
+        prefix = f"paired_{split}"
+        if not method:
+            result.update(
+                {
+                    f"{prefix}_episodes": 0,
+                    f"{prefix}_success_rate_delta_pct": None,
+                    f"{prefix}_failure_capped_ticks_delta_mean": None,
+                    f"{prefix}_wall_seconds_delta_mean": None,
+                }
+            )
+            continue
+        if set(method) != set(reference):
+            raise ValueError("Online and reference control cases are not paired")
+        for case_id in method:
+            method_hash = method[case_id].get("reset_hash")
+            reference_hash = reference[case_id].get("reset_hash")
+            if method_hash is not None and method_hash != reference_hash:
+                raise ValueError("Online and reference reset hashes differ")
+        success_differences = [
+            float(method[case]["success"]) - float(reference[case]["success"])
+            for case in method
+        ]
+        tick_differences = [
+            float(method[case]["ticks"]) - float(reference[case]["ticks"])
+            for case in method
+        ]
+        second_differences = [
+            float(method[case]["seconds"]) - float(reference[case]["seconds"])
+            for case in method
+            if method[case].get("seconds") is not None
+            and reference[case].get("seconds") is not None
+        ]
+        result.update(
+            {
+                f"{prefix}_episodes": len(method),
+                f"{prefix}_success_rate_delta_pct": 100
+                * statistics.mean(success_differences),
+                f"{prefix}_failure_capped_ticks_delta_mean": statistics.mean(
+                    tick_differences
+                ),
+                f"{prefix}_wall_seconds_delta_mean": (
+                    statistics.mean(second_differences)
+                    if second_differences
+                    else None
+                ),
+            }
+        )
+    return result
 
 
 def summarize(runs: list[Path]) -> dict:
@@ -68,6 +183,7 @@ def summarize(runs: list[Path]) -> dict:
         if not result.get("complete") or result.get("state") != "complete":
             raise ValueError(f"Control run is not complete: {run}")
         episodes = _episodes(episode_path)
+        reference_rows = [row for row in episodes if row["method"] == "reference"]
         methods = sorted(
             {row["method"] for row in episodes if row["method"] != "reference"}
         )
@@ -118,10 +234,41 @@ def summarize(runs: list[Path]) -> dict:
             for name, metrics in stages.items():
                 for metric, value in metrics.items():
                     row[f"{name}_{metric}"] = value
+            for name, metrics in (
+                (
+                    "reference_validation",
+                    _metrics(
+                        [
+                            item
+                            for item in reference_rows
+                            if item.get("stage") == "frozen"
+                            and item.get("split") == "validation"
+                        ]
+                    ),
+                ),
+                (
+                    "reference_development",
+                    _metrics(
+                        [
+                            item
+                            for item in reference_rows
+                            if item.get("stage") == "frozen"
+                            and item.get("split") == "development"
+                        ]
+                    ),
+                ),
+            ):
+                for metric, value in metrics.items():
+                    row[f"{name}_{metric}"] = value
+            row.update(_paired_metrics(selected, reference_rows))
             output.append(row)
     return {
         "state": "complete",
         "role": "small development control screens; not final-test claims",
+        "protocol": (
+            "failures retain their capped ticks; online and frozen reference "
+            "comparisons use identical case IDs and reset hashes"
+        ),
         "source_runs": [str(run.resolve()) for run in runs],
         "rows": output,
     }

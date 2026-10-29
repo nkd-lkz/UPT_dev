@@ -1821,9 +1821,24 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
         run = tmp_path / f"axis{axis}"
         run.mkdir()
         rows = []
+        rows.extend(
+            {
+                "case_id": f"validation-{index}",
+                "reset_hash": f"reset-validation-{index}",
+                "method": "reference",
+                "stage": "frozen",
+                "split": "validation",
+                "success": index == 0,
+                "ticks": 130 + index,
+                "seconds": 13 + index,
+            }
+            for index in range(2)
+        )
         for method in ("zero", "physical"):
             rows.extend(
                 {
+                    "case_id": f"validation-{index}",
+                    "reset_hash": f"reset-validation-{index}",
                     "method": method,
                     "stage": "warmup",
                     "split": "development",
@@ -1834,12 +1849,17 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
             )
             rows.extend(
                 {
+                    "case_id": f"validation-{index}",
+                    "reset_hash": f"reset-validation-{index}",
                     "method": method,
                     "stage": "online_frozen_eval",
                     "split": "validation",
                     "success": index < axis + 1,
                     "ticks": 120 + index,
+                    "seconds": 12 + index,
+                    "candidate_selection_calls": 2,
                     "candidate_nonreference_fraction": 0.25 * (index + 1),
+                    "candidate_scale_mean": 0.125 * (index + 1),
                     "candidate_score_improvement_mean": 0.01 * (index + 1),
                 }
                 for index in range(2)
@@ -1877,8 +1897,54 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
     assert keyed[("1", "physical")][
         "online_validation_candidate_nonreference_fraction_mean"
     ] == pytest.approx(0.375)
+    assert keyed[("1", "physical")][
+        "online_validation_candidate_selection_calls_total"
+    ] == 4
+    assert keyed[("1", "physical")][
+        "reference_validation_success_rate_pct"
+    ] == 50
+    assert keyed[("1", "physical")][
+        "paired_validation_success_rate_delta_pct"
+    ] == 50
+    assert keyed[("1", "physical")][
+        "paired_validation_failure_capped_ticks_delta_mean"
+    ] == -10
+    assert keyed[("1", "physical")]["online_validation_ticks_per_wall_second"] == (
+        241 / 25
+    )
     assert keyed[("1", "physical")]["updates_skipped"] is True
     assert keyed[("1", "physical")]["skip_reason"] == "no_positive_transition"
+
+
+def test_control_report_rejects_unpaired_reference_resets(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = [
+        {
+            "case_id": "case",
+            "reset_hash": "reference",
+            "method": "reference",
+            "stage": "frozen",
+            "split": "validation",
+            "success": True,
+            "ticks": 10,
+        },
+        {
+            "case_id": "case",
+            "reset_hash": "different",
+            "method": "physical",
+            "stage": "online_frozen_eval",
+            "split": "validation",
+            "success": True,
+            "ticks": 10,
+        },
+    ]
+    (run / "episodes.json").write_text(json.dumps(rows))
+    (run / "result.json").write_text(
+        '{"complete":true,"state":"complete","seed":31}'
+    )
+    with pytest.raises(ValueError, match="reset hashes differ"):
+        summarize_control_runs([run])
 
 
 def test_tick_selection_reads_training_geometry_only():
