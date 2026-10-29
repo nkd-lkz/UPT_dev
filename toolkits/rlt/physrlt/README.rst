@@ -182,6 +182,8 @@ Test Execution-to-Object Coupling
 
 Use ``transport_probe`` to test whether predicting end-effector response before object motion improves paired-effect prediction. The experimental prior multiplies a predicted three-dimensional response by a learned coefficient bounded to [0, 1]. It approximates local transport, not a universal contact law; rotation, sliding and release can violate it. Current state, reference commands and frozen readout features form the inputs. Measured future responses and object positions supply labels only.
 
+The probe also reports axis/phase strata and two train-only correction selectors. The phase selector fails closed for phases absent from training. The uncertainty selector estimates readout disagreement with leave-two-layout ensembles, then chooses its shrinkage using nested out-of-layout training predictions. Both are exploratory diagnostics: neither may use evaluation outcomes for selection, and a lower prediction error is not evidence of closed-loop control gain.
+
 The command below uses the task-0 multiphase artifact layout and writes a new, immutable output directory. Select ``development`` for the two development layouts or ``confirmation`` for the six previously used diagnostic layouts; the latter is not a pristine final test set.
 
 .. code-block:: bash

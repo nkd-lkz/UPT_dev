@@ -694,6 +694,8 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
         classification_report,
         gated_coefficient,
         layout_comparison,
+        layout_ensemble_uncertainty,
+        nested_layout_uncertainty,
         out_of_layout_gated_predictions,
         out_of_layout_predictions,
         phase_expand,
@@ -701,10 +703,12 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
         select_incremental_ratio,
         select_phase_incremental_ratios,
         select_residual_ratio,
+        select_uncertainty_trust,
         stratified_scores,
         transport_jacobian,
         transport_residual,
         transport_vector,
+        uncertainty_trust_tensor,
     )
 
     target = torch.zeros(4, 3)
@@ -845,6 +849,31 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     )
     assert ratio == 1.0
     assert losses["1.0"] == 0.0
+    ensemble_x = torch.arange(8, dtype=torch.double)[:, None]
+    ensemble_y = torch.cat((ensemble_x, 2 * ensemble_x), dim=1)
+    ensemble_cases = [f"layout{index // 2}" for index in range(8)]
+    nested_uncertainty = nested_layout_uncertainty(
+        ensemble_x, ensemble_y, ensemble_cases, 1e-6
+    )
+    evaluation_uncertainty = layout_ensemble_uncertainty(
+        ensemble_x, ensemble_y, ensemble_cases, ensemble_x[:2], 1e-6
+    )
+    assert nested_uncertainty.shape == (8, 1)
+    assert evaluation_uncertainty.shape == (2, 1)
+    assert (nested_uncertainty >= 0).all()
+    selection, selection_losses = select_uncertainty_trust(
+        torch.zeros(8, 1, dtype=torch.double),
+        torch.ones(8, 1, dtype=torch.double),
+        nested_uncertainty,
+        torch.ones(8, 3, dtype=torch.double),
+        torch.ones(8, 3, dtype=torch.double),
+    )
+    assert selection["ratio"] == 1.0
+    assert selection["uncertainty_scale"] > 0
+    assert len(selection_losses) == 20
+    trust = uncertainty_trust_tensor(evaluation_uncertainty, selection)
+    assert trust.shape == (2, 1)
+    assert (trust >= 0).all() and (trust <= 1).all()
     phase_records = [{"start_tick": tick} for tick in (40, 90, 140, 190, 240, 290)]
     phase_ratio, phase_audit = select_phase_incremental_ratios(
         torch.full((6, 1), 0.2, dtype=torch.double),

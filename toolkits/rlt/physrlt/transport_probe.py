@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 from pathlib import Path
 
@@ -255,6 +256,94 @@ def out_of_layout_predictions(
             x[~heldout], y[~heldout], x[heldout], ridge
         )
     return prediction
+
+
+def nested_layout_uncertainty(
+    x: torch.Tensor, y: torch.Tensor, cases: list[str], ridge: float
+) -> torch.Tensor:
+    """Estimate training-row uncertainty without reading its layout."""
+    if len(x) != len(y) or len(x) != len(cases):
+        raise ValueError("Nested uncertainty rows must align")
+    layouts = sorted(set(cases))
+    if len(layouts) < 3:
+        raise ValueError("Nested uncertainty requires at least three layouts")
+    uncertainty = torch.empty(len(y), 1, dtype=y.dtype, device=y.device)
+    for heldout in layouts:
+        target = torch.tensor([case == heldout for case in cases])
+        predictions = []
+        for excluded in layouts:
+            if excluded == heldout:
+                continue
+            retained = torch.tensor([case not in (heldout, excluded) for case in cases])
+            predictions.append(
+                _ridge_predict(x[retained], y[retained], x[target], ridge)
+            )
+        stacked = torch.stack(predictions)
+        uncertainty[target] = stacked.var(0, unbiased=False).mean(-1, keepdim=True)
+    return uncertainty
+
+
+def layout_ensemble_uncertainty(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    cases: list[str],
+    test_x: torch.Tensor,
+    ridge: float,
+) -> torch.Tensor:
+    """Estimate evaluation uncertainty from equal-budget layout ensembles."""
+    if len(x) != len(y) or len(x) != len(cases):
+        raise ValueError("Layout ensemble rows must align")
+    layouts = sorted(set(cases))
+    if len(layouts) < 3:
+        raise ValueError("Layout uncertainty requires at least three layouts")
+    predictions = []
+    for excluded in itertools.combinations(layouts, 2):
+        retained = torch.tensor([case not in excluded for case in cases])
+        predictions.append(_ridge_predict(x[retained], y[retained], test_x, ridge))
+    return torch.stack(predictions).var(0, unbiased=False).mean(-1, keepdim=True)
+
+
+def select_uncertainty_trust(
+    coefficient: torch.Tensor,
+    correction: torch.Tensor,
+    uncertainty: torch.Tensor,
+    response: torch.Tensor,
+    target: torch.Tensor,
+    ratios: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0),
+    decays: tuple[float, ...] = (0.0, 0.5, 1.0, 2.0, 4.0),
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Select a train-only shrinkage rule for uncertain token corrections."""
+    if uncertainty.shape != coefficient.shape or (uncertainty < 0).any():
+        raise ValueError("Correction uncertainty must be nonnegative and Nx1")
+    positive = uncertainty[uncertainty > 0]
+    scale = float(positive.median()) if len(positive) else 1.0
+    scale = max(scale, 1e-12)
+    losses = {}
+    for ratio in ratios:
+        for decay in decays:
+            trust = ratio * torch.exp(-decay * uncertainty / scale)
+            losses[f"ratio={ratio},decay={decay}"] = float(
+                ((coefficient + trust * correction).clamp(0, 1) * response - target)
+                .square()
+                .mean()
+            )
+    selected = min(losses, key=losses.get)
+    fields = dict(field.split("=") for field in selected.split(","))
+    return {
+        "ratio": float(fields["ratio"]),
+        "decay": float(fields["decay"]),
+        "uncertainty_scale": scale,
+    }, losses
+
+
+def uncertainty_trust_tensor(
+    uncertainty: torch.Tensor, selection: dict[str, float]
+) -> torch.Tensor:
+    """Apply a train-selected confidence rule to evaluation uncertainty."""
+    if uncertainty.ndim != 2 or uncertainty.shape[-1] != 1:
+        raise ValueError("Correction uncertainty must have shape Nx1")
+    scale = max(selection["uncertainty_scale"], 1e-12)
+    return selection["ratio"] * torch.exp(-selection["decay"] * uncertainty / scale)
 
 
 def gated_coefficient(
@@ -889,11 +978,31 @@ def evaluate_records(
                     cases,
                     residual_cv["ridge"],
                 )
+                train_residual_uncertainty = nested_layout_uncertainty(
+                    token_x, residual_target, cases, residual_cv["ridge"]
+                )
+                residual_uncertainty = layout_ensemble_uncertainty(
+                    token_x,
+                    residual_target,
+                    cases,
+                    test_token_x,
+                    residual_cv["ridge"],
+                )
                 incremental_ratio, incremental_ratio_cv = select_incremental_ratio(
                     state_train_prediction,
                     train_residual_correction,
                     train_predicted_response,
                     target,
+                )
+                uncertainty_selection, uncertainty_cv = select_uncertainty_trust(
+                    state_train_prediction,
+                    train_residual_correction,
+                    train_residual_uncertainty,
+                    train_predicted_response,
+                    target,
+                )
+                uncertainty_scale = uncertainty_trust_tensor(
+                    residual_uncertainty, uncertainty_selection
                 )
                 phase_incremental_ratios, phase_incremental_cv = (
                     select_phase_incremental_ratios(
@@ -919,6 +1028,19 @@ def evaluate_records(
                     cases,
                     shuffled_residual_cv["ridge"],
                 )
+                train_shuffled_uncertainty = nested_layout_uncertainty(
+                    token_x,
+                    shuffled_residual,
+                    cases,
+                    shuffled_residual_cv["ridge"],
+                )
+                shuffled_uncertainty = layout_ensemble_uncertainty(
+                    token_x,
+                    shuffled_residual,
+                    cases,
+                    test_token_x,
+                    shuffled_residual_cv["ridge"],
+                )
                 shuffled_incremental_ratio, shuffled_incremental_ratio_cv = (
                     select_incremental_ratio(
                         state_train_prediction,
@@ -926,6 +1048,18 @@ def evaluate_records(
                         train_predicted_response,
                         target,
                     )
+                )
+                shuffled_uncertainty_selection, shuffled_uncertainty_cv = (
+                    select_uncertainty_trust(
+                        state_train_prediction,
+                        train_shuffled_residual_correction,
+                        train_shuffled_uncertainty,
+                        train_predicted_response,
+                        target,
+                    )
+                )
+                shuffled_uncertainty_scale = uncertainty_trust_tensor(
+                    shuffled_uncertainty, shuffled_uncertainty_selection
                 )
                 phase_shuffled_ratios, phase_shuffled_cv = (
                     select_phase_incremental_ratios(
@@ -990,6 +1124,10 @@ def evaluate_records(
                         state_coefficient + incremental_ratio * residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
+                    "uncertainty_adaptive_incremental_coupling": (
+                        state_coefficient + uncertainty_scale * residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
                     "phase_adaptive_incremental_coupling": (
                         state_coefficient
                         + phase_incremental_scale * residual_correction
@@ -1002,6 +1140,11 @@ def evaluate_records(
                     "adaptive_shuffled_incremental_coupling": (
                         state_coefficient
                         + shuffled_incremental_ratio * shuffled_residual_correction
+                    ).clamp(0, 1)
+                    * predicted_response,
+                    "uncertainty_adaptive_shuffled_coupling": (
+                        state_coefficient
+                        + shuffled_uncertainty_scale * shuffled_residual_correction
                     ).clamp(0, 1)
                     * predicted_response,
                     "phase_adaptive_shuffled_coupling": (
@@ -1110,8 +1253,12 @@ def evaluate_records(
                         "shuffled_incremental_cv": shuffled_residual_cv,
                         "adaptive_incremental_ratio": incremental_ratio,
                         "adaptive_incremental_ratio_train_layout_cv_mse": incremental_ratio_cv,
+                        "uncertainty_adaptive_selection": uncertainty_selection,
+                        "uncertainty_adaptive_train_layout_cv_mse": uncertainty_cv,
                         "adaptive_shuffled_incremental_ratio": shuffled_incremental_ratio,
                         "adaptive_shuffled_incremental_ratio_train_layout_cv_mse": shuffled_incremental_ratio_cv,
+                        "uncertainty_adaptive_shuffled_selection": shuffled_uncertainty_selection,
+                        "uncertainty_adaptive_shuffled_train_layout_cv_mse": shuffled_uncertainty_cv,
                         "phase_adaptive_incremental_ratios": phase_incremental_ratios,
                         "phase_adaptive_incremental_train_cv_mse": phase_incremental_cv,
                         "phase_adaptive_shuffled_ratios": phase_shuffled_ratios,
@@ -1169,6 +1316,18 @@ def evaluate_records(
                                 "state_action_coupling",
                                 "incremental_action_coupling",
                                 "adaptive_shuffled_incremental_coupling",
+                            ),
+                        ),
+                        "uncertainty_adaptive_layout_comparison": layout_comparison(
+                            arms,
+                            truth,
+                            [record["case_id"] for record in evaluation],
+                            reference="uncertainty_adaptive_incremental_coupling",
+                            comparators=(
+                                "state_action_coupling",
+                                "incremental_action_coupling",
+                                "adaptive_incremental_action_coupling",
+                                "uncertainty_adaptive_shuffled_coupling",
                             ),
                         ),
                         "phase_adaptive_incremental_layout_comparison": layout_comparison(
