@@ -23,6 +23,7 @@ from toolkits.rlt.libero_acceptance_campaign import make_cases, matched, warmup_
 from toolkits.rlt.libero_acceptance_env import snapshot_digest
 from toolkits.rlt.libero_acceptance_learning import (
     AcceptanceLearner,
+    cross_episode_response_targets,
     td_eligible,
     td_target,
 )
@@ -208,6 +209,12 @@ def test_critic_response_auxiliary_is_shared_and_checkpointed(source):
     replay = rows()
     for index, row in enumerate(replay):
         row["next_prop"] = torch.ones(8) * (index + 1) / 100
+        row["terminal"] = index in (4, 9)
+    shuffled_targets = cross_episode_response_targets(replay)
+    assert all(
+        not torch.equal(shuffled_targets[id(row)], row["next_prop"] - row["prop"])
+        for row in replay
+    )
     learner = AcceptanceLearner("cpu", critic_response_aux_weight=0.1)
     result = learner.update(replay)
     assert result["critic_response_aux_loss"] > 0

@@ -94,6 +94,27 @@ def model_state(model: nn.Module) -> dict:
     }
 
 
+def cross_episode_response_targets(rows: list[dict]) -> dict[int, torch.Tensor]:
+    """Assign each replay row a measured response from another episode."""
+    episodes, current = [], []
+    for row in rows:
+        current.append(row)
+        if row["terminal"]:
+            episodes.append(current)
+            current = []
+    if current:
+        episodes.append(current)
+    if len(episodes) < 2:
+        raise ValueError("Shuffled response supervision needs two episodes")
+    targets = {}
+    for episode_index, episode in enumerate(episodes):
+        other = episodes[(episode_index + 1) % len(episodes)]
+        for row_index, row in enumerate(episode):
+            source = other[row_index % len(other)]
+            targets[id(row)] = source["next_prop"] - source["prop"]
+    return targets
+
+
 class AcceptanceLearner:
     """Train AlphaBrain's shared heads; change only the actor Q term between arms.
 
@@ -426,17 +447,9 @@ class AcceptanceLearner:
                 ).to(self.device)
                 response_scale = replay_responses.std(0, unbiased=False).clamp_min(1e-3)
                 if self.critic_response_aux_shuffled:
-                    if len(eligible) < 2:
-                        raise ValueError("Shuffled response supervision needs two rows")
-                    following = {
-                        id(row): eligible[(index + 1) % len(eligible)]
-                        for index, row in enumerate(eligible)
-                    }
+                    shuffled_targets = cross_episode_response_targets(eligible)
                     response_target = torch.stack(
-                        [
-                            following[id(row)]["next_prop"] - following[id(row)]["prop"]
-                            for row in rows
-                        ]
+                        [shuffled_targets[id(row)] for row in rows]
                     ).to(self.device)
                 response_target = response_target / response_scale
                 response1, response2 = self.critic.response(
