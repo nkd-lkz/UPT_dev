@@ -26,6 +26,9 @@ from toolkits.rlt.physrlt.conditioning import (
 from toolkits.rlt.physrlt.consequence_component_report import (
     summarize as summarize_consequence_components,
 )
+from toolkits.rlt.physrlt.consequence_component_report import (
+    summarize_episode_folds as summarize_episode_fold_components,
+)
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     load_replay as load_consequence_gate_replay,
 )
@@ -1704,6 +1707,54 @@ def test_consequence_component_report_requires_matched_causal_gates():
     payloads["geometry"]["trace_sha256"]["independent"] = "different"
     with pytest.raises(ValueError, match="same protocol evidence"):
         summarize_consequence_components(payloads)
+
+
+def test_consequence_component_report_combines_matched_episode_folds():
+    summaries = [
+        {
+            "fold": 0,
+            "mean_concordance": {
+                "correct": 0.7,
+                "reversed": 0.6,
+                "zero": 0.5,
+            },
+            "correct_best": True,
+        },
+        {
+            "fold": "aggregate",
+            "mean_concordance": {
+                "correct": 0.65,
+                "reversed": 0.55,
+                "zero": 0.45,
+            },
+            "correct_best": True,
+        },
+    ]
+    matched = {
+        "state": "complete",
+        "source_trace_sha256": "trace",
+        "base_replay": "base.pt",
+        "physical_replay": "physical.pt",
+        "base_readout": "base-readout.pt",
+        "consequence_readout": "consequence-readout.pt",
+        "complete_successful_episodes": 3,
+        "folds": [{"fold": 0}],
+        "seeds": [31, 47, 59],
+        "summaries": summaries,
+        "passes_strict_screen": True,
+        "limitation": "same collection run",
+    }
+    payloads = {
+        component: {**copy.deepcopy(matched), "consequence_component": component}
+        for component in ("joint", "response", "geometry")
+    }
+    result = summarize_episode_fold_components(payloads)
+    assert result["report_type"] == "same_run_episode_fold"
+    assert len(result["rows"]) == 6
+    assert all(row["passes_strict_screen"] for row in result["component_summary"])
+    payloads["geometry"]["seeds"] = [31]
+    with pytest.raises(ValueError, match="same fold evidence"):
+        summarize_episode_fold_components(payloads)
 
 
 def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path):
