@@ -3440,7 +3440,7 @@ def test_report_retains_invalidated_online_and_failure_costs(tmp_path):
 
     from toolkits.rlt.physrlt.report import build
 
-    for version in (1, 2):
+    for version in (1, 2, 3):
         root = tmp_path / f"pilot-v{version}"
         path = root / "task0-object/control-seed31"
         path.mkdir(parents=True)
@@ -3462,8 +3462,9 @@ def test_report_retains_invalidated_online_and_failure_costs(tmp_path):
         )
     (tmp_path / "pilot-v1/INVALIDATION.json").write_text("{}")
     result = build(tmp_path)
-    old, new = result["control"]
+    old, previous, new = result["control"]
     assert old["evidence"] == "INVALIDATED_online_protocol"
+    assert previous["evidence"] == "development_only"
     assert new["evidence"] == "development_only"
     assert new["mean_ticks_all"] == 150 and new["successes"] == 1
     assert new["episodes"] == new["unique_layouts"] == 2

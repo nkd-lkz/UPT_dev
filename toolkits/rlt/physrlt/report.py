@@ -105,10 +105,9 @@ def build(root: Path) -> dict:
                 ].append(row)
             for (method, stage, split, gain), group in groups.items():
                 valid = not (invalidated and stage.startswith("online_"))
-                if (
-                    stage.startswith("online_")
-                    and manifest.get("control_protocol_version") != 2
-                ):
+                if stage.startswith("online_") and manifest.get(
+                    "control_protocol_version"
+                ) not in {2, 3}:
                     valid = False
                 controls.append(
                     {

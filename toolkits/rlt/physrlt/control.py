@@ -817,7 +817,7 @@ def run(args):
             },
             "critic_action_space": "policy_proposal_with_fixed_environment_mapping",
             "physical_target_action_space": "accepted_native_commands",
-            "control_protocol_version": 2,
+            "control_protocol_version": 3,
             "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
             "collection_reset_hash_role": "provenance_only",
         },
@@ -1358,7 +1358,7 @@ def run(args):
         "online_checkpoint_arms": online_checkpoint_arms,
         "online_checkpoint_components": online_checkpoint_components,
         "online_checkpoint_conditionings": online_checkpoint_conditionings,
-        "control_protocol_version": 2,
+        "control_protocol_version": 3,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
     write_json(args.output / "result.json", result)
