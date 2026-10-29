@@ -1949,6 +1949,7 @@ def test_crossfitted_response_prior_never_reads_dev_labels():
         "hybrid_joint",
         "joint_recon",
         "factorized_joint",
+        "factorized_recon",
         "residual_joint",
     ],
 )
@@ -1972,7 +1973,7 @@ def test_followup_methods_fit_and_restore(tmp_path, method):
     encoded = readout.encode(rows[0], rows[0]["prop"])
     assert encoded["z"].shape == (128,)
     assert torch.isfinite(encoded["z"]).all()
-    assert readout.model.factorized == (method == "factorized_joint")
+    assert readout.model.factorized == method.startswith("factorized_")
 
 
 @pytest.mark.parametrize("limit", [7, 10])

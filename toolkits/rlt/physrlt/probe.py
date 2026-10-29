@@ -30,6 +30,7 @@ METHODS = (
     "hybrid_joint",
     "joint_recon",
     "factorized_joint",
+    "factorized_recon",
     "residual_joint",
     "arm_q_gripper_joint",
     "eef_gripper_joint",
@@ -168,7 +169,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
     model = PhysicalReadout(
         data["response"].shape[-1],
         data["geometry"].shape[-1],
-        factorized=method == "factorized_joint",
+        factorized=method in {"factorized_joint", "factorized_recon"},
     )
     if method.startswith("flow_"):
         feature_key = "flow_feature"
@@ -218,7 +219,7 @@ def fit_readout(data: dict, train: torch.Tensor, method: str, seed: int, steps: 
                         pred[key], target, mask, method
                     )
                 loss = loss + terms[key]
-            if method == "joint_recon":
+            if method in {"joint_recon", "factorized_recon"}:
                 loss = (
                     loss
                     + 0.1 * (model.reconstruct(z) - features[selected]).square().mean()
