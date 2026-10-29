@@ -1529,6 +1529,15 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
         consequence_readout=consequence,
     )
     assert loaded["train_trace_sha256"] == "trace"
+    loaded = load_gated_online_checkpoint(
+        checkpoint,
+        expected_arm="reversed",
+        expected_component="joint",
+        optimizer_seed=31,
+        base_readout=base,
+        consequence_readout=consequence,
+    )
+    assert loaded["training_arm"] == "correct"
     with pytest.raises(ValueError, match="optimizer seed differs"):
         load_gated_online_checkpoint(
             checkpoint,
