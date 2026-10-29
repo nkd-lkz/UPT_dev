@@ -14,6 +14,7 @@ import torch
 
 from toolkits.rlt.physrlt import response_adaptation as response_adaptation_module
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
+from toolkits.rlt.physrlt.causal_control_gate import evaluate as evaluate_causal_control
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     SignedCandidateConsequence,
@@ -1703,6 +1704,58 @@ def test_consequence_component_report_requires_matched_causal_gates():
     payloads["geometry"]["trace_sha256"]["independent"] = "different"
     with pytest.raises(ValueError, match="same protocol evidence"):
         summarize_consequence_components(payloads)
+
+
+def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path):
+    run = tmp_path / "seed31"
+    run.mkdir()
+    (run / "result.json").write_text(
+        json.dumps({"state": "complete", "complete": True, "seed": 31})
+    )
+    rows = []
+    for split in ("validation", "development"):
+        case_id = f"{split}-0"
+        rows.append(
+            {
+                "method": "reference",
+                "stage": "frozen",
+                "split": split,
+                "case_id": case_id,
+                "reset_hash": case_id,
+                "success": False,
+                "ticks": 520,
+            }
+        )
+        for method, success, ticks in (
+            ("correct_method", True, 100),
+            ("reversed_method", False, 520),
+            ("zero_method", False, 520),
+        ):
+            rows.append(
+                {
+                    "method": method,
+                    "stage": "online_frozen_eval",
+                    "split": split,
+                    "case_id": case_id,
+                    "reset_hash": case_id,
+                    "success": success,
+                    "ticks": ticks,
+                    "candidate_nonreference_fraction": 0.5,
+                }
+            )
+    (run / "episodes.json").write_text(json.dumps(rows))
+    arms = {
+        "correct": "correct_method",
+        "reversed": "reversed_method",
+        "zero": "zero_method",
+    }
+    result = evaluate_causal_control([run], arms)
+    assert result["passes_causal_closed_loop_gate"]
+    rows[-3]["success"] = False
+    rows[-2]["success"] = True
+    (run / "episodes.json").write_text(json.dumps(rows))
+    result = evaluate_causal_control([run], arms)
+    assert not result["passes_causal_closed_loop_gate"]
 
 
 def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():

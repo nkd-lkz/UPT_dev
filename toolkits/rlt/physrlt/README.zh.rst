@@ -153,6 +153,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 当 actor gradient 对稀疏奖励 critic 过于敏感时，``--conservative-selectors`` 提供不改变训练数据的冻结评估诊断。它在 reference 与 actor 提议之间生成固定数量的插值候选，以双 Q 较小值减去 Q 分歧惩罚作为分数；只有最佳候选相对 reference 超过 ``--candidate-selection-margin`` 才执行修正，否则回退到 reference。选择器只在 critic 已更新且采用确定性评估时生效，并记录非 reference 选择比例、平均插值尺度和分数增量。action control 与 Physical Token 必须使用相同候选数、margin、分歧惩罚和 checkpoint；该实验只能检验物理条件化是否改善候选排序，不能视为额外在线数据带来的收益。
 
+``causal_control_gate`` 对 conservative selector 的 correct、reversed、zero 三臂及同初态 reference 做逐 case 检查。correct 在 validation 和 development 的每一格都不得减少成功数；合并唯一优化 seed 后，它必须相对每个对照严格增加成功数，或在成功数完全相同时将 failure-capped ticks 至少降低 5%。该门槛在新闭环结果产生前固定，输出每 seed／split 配对行和聚合表；通过只表示可继续扩展开发实验，不等于最终测试结论。
+
 ``--critic-consequence-dueling`` 是针对 ``--concat-relative-critics`` 的更严格 value-function 消融。state value 分支只接收冻结语义 token；以 reference 为零点的 advantage 分支接收候选动作相对 reference 的预测物理后果。原始候选动作不再直接进入 Q 网络，因此所有动作相关的 Q 差异都必须经过冻结后果预测器。进入闭环前，``consequence_critic_gate`` 会在完全一致的 replay、优化 batch 与网络容量下比较正确、反向和全零后果通道。
 
 为了区分机器人执行响应与物体几何演变，``consequence_critic_gate --consequence-component`` 可固定为 ``response``、``geometry`` 或 ``joint``。三组使用同一个 joint readout，只把未选择的固定坐标置零，因此不会改变 critic 容量。gate 只有在每个优化 seed 及 seed 聚合上，正确方向的 return AUC 和连续回报排序都严格超过反向与全零通道时，才保存三类 checkpoint。闭环通过 ``--online-checkpoints`` 加载原权重，并用 ``--online-checkpoint-arms`` 和 ``--online-checkpoint-components`` 显式恢复训练时的因果方向与物理通道；checkpoint 还会校验优化 seed、readout 哈希和 gate 状态，任一不匹配都在 rollout 前失败。response-only 或 geometry-only 的预测误差改善不能替代这项价值排序和闭环检验。
