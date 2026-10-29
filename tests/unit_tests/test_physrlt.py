@@ -2037,6 +2037,20 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     with pytest.raises(ValueError, match="trace length"):
         evaluate_causal_control([run], arms)
 
+    unattributed_rows = copy.deepcopy(passing_rows)
+    for row in unattributed_rows:
+        if row["split"] == "development" and row["method"] == arms["reversed"]:
+            row["candidate_selected_indices"] = [0, 1]
+    (run / "episodes.json").write_text(json.dumps(unattributed_rows))
+    result = evaluate_causal_control([run], arms)
+    reversed_comparison = next(
+        row for row in result["comparisons"] if row["comparator"] == "reversed"
+    )
+    assert reversed_comparison["causal_choices_diverged"]
+    assert reversed_comparison["unattributed_outcome_cases"] == 1
+    assert not reversed_comparison["causal_outcomes_attributed"]
+    assert not result["passes_causal_closed_loop_gate"]
+
     inactive_rows = copy.deepcopy(passing_rows)
     for row in inactive_rows:
         if row["method"] == arms["correct"]:

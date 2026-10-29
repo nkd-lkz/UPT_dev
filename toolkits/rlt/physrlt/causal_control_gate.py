@@ -72,6 +72,7 @@ def _paired_row(
         raise ValueError("Causal control arms use different case identities")
     trace_comparable_cases = 0
     trace_diverged_cases = 0
+    outcome_changed_without_trace_divergence = 0
     for case_id in correct:
         correct_hash = correct[case_id].get("reset_hash")
         control_hash = control[case_id].get("reset_hash")
@@ -82,8 +83,16 @@ def _paired_row(
         if correct_trace is None or control_trace is None:
             continue
         trace_comparable_cases += 1
-        if any(first != second for first, second in zip(correct_trace, control_trace)):
+        trace_diverged = any(
+            first != second for first, second in zip(correct_trace, control_trace)
+        )
+        if trace_diverged:
             trace_diverged_cases += 1
+        outcome_changed = bool(correct[case_id]["success"]) != bool(
+            control[case_id]["success"]
+        ) or float(correct[case_id]["ticks"]) != float(control[case_id]["ticks"])
+        if comparator != "reference" and outcome_changed and not trace_diverged:
+            outcome_changed_without_trace_divergence += 1
     correct_successes = sum(bool(row["success"]) for row in correct.values())
     control_successes = sum(bool(row["success"]) for row in control.values())
     correct_ticks = statistics.mean(float(row["ticks"]) for row in correct.values())
@@ -101,6 +110,9 @@ def _paired_row(
         "tick_delta_mean": correct_ticks - control_ticks,
         "selection_trace_comparable_cases": trace_comparable_cases,
         "selection_trace_diverged_cases": trace_diverged_cases,
+        "outcome_changed_without_trace_divergence": (
+            outcome_changed_without_trace_divergence
+        ),
     }
 
 
@@ -214,11 +226,17 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         selection_trace_diverged_cases = sum(
             row["selection_trace_diverged_cases"] for row in selected
         )
+        unattributed_outcome_cases = sum(
+            row["outcome_changed_without_trace_divergence"] for row in selected
+        )
         selection_trace_complete = comparator == "reference" or (
             selection_trace_comparable_cases == episodes
         )
         causal_choices_diverged = comparator == "reference" or (
             selection_trace_complete and selection_trace_diverged_cases > 0
+        )
+        causal_outcomes_attributed = (
+            comparator == "reference" or unattributed_outcome_cases == 0
         )
         strict_success_gain = correct_successes > control_successes
         tick_improvement_fraction = (
@@ -232,6 +250,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         passed = (
             no_split_success_regression
             and causal_choices_diverged
+            and causal_outcomes_attributed
             and (strict_success_gain or tied_success_efficiency_gain)
         )
         comparisons.append(
@@ -249,6 +268,8 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                 "selection_trace_diverged_cases": selection_trace_diverged_cases,
                 "selection_trace_complete": selection_trace_complete,
                 "causal_choices_diverged": causal_choices_diverged,
+                "unattributed_outcome_cases": unattributed_outcome_cases,
+                "causal_outcomes_attributed": causal_outcomes_attributed,
                 "passes_predeclared_rule": passed,
             }
         )
@@ -270,7 +291,8 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             "successes with at least 5% lower failure-capped ticks; the correct arm "
             "must also select at least one non-reference candidate and must differ "
             "from each causal input control on a shared executed selection prefix; "
-            "every causal comparison must provide a complete selection trace"
+            "every causal comparison must provide a complete selection trace, and "
+            "every changed outcome must follow a within-case selection divergence"
         ),
         "arms": arms,
         "seeds": sorted(seen_seeds),
