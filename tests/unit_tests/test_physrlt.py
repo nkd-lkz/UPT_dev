@@ -38,6 +38,7 @@ from toolkits.rlt.physrlt.control import (
     validate_fixed_replay,
 )
 from toolkits.rlt.physrlt.control import warmup_gate as physical_warmup_gate
+from toolkits.rlt.physrlt.control_report import markdown_report
 from toolkits.rlt.physrlt.control_report import summarize as summarize_control_runs
 from toolkits.rlt.physrlt.critic_audit import (
     binary_auc,
@@ -1915,6 +1916,10 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
     )
     assert keyed[("1", "physical")]["updates_skipped"] is True
     assert keyed[("1", "physical")]["skip_reason"] == "no_positive_transition"
+    markdown = markdown_report(result)
+    assert "Paired PhysRLT closed-loop report" in markdown
+    assert "physical" in markdown
+    assert "Online val." in markdown
 
 
 def test_control_report_rejects_unpaired_reference_resets(tmp_path):

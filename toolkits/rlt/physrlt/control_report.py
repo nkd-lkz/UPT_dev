@@ -325,6 +325,59 @@ def aggregate_seed_rows(rows: list[dict]) -> list[dict]:
     return output
 
 
+def _mean_std(row: dict, metric: str, digits: int = 1) -> str:
+    mean = row.get(f"{metric}_mean")
+    deviation = row.get(f"{metric}_std")
+    if mean is None or deviation is None:
+        return "—"
+    return f"{float(mean):.{digits}f} ± {float(deviation):.{digits}f}"
+
+
+def markdown_report(result: dict) -> str:
+    """Render the paired multi-seed outcomes without recomputing statistics."""
+    lines = [
+        "# Paired PhysRLT closed-loop report",
+        "",
+        str(result["protocol"]),
+        "",
+        "Success values are percentages. Tick deltas are online minus frozen "
+        "reference, so lower is better.",
+        "",
+        "| Method | Seeds | Ref val. | Online val. | Δ val. | Δ val. ticks | Ref dev. | Online dev. | Δ dev. | Δ dev. ticks |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in result["aggregate_rows"]:
+        lines.append(
+            f"| {row['method']} | {row['seed_count']} | "
+            f"{_mean_std(row, 'reference_validation_success_rate_pct')} | "
+            f"{_mean_std(row, 'online_validation_success_rate_pct')} | "
+            f"{_mean_std(row, 'paired_validation_success_rate_delta_pct')} | "
+            f"{_mean_std(row, 'paired_validation_failure_capped_ticks_delta_mean')} | "
+            f"{_mean_std(row, 'reference_development_success_rate_pct')} | "
+            f"{_mean_std(row, 'online_development_success_rate_pct')} | "
+            f"{_mean_std(row, 'paired_development_success_rate_delta_pct')} | "
+            f"{_mean_std(row, 'paired_development_failure_capped_ticks_delta_mean')} |"
+        )
+    lines.extend(
+        [
+            "",
+            "| Method | Val. non-reference | Dev. non-reference | Val. scale | Dev. scale | Val. ticks/s | Dev. ticks/s |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in result["aggregate_rows"]:
+        lines.append(
+            f"| {row['method']} | "
+            f"{_mean_std(row, 'online_validation_candidate_nonreference_fraction_mean', 3)} | "
+            f"{_mean_std(row, 'online_development_candidate_nonreference_fraction_mean', 3)} | "
+            f"{_mean_std(row, 'online_validation_candidate_scale_mean', 3)} | "
+            f"{_mean_std(row, 'online_development_candidate_scale_mean', 3)} | "
+            f"{_mean_std(row, 'online_validation_ticks_per_wall_second', 2)} | "
+            f"{_mean_std(row, 'online_development_ticks_per_wall_second', 2)} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def write_csv(path: Path, rows: list[dict]) -> None:
     """Write a stable flat view atomically."""
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -347,6 +400,7 @@ def main() -> None:
     write_json(args.output / "summary.json", result)
     write_csv(args.output / "summary.csv", result["rows"])
     write_csv(args.output / "aggregate.csv", result["aggregate_rows"])
+    (args.output / "comparison.md").write_text(markdown_report(result))
     print(json.dumps(result, indent=2))
 
 
