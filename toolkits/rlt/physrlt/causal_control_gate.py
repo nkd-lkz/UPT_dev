@@ -208,23 +208,31 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                 "passes_predeclared_rule": passed,
             }
         )
-    passes = all(row["passes_predeclared_rule"] for row in comparisons)
+    correct_nonreference_mean = (
+        statistics.mean(correct_nonreference) if correct_nonreference else None
+    )
+    selector_active = (
+        correct_nonreference_mean is not None and correct_nonreference_mean > 0
+    )
+    passes = selector_active and all(
+        row["passes_predeclared_rule"] for row in comparisons
+    )
     return {
         "state": "complete",
         "role": "development causal screen, not final test evidence",
         "rule": (
             "correct has no validation/development success regression and, pooled "
             "across unique optimizer seeds, either strictly more successes or equal "
-            "successes with at least 5% lower failure-capped ticks"
+            "successes with at least 5% lower failure-capped ticks; the correct arm "
+            "must also select at least one non-reference candidate"
         ),
         "arms": arms,
         "seeds": sorted(seen_seeds),
         "checkpoint_audits": checkpoint_audits,
         "rows": rows,
         "comparisons": comparisons,
-        "correct_candidate_nonreference_fraction_mean": (
-            statistics.mean(correct_nonreference) if correct_nonreference else None
-        ),
+        "correct_candidate_nonreference_fraction_mean": correct_nonreference_mean,
+        "correct_selector_active": selector_active,
         "passes_causal_closed_loop_gate": passes,
         "decision": "retain_for_expansion" if passes else "stop_after_development",
     }
@@ -250,6 +258,11 @@ def write_report(output: Path, result: dict) -> None:
         "# Conservative causal control gate",
         "",
         result["rule"],
+        "",
+        "Correct selector active: "
+        f"{'yes' if result['correct_selector_active'] else 'no'} "
+        f"(mean non-reference fraction: "
+        f"{result['correct_candidate_nonreference_fraction_mean']})",
         "",
         "| Comparator | Episodes | Correct successes | Control successes | Tick improvement | Pass |",
         "|---|---:|---:|---:|---:|:---:|",

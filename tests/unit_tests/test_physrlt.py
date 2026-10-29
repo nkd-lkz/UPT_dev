@@ -1948,6 +1948,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                     "candidate_nonreference_fraction": 0.5,
                 }
             )
+    passing_rows = copy.deepcopy(rows)
     (run / "episodes.json").write_text(json.dumps(rows))
     arms = {
         "correct": "correct_method",
@@ -1972,6 +1973,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         )
     result = evaluate_causal_control([run], arms)
     assert result["passes_causal_closed_loop_gate"]
+    assert result["correct_selector_active"]
     assert result["checkpoint_audits"][0]["evaluation_arms"] == [
         "correct",
         "reversed",
@@ -1989,6 +1991,16 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     (run / "reversed_method-online-checkpoint.json").write_text(json.dumps(mismatched))
     with pytest.raises(ValueError, match="one frozen checkpoint"):
         evaluate_causal_control([run], arms)
+
+    for row in passing_rows:
+        if row["method"] == arms["correct"]:
+            row["candidate_nonreference_fraction"] = 0.0
+    (run / "episodes.json").write_text(json.dumps(passing_rows))
+    mismatched["source_sha256"] = "checkpoint"
+    (run / "reversed_method-online-checkpoint.json").write_text(json.dumps(mismatched))
+    result = evaluate_causal_control([run], arms)
+    assert not result["correct_selector_active"]
+    assert not result["passes_causal_closed_loop_gate"]
 
 
 def test_episode_fold_gate_excludes_open_tail_and_holds_out_unique_traces():
