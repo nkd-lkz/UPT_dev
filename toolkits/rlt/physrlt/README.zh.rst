@@ -47,6 +47,8 @@ Encoder 只读取执行前特征、当前本体和 reference；后果解码器�
 
 当独立轴增益无法表达耦合执行响应时，``CausalResponseMatrix`` 用局部 3×3 矩阵描述预期末端位移到实测位移的 mapping。一个 chunk 完成后才能调用 ``observe(expected, measured)``；下一次决策可通过 ``matrix()``、``support()`` 和 ``token()`` 读取估计结果。12 维 token 由展开后的响应矩阵和 3 个对数尺度激励量组成。ridge prior 固定为 identity，因此尚无观测的回合保持标称执行，不产生任意修正。当前实验只支持该 token 在软件增益变化下改善因果下一 chunk 响应预测；只有匹配闭环对照通过后，才能讨论 actor、critic 或任务成功率收益。
 
+首轮匹配闭环用 ``matrix_adaptive`` 将有界的逆响应矩阵作用到下一段 reference 平移命令；``matrix_reversed`` 在相同奇异值边界下沿错误方向使用估计矩阵。两组都从 identity map 开始，只在完整 chunk 执行后更新，并与分轴校准共用同一个 nominal-response 模型。实验在相同 reset 上比较 ``reference``、``adaptive``、``fixed_high`` 和 ``delayed_high``，以成功率和 capped episode ticks 作为验收指标；仅降低响应 RMSE 不能通过闭环 gate。
+
 ``object_motion_probe`` 在不训练 policy 的条件下检查稀疏物体演化瓶颈。它只根据训练配对数据选择动作敏感度最高的物体，通过 leave-one-training-layout-out 交叉验证选择 ridge 系数，最后只在互斥的 development 配对状态上评估。四组输入严格匹配：本体＋reference 动作、最后一次 action-expert 特征、四点 flow-path 特征和 VLM prefix 特征。输出同时报告直接位移回归、运动事件门控回归、零运动基线及符号反转预测对照。运动阈值使用米制并需要进行敏感性检查；物体世界坐标和配对执行结果都不会进入部署输入。
 
 ``sparse_motion`` 将上述诊断实现为冻结 physical readout 上的小型可训练头。模型显式区分“物体是否运动”和“发生运动时的条件位移”，并可加入配对候选动作的几何效果监督。直接回归、事件门控、逐点监督、配对监督及符号反转配对五组严格共享训练与 development 初态、优化预算和目标物体。该结果只属于离线候选动作后果证据；冻结预测头尚未通过预先声明的独立闭环评测前，不能计为 policy 或 online RL 收益。

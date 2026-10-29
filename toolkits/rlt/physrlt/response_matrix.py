@@ -61,3 +61,34 @@ class CausalResponseMatrix:
         if expected.shape != (3,) or not torch.isfinite(expected).all():
             raise ValueError("Expected displacement must be a finite 3-D vector")
         return expected @ self.matrix()
+
+    def correction(
+        self,
+        *,
+        minimum_observations: int = 2,
+        singular_bounds: tuple[float, float] = (0.8, 1.3),
+        reversed_control: bool = False,
+    ) -> torch.Tensor:
+        """Return a bounded command map using only completed observations.
+
+        The causal arm applies the inverse expected-to-measured map. The
+        deliberately wrong control applies the map itself. Singular-value
+        bounds preserve the reference action prior while allowing cross-axis
+        corrections.
+        """
+        low, high = singular_bounds
+        if (
+            minimum_observations < 1
+            or not 0 < low <= 1 <= high
+            or not torch.isfinite(torch.tensor(singular_bounds)).all()
+        ):
+            raise ValueError("Invalid response-matrix correction contract")
+        if self.observations < minimum_observations:
+            return torch.eye(3)
+        response = self.matrix()
+        raw = response if reversed_control else torch.linalg.inv(response)
+        left, singular, right = torch.linalg.svd(raw)
+        bounded = (left * singular.clamp(low, high)) @ right
+        if not torch.isfinite(bounded).all():
+            raise FloatingPointError("Invalid bounded response correction")
+        return bounded

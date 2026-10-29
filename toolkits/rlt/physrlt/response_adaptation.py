@@ -19,6 +19,7 @@ from toolkits.rlt.physrlt.data import (
     physical_reset_hash,
 )
 from toolkits.rlt.physrlt.gain_probe import realized_translation_score
+from toolkits.rlt.physrlt.response_matrix import CausalResponseMatrix
 from toolkits.rlt.pi05_baseline import (
     Pi05Reference,
     configure_gpu,
@@ -414,12 +415,15 @@ def rollout(
         "delayed_high",
         "oracle",
         "delayed_oracle",
+        "matrix_adaptive",
+        "matrix_reversed",
     }:
         raise ValueError("Unknown response-adaptation method")
     calibrator = TranslationCalibrator(
         nominal_score, reversed_control=method == "reversed"
     )
     axis_calibrator = AxisTranslationCalibrator(reversed_control=method == "reversed")
+    response_matrix = CausalResponseMatrix()
     execution_gains = np.broadcast_to(
         np.asarray(execution_gain, dtype=np.float32), (3,)
     ).copy()
@@ -435,7 +439,14 @@ def rollout(
             obs, env.instruction, seed=case["seed"] * 1000 + ticks
         )
         commands = prediction["commands"].copy()
-        if nominal_model is None:
+        matrix_control = method in {"matrix_adaptive", "matrix_reversed"}
+        if matrix_control and nominal_model is None:
+            raise ValueError("Response-matrix control requires a nominal model")
+        if matrix_control:
+            correction = response_matrix.correction(
+                reversed_control=method == "matrix_reversed"
+            ).numpy(force=True)
+        elif nominal_model is None:
             correction = control_correction(
                 method, calibrator, float(execution_gains[0])
             )
@@ -456,7 +467,9 @@ def rollout(
         else:
             correction = np.ones(3)
         issued = commands.copy()
-        issued_translation = issued[:, :3] * correction
+        issued_translation = (
+            issued[:, :3] @ correction if matrix_control else issued[:, :3] * correction
+        )
         issued_clip_fraction = float(np.mean(np.abs(issued_translation) > 1))
         issued[:, :3] = issued_translation.clip(-1, 1)
         nominal_displacement = (
@@ -486,11 +499,18 @@ def rollout(
                 score = calibrator.observe(torch.from_numpy(issued), response)
             else:
                 score = realized_translation_score(torch.from_numpy(issued), response)
-                estimated_gain = axis_calibrator.observe(
-                    nominal_displacement,
-                    response[7:10],
-                    np.broadcast_to(correction, (3,)),
-                )
+                if matrix_control:
+                    expected_displacement = nominal_displacement @ torch.as_tensor(
+                        correction
+                    )
+                    response_matrix.observe(expected_displacement, response[7:10])
+                    estimated_gain = response_matrix.matrix().numpy(force=True)
+                else:
+                    estimated_gain = axis_calibrator.observe(
+                        nominal_displacement,
+                        response[7:10],
+                        np.broadcast_to(correction, (3,)),
+                    )
             diagnostics.append(
                 {
                     "end_tick": ticks,
@@ -508,9 +528,14 @@ def rollout(
                         else calibrator.ema
                     ),
                     "observations": (
-                        axis_calibrator.observations
+                        response_matrix.observations
+                        if matrix_control
+                        else axis_calibrator.observations
                         if nominal_displacement is not None
                         else calibrator.observations
+                    ),
+                    "response_matrix_token": (
+                        response_matrix.token().tolist() if matrix_control else None
                     ),
                     "issued_clip_fraction": issued_clip_fraction,
                     "execution_clip_fraction": execution_clip_fraction,
@@ -577,6 +602,8 @@ def run(args: argparse.Namespace) -> None:
         "delayed_high",
         "oracle",
         "delayed_oracle",
+        "matrix_adaptive",
+        "matrix_reversed",
     }
     if (
         not methods

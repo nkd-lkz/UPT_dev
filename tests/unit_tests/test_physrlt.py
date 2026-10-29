@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from toolkits.rlt.physrlt import response_adaptation as response_adaptation_module
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
@@ -95,6 +96,9 @@ from toolkits.rlt.physrlt.response_adaptation import (
     response_context,
 )
 from toolkits.rlt.physrlt.response_adaptation import (
+    rollout as rollout_response_adaptation,
+)
+from toolkits.rlt.physrlt.response_adaptation import (
     run as run_response_adaptation,
 )
 from toolkits.rlt.physrlt.response_matrix import CausalResponseMatrix
@@ -144,6 +148,104 @@ def test_causal_response_matrix_recovers_coupled_execution_map():
     assert estimator.observations == 3
     assert torch.allclose(estimator.predict(probe), probe @ physical, atol=2e-4)
     assert torch.all(estimator.support() > 0)
+
+
+def test_causal_response_matrix_returns_bounded_inverse_and_negative_control():
+    adaptive = CausalResponseMatrix(ridge=1e-8)
+    reversed_control = CausalResponseMatrix(ridge=1e-8)
+    physical = torch.diag(torch.tensor([0.5, 1.0, 1.3]))
+    observations = torch.eye(3) * 0.1
+    assert torch.equal(adaptive.correction(), torch.eye(3))
+    for expected in observations:
+        measured = expected @ physical
+        adaptive.observe(expected, measured)
+        reversed_control.observe(expected, measured)
+    np.testing.assert_allclose(
+        adaptive.correction().numpy(), np.diag([1.3, 1.0, 0.8]), atol=1e-5
+    )
+    np.testing.assert_allclose(
+        reversed_control.correction(reversed_control=True).numpy(),
+        np.diag([0.8, 1.0, 1.3]),
+        atol=1e-5,
+    )
+
+
+def test_causal_response_matrix_correction_handles_axis_coupling():
+    estimator = CausalResponseMatrix(ridge=1e-8)
+    physical = torch.tensor([[1.0, 0.1, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    for expected in torch.eye(3) * 0.1:
+        estimator.observe(expected, expected @ physical)
+    correction = estimator.correction(singular_bounds=(0.5, 2.0))
+    torch.testing.assert_close(correction @ physical, torch.eye(3), atol=2e-5, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("method", "expected_scale"),
+    [("matrix_adaptive", 1.3), ("matrix_reversed", 0.8)],
+)
+def test_response_matrix_rollout_uses_only_completed_chunks(
+    monkeypatch, method, expected_scale
+):
+    class Environment:
+        def __init__(self):
+            self.instruction = "move"
+            self.position = torch.zeros(3)
+            self.steps = 0
+
+        def reset(self, case):
+            del case
+            self.position.zero_()
+            self.steps = 0
+            return {"state": np.zeros(8, np.float32)}
+
+        def step(self, command):
+            self.steps += 1
+            if self.steps > 9:
+                self.position += torch.as_tensor(command[:3])
+            done = self.steps == 39
+            return {"state": np.zeros(8, np.float32)}, float(done), done
+
+    class Reference:
+        def predict(self, obs, instruction, seed):
+            del obs, instruction, seed
+            commands = np.zeros((10, 7), np.float32)
+            commands[:, 0] = 0.01
+            return {"commands": commands}
+
+    class Nominal:
+        def predict(self, commands, proprio):
+            del commands, proprio
+            return torch.tensor([0.1, 0.0, 0.0])
+
+    def snapshot(env):
+        response = torch.zeros(12)
+        response[7:10] = env.position
+        return response
+
+    monkeypatch.setattr(
+        response_adaptation_module, "measured_response_snapshot", snapshot
+    )
+    monkeypatch.setattr(
+        response_adaptation_module, "physical_reset_hash", lambda env: "reset"
+    )
+    result = rollout_response_adaptation(
+        Environment(),
+        Reference(),
+        {"id": "case", "split": "confirmation", "seed": 1},
+        method,
+        np.array([0.5, 1.0, 1.0]),
+        0.01,
+        30,
+        Nominal(),
+    )
+    assert result["success"] is True
+    assert result["ticks"] == 30
+    assert len(result["diagnostics"]) == 3
+    np.testing.assert_allclose(result["diagnostics"][0]["correction"], np.eye(3))
+    np.testing.assert_allclose(result["diagnostics"][1]["correction"], np.eye(3))
+    assert result["diagnostics"][2]["correction"][0][0] == pytest.approx(
+        expected_scale, abs=1e-5
+    )
 
 
 @pytest.mark.parametrize(
