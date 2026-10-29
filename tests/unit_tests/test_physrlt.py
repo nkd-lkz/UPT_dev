@@ -102,6 +102,9 @@ from toolkits.rlt.physrlt.probe import (
     tensor_data,
 )
 from toolkits.rlt.physrlt.replay_eligibility import evaluate as evaluate_replay
+from toolkits.rlt.physrlt.replay_eligibility import (
+    evaluate_pair as evaluate_replay_pair,
+)
 from toolkits.rlt.physrlt.response_adaptation import (
     AxisTranslationCalibrator,
     DiagonalResponseRegressor,
@@ -1497,6 +1500,41 @@ def test_critic_replay_eligibility_requires_positive_and_zero_returns():
     all_succeeded = evaluate_replay([succeeded, copy.deepcopy(succeeded)])
     assert not all_succeeded["eligible_for_independent_critic_gate"]
     assert "no_zero_return_transition" in all_succeeded["rejection_reasons"]
+
+
+def test_independent_critic_replay_pair_requires_distinct_execution_traces():
+    template = {
+        "z": torch.zeros(128),
+        "ref": torch.zeros(10, 7),
+        "prop": torch.zeros(8),
+        "action": torch.zeros(10, 7),
+        "accepted_commands": torch.zeros(10, 7),
+        "next_z": torch.ones(128),
+        "next_ref": torch.zeros(10, 7),
+        "next_prop": torch.zeros(8),
+        "ticks": 10,
+        "terminal": True,
+        "reward": 0.0,
+    }
+    failed, succeeded = copy.deepcopy(template), copy.deepcopy(template)
+    succeeded["reward"] = 5.0
+    train = [failed, succeeded]
+    same_trace = evaluate_replay_pair(train, copy.deepcopy(train))
+    assert not same_trace["eligible_for_independent_critic_gate"]
+    assert not same_trace["distinct_execution_traces"]
+    assert (
+        "train_and_evaluation_share_execution_trace" in same_trace["rejection_reasons"]
+    )
+
+    evaluation = copy.deepcopy(train)
+    evaluation[0]["accepted_commands"][0, 0] = 0.1
+    independent = evaluate_replay_pair(train, evaluation)
+    assert independent["eligible_for_independent_critic_gate"]
+    assert independent["distinct_execution_traces"]
+    assert (
+        independent["train"]["trace_sha256"]
+        != independent["evaluation"]["trace_sha256"]
+    )
 
 
 def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):

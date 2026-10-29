@@ -38,14 +38,55 @@ def evaluate(replay: list[dict]) -> dict:
     }
 
 
+def evaluate_pair(train_replay: list[dict], evaluation_replay: list[dict]) -> dict:
+    """Require two eligible replays with distinct executed trajectories."""
+    train = evaluate(train_replay)
+    evaluation = evaluate(evaluation_replay)
+    reasons = []
+    reasons.extend(f"train:{reason}" for reason in train["rejection_reasons"])
+    reasons.extend(f"evaluation:{reason}" for reason in evaluation["rejection_reasons"])
+    distinct_traces = train["trace_sha256"] != evaluation["trace_sha256"]
+    if not distinct_traces:
+        reasons.append("train_and_evaluation_share_execution_trace")
+    return {
+        "state": "complete",
+        "train": train,
+        "evaluation": evaluation,
+        "distinct_execution_traces": distinct_traces,
+        "eligible_for_independent_critic_gate": not reasons,
+        "rejection_reasons": reasons,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--replay", type=Path, required=True)
+    parser.add_argument("--replay", type=Path)
+    parser.add_argument("--train-replay", type=Path)
+    parser.add_argument("--evaluation-replay", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    replay = torch.load(args.replay, map_location="cpu", weights_only=True)
-    result = evaluate(replay)
-    result["replay"] = str(args.replay.resolve())
+    single = args.replay is not None
+    pair = args.train_replay is not None or args.evaluation_replay is not None
+    if single == pair:
+        parser.error(
+            "provide either --replay or both --train-replay and --evaluation-replay"
+        )
+    if pair and (args.train_replay is None or args.evaluation_replay is None):
+        parser.error("paired audit requires both replay paths")
+    if single:
+        replay = torch.load(args.replay, map_location="cpu", weights_only=True)
+        result = evaluate(replay)
+        result["replay"] = str(args.replay.resolve())
+    else:
+        train_replay = torch.load(
+            args.train_replay, map_location="cpu", weights_only=True
+        )
+        evaluation_replay = torch.load(
+            args.evaluation_replay, map_location="cpu", weights_only=True
+        )
+        result = evaluate_pair(train_replay, evaluation_replay)
+        result["train_replay"] = str(args.train_replay.resolve())
+        result["evaluation_replay"] = str(args.evaluation_replay.resolve())
     write_json(args.output, result)
     print(json.dumps(result, indent=2))
     if not result["eligible_for_independent_critic_gate"]:
