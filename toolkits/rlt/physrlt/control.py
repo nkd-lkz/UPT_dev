@@ -662,7 +662,7 @@ def rollout(
     start = time.monotonic()
     prediction = reference.predict(obs, env.instruction, case["seed"] * 1000)
     features = readout.encode(prediction, obs["state"]) if readout else None
-    updates, selection_diagnostics = [], []
+    updates, selection_diagnostics, executed_command_trace = [], [], []
     while ticks < limit:
         begin = time.monotonic()
         action = (
@@ -671,8 +671,6 @@ def rollout(
             else torch.from_numpy(prediction["ref"])
         )
         diagnostic = getattr(learner, "last_command_diagnostics", None)
-        if diagnostic and diagnostic.get("enabled"):
-            selection_diagnostics.append(diagnostic)
         commands = env_commands(action.numpy())
         commands[:, :3] = (commands[:, :3] * execution_gain).clip(-1, 1)
         accepted = np.zeros_like(commands)
@@ -690,6 +688,11 @@ def rollout(
             success = success or done
             if done or ticks >= limit:
                 break
+        executed_command_trace.append(
+            accepted[:chunk_ticks].astype("<f4", copy=False).tolist()
+        )
+        if diagnostic and diagnostic.get("enabled"):
+            selection_diagnostics.append(dict(diagnostic))
         # Terminal transitions do not bootstrap, but keep a correctly shaped
         # successor. A truncated partial chunk is ineligible for TD updates.
         if not success:
@@ -747,6 +750,7 @@ def rollout(
         "memory": False,
         "execution_gain": execution_gain,
         "delay_ticks": delay_ticks,
+        "executed_command_trace": executed_command_trace,
         "candidate_selection_calls": len(selection_diagnostics),
         "candidate_selected_indices": [
             int(row["selected_index"]) for row in selection_diagnostics

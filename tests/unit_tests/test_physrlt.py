@@ -1912,6 +1912,12 @@ def test_consequence_component_report_combines_matched_episode_folds():
 
 
 def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path):
+    def command_trace(first, second, first_ticks, second_ticks):
+        return [
+            [[float(first)] * 7 for _ in range(first_ticks)],
+            [[float(second)] * 7 for _ in range(second_ticks)],
+        ]
+
     run = tmp_path / "seed31"
     run.mkdir()
     (run / "result.json").write_text(
@@ -1928,13 +1934,14 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                 "case_id": case_id,
                 "reset_hash": case_id,
                 "success": False,
-                "ticks": 520,
+                "ticks": 10,
+                "executed_command_trace": command_trace(0, 0, 5, 5),
             }
         )
         for method, success, ticks in (
-            ("correct_method", True, 100),
-            ("reversed_method", False, 520),
-            ("zero_method", False, 520),
+            ("correct_method", True, 2),
+            ("reversed_method", False, 10),
+            ("zero_method", False, 10),
         ):
             rows.append(
                 {
@@ -1951,6 +1958,11 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                         "correct_method": [0, 1],
                         "reversed_method": [0, 0],
                         "zero_method": [0, 2],
+                    }[method],
+                    "executed_command_trace": {
+                        "correct_method": command_trace(0, 1, 1, 1),
+                        "reversed_method": command_trace(0, 2, 5, 5),
+                        "zero_method": command_trace(0, 3, 5, 5),
                     }[method],
                 }
             )
@@ -2018,6 +2030,20 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         if row["comparator"] != "reference"
     )
 
+    identical_command_rows = copy.deepcopy(passing_rows)
+    for row in identical_command_rows:
+        if row["method"] in {arms["reversed"], arms["zero"]}:
+            row["ticks"] = 2
+            row["executed_command_trace"] = command_trace(0, 1, 1, 1)
+    (run / "episodes.json").write_text(json.dumps(identical_command_rows))
+    result = evaluate_causal_control([run], arms)
+    assert not result["passes_causal_closed_loop_gate"]
+    assert not any(
+        row["causal_choices_diverged"]
+        for row in result["comparisons"]
+        if row["comparator"] != "reference"
+    )
+
     missing_trace_rows = copy.deepcopy(passing_rows)
     next(row for row in missing_trace_rows if row["method"] == arms["reversed"]).pop(
         "candidate_selected_indices"
@@ -2028,6 +2054,25 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
     assert not next(
         row for row in result["comparisons"] if row["comparator"] == "reversed"
     )["selection_trace_complete"]
+
+    missing_command_rows = copy.deepcopy(passing_rows)
+    next(row for row in missing_command_rows if row["method"] == arms["reversed"]).pop(
+        "executed_command_trace"
+    )
+    (run / "episodes.json").write_text(json.dumps(missing_command_rows))
+    result = evaluate_causal_control([run], arms)
+    assert not result["passes_causal_closed_loop_gate"]
+    assert not next(
+        row for row in result["comparisons"] if row["comparator"] == "reversed"
+    )["command_trace_complete"]
+
+    truncated_command_rows = copy.deepcopy(passing_rows)
+    next(row for row in truncated_command_rows if row["method"] == arms["zero"])[
+        "executed_command_trace"
+    ][-1].pop()
+    (run / "episodes.json").write_text(json.dumps(truncated_command_rows))
+    with pytest.raises(ValueError, match="episode ticks"):
+        evaluate_causal_control([run], arms)
 
     inconsistent_trace_rows = copy.deepcopy(passing_rows)
     next(row for row in inconsistent_trace_rows if row["method"] == arms["zero"])[

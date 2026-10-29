@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -61,6 +62,55 @@ def _selection_trace(row: dict) -> list[int] | None:
     return trace
 
 
+def _executed_command_trace(row: dict) -> list[list[list[float]]] | None:
+    """Validate complete native commands without treating length as divergence."""
+    trace = row.get("executed_command_trace")
+    if trace is None:
+        return None
+    if not isinstance(trace, list) or not trace:
+        raise ValueError("Executed command traces must be nonempty lists")
+    ticks = 0
+    for chunk in trace:
+        if not isinstance(chunk, list) or not chunk:
+            raise ValueError("Executed command chunks must be nonempty lists")
+        ticks += len(chunk)
+        for command in chunk:
+            if (
+                not isinstance(command, list)
+                or len(command) != 7
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in command
+                )
+            ):
+                raise ValueError("Executed commands must contain seven finite values")
+    if ticks != int(row["ticks"]):
+        raise ValueError("Executed command trace length must match episode ticks")
+    return trace
+
+
+def _command_divergent_chunks(
+    correct: list[list[list[float]]],
+    control: list[list[list[float]]],
+    *,
+    tolerance: float = 1e-6,
+) -> set[int]:
+    """Locate shared chunks whose shared executed command prefix differs."""
+    divergent = set()
+    for chunk_index, (correct_chunk, control_chunk) in enumerate(zip(correct, control)):
+        if any(
+            any(
+                abs(float(first) - float(second)) > tolerance
+                for first, second in zip(correct_command, control_command)
+            )
+            for correct_command, control_command in zip(correct_chunk, control_chunk)
+        ):
+            divergent.add(chunk_index)
+    return divergent
+
+
 def _paired_row(
     seed: int,
     split: str,
@@ -72,22 +122,45 @@ def _paired_row(
         raise ValueError("Causal control arms use different case identities")
     trace_comparable_cases = 0
     trace_diverged_cases = 0
+    command_comparable_cases = 0
+    command_diverged_cases = 0
     outcome_changed_without_trace_divergence = 0
     for case_id in correct:
         correct_hash = correct[case_id].get("reset_hash")
         control_hash = control[case_id].get("reset_hash")
         if correct_hash is not None and correct_hash != control_hash:
             raise ValueError("Causal control arms use different reset states")
-        correct_trace = _selection_trace(correct[case_id])
-        control_trace = _selection_trace(control[case_id])
-        if correct_trace is None or control_trace is None:
+        correct_commands = _executed_command_trace(correct[case_id])
+        control_commands = _executed_command_trace(control[case_id])
+        if correct_commands is None or control_commands is None:
             continue
-        trace_comparable_cases += 1
-        trace_diverged = any(
-            first != second for first, second in zip(correct_trace, control_trace)
-        )
-        if trace_diverged:
-            trace_diverged_cases += 1
+        command_comparable_cases += 1
+        divergent_chunks = _command_divergent_chunks(correct_commands, control_commands)
+        command_diverged = bool(divergent_chunks)
+        if command_diverged:
+            command_diverged_cases += 1
+        if comparator == "reference":
+            trace_diverged = command_diverged
+        else:
+            correct_trace = _selection_trace(correct[case_id])
+            control_trace = _selection_trace(control[case_id])
+            if correct_trace is None or control_trace is None:
+                continue
+            if len(correct_trace) != len(correct_commands) or len(control_trace) != len(
+                control_commands
+            ):
+                raise ValueError(
+                    "Candidate selection calls must match executed command chunks"
+                )
+            trace_comparable_cases += 1
+            trace_diverged = any(
+                chunk_index in divergent_chunks and first != second
+                for chunk_index, (first, second) in enumerate(
+                    zip(correct_trace, control_trace)
+                )
+            )
+            if trace_diverged:
+                trace_diverged_cases += 1
         outcome_changed = bool(correct[case_id]["success"]) != bool(
             control[case_id]["success"]
         ) or float(correct[case_id]["ticks"]) != float(control[case_id]["ticks"])
@@ -110,6 +183,8 @@ def _paired_row(
         "tick_delta_mean": correct_ticks - control_ticks,
         "selection_trace_comparable_cases": trace_comparable_cases,
         "selection_trace_diverged_cases": trace_diverged_cases,
+        "command_trace_comparable_cases": command_comparable_cases,
+        "command_trace_diverged_cases": command_diverged_cases,
         "outcome_changed_without_trace_divergence": (
             outcome_changed_without_trace_divergence
         ),
@@ -226,14 +301,23 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         selection_trace_diverged_cases = sum(
             row["selection_trace_diverged_cases"] for row in selected
         )
+        command_trace_comparable_cases = sum(
+            row["command_trace_comparable_cases"] for row in selected
+        )
+        command_trace_diverged_cases = sum(
+            row["command_trace_diverged_cases"] for row in selected
+        )
         unattributed_outcome_cases = sum(
             row["outcome_changed_without_trace_divergence"] for row in selected
         )
+        command_trace_complete = command_trace_comparable_cases == episodes
         selection_trace_complete = comparator == "reference" or (
             selection_trace_comparable_cases == episodes
         )
-        causal_choices_diverged = comparator == "reference" or (
-            selection_trace_complete and selection_trace_diverged_cases > 0
+        causal_choices_diverged = command_trace_complete and (
+            command_trace_diverged_cases > 0
+            if comparator == "reference"
+            else selection_trace_complete and selection_trace_diverged_cases > 0
         )
         causal_outcomes_attributed = (
             comparator == "reference" or unattributed_outcome_cases == 0
@@ -267,6 +351,9 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                 "selection_trace_comparable_cases": selection_trace_comparable_cases,
                 "selection_trace_diverged_cases": selection_trace_diverged_cases,
                 "selection_trace_complete": selection_trace_complete,
+                "command_trace_comparable_cases": command_trace_comparable_cases,
+                "command_trace_diverged_cases": command_trace_diverged_cases,
+                "command_trace_complete": command_trace_complete,
                 "causal_choices_diverged": causal_choices_diverged,
                 "unattributed_outcome_cases": unattributed_outcome_cases,
                 "causal_outcomes_attributed": causal_outcomes_attributed,
@@ -290,8 +377,9 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             "across unique optimizer seeds, either strictly more successes or equal "
             "successes with at least 5% lower failure-capped ticks; the correct arm "
             "must also select at least one non-reference candidate and must differ "
-            "from each causal input control on a shared executed selection prefix; "
-            "every causal comparison must provide a complete selection trace, and "
+            "from reference and each causal input control in actual native commands; "
+            "a causal-control difference must align with a changed candidate index; "
+            "every comparison must provide complete command and selection traces, and "
             "every changed outcome must follow a within-case selection divergence"
         ),
         "arms": arms,
