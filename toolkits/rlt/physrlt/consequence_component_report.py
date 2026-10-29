@@ -12,6 +12,7 @@ from pathlib import Path
 from toolkits.rlt.pi05_baseline import write_json
 
 COMPONENTS = ("joint", "response", "geometry")
+GATE_METRICS = ("return_ranking_auc", "return_order_concordance")
 
 
 def parse_gates(specs: list[str]) -> dict[str, Path]:
@@ -31,6 +32,57 @@ def parse_gates(specs: list[str]) -> dict[str, Path]:
         result[component] = Path(raw_path).resolve()
     if set(result) != set(COMPONENTS):
         raise ValueError("Component report requires joint, response and geometry gates")
+    return result
+
+
+def _paper_rows(payloads: dict[str, dict]) -> list[dict]:
+    """Build one concise row per component and independent evaluation replay."""
+    result = []
+    for component in COMPONENTS:
+        gate_rows = payloads[component]["gate_summaries"]
+        evaluations = sorted({str(row["evaluation"]) for row in gate_rows})
+        for evaluation in evaluations:
+            selected = [
+                row for row in gate_rows if str(row["evaluation"]) == evaluation
+            ]
+            aggregate = {
+                str(row["metric"]): row
+                for row in selected
+                if str(row["optimizer_seed"]) == "aggregate"
+            }
+            if set(aggregate) != set(GATE_METRICS):
+                raise ValueError("Component gate lacks both aggregate critic metrics")
+            seed_cells = [
+                row for row in selected if str(row["optimizer_seed"]) != "aggregate"
+            ]
+            if not seed_cells:
+                raise ValueError("Component gate lacks per-seed critic cells")
+            result.append(
+                {
+                    "component": component,
+                    "evaluation": evaluation,
+                    "return_auc_correct": aggregate["return_ranking_auc"]["correct"],
+                    "return_auc_reversed": aggregate["return_ranking_auc"]["reversed"],
+                    "return_auc_zero": aggregate["return_ranking_auc"]["zero"],
+                    "concordance_correct": aggregate["return_order_concordance"][
+                        "correct"
+                    ],
+                    "concordance_reversed": aggregate["return_order_concordance"][
+                        "reversed"
+                    ],
+                    "concordance_zero": aggregate["return_order_concordance"]["zero"],
+                    "seed_cells_passed": sum(
+                        bool(row["correct_best"]) for row in seed_cells
+                    ),
+                    "seed_cells_total": len(seed_cells),
+                    "aggregate_cells_passed": sum(
+                        bool(row["correct_best"]) for row in aggregate.values()
+                    ),
+                    "passes_strict_screen": bool(
+                        payloads[component]["passes_strict_screen"]
+                    ),
+                }
+            )
     return result
 
 
@@ -90,6 +142,7 @@ def summarize(payloads: dict[str, dict]) -> dict:
         "replay_sampling": reference["replay_sampling"],
         "seeds": reference["seeds"],
         "component_summary": component_summary,
+        "paper_rows": _paper_rows(payloads),
         "rows": rows,
     }
 
@@ -190,6 +243,41 @@ def write_report(output: Path, result: dict) -> None:
                 f"{'yes' if row['correct_best'] else 'no'} |"
             )
     else:
+        paper_fields = list(result["paper_rows"][0])
+        with (output / "paper_table.csv").open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=paper_fields)
+            writer.writeheader()
+            writer.writerows(result["paper_rows"])
+        paper_lines = [
+            "# Independent replay component summary",
+            "",
+            "| Component | Evaluation | AUC c/r/z | Concordance c/r/z | Seed cells | Aggregate cells | Pass |",
+            "|---|---|---|---|---:|---:|:---:|",
+        ]
+        for row in result["paper_rows"]:
+            auc = "/".join(
+                f"{float(row[name]):.6f}"
+                for name in (
+                    "return_auc_correct",
+                    "return_auc_reversed",
+                    "return_auc_zero",
+                )
+            )
+            concordance = "/".join(
+                f"{float(row[name]):.6f}"
+                for name in (
+                    "concordance_correct",
+                    "concordance_reversed",
+                    "concordance_zero",
+                )
+            )
+            paper_lines.append(
+                f"| {row['component']} | {row['evaluation']} | {auc} | "
+                f"{concordance} | {row['seed_cells_passed']}/"
+                f"{row['seed_cells_total']} | {row['aggregate_cells_passed']}/2 | "
+                f"{'yes' if row['passes_strict_screen'] else 'no'} |"
+            )
+        (output / "paper_table.md").write_text("\n".join(paper_lines) + "\n")
         lines.extend(
             [
                 "| Component | Evaluation | Seed | Metric | Correct | Reversed | Zero | Correct best |",

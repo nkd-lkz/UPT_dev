@@ -29,6 +29,9 @@ from toolkits.rlt.physrlt.consequence_component_report import (
 from toolkits.rlt.physrlt.consequence_component_report import (
     summarize_episode_folds as summarize_episode_fold_components,
 )
+from toolkits.rlt.physrlt.consequence_component_report import (
+    write_report as write_consequence_component_report,
+)
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     audit_replay_set,
     summarize_gate,
@@ -1797,17 +1800,19 @@ def test_consequence_critic_gate_requires_correct_arm_best_in_every_seed():
     assert not passes
 
 
-def test_consequence_component_report_requires_matched_causal_gates():
+def test_consequence_component_report_requires_matched_causal_gates(tmp_path):
     gate_rows = [
         {
             "evaluation": "independent",
-            "optimizer_seed": 31,
-            "metric": "return_ranking_auc",
+            "optimizer_seed": seed,
+            "metric": metric,
             "correct": 0.7,
             "reversed": 0.6,
             "zero": 0.5,
             "correct_best": True,
         }
+        for seed in (31, "aggregate")
+        for metric in ("return_ranking_auc", "return_order_concordance")
     ]
     payloads = {
         component: {
@@ -1829,9 +1834,14 @@ def test_consequence_component_report_requires_matched_causal_gates():
         for component in ("joint", "response", "geometry")
     }
     result = summarize_consequence_components(payloads)
-    assert len(result["rows"]) == 3
+    assert len(result["rows"]) == 12
     assert result["replay_sampling"] == "td_eligible_transition_uniform"
+    assert result["paper_rows"][0]["seed_cells_passed"] == 2
+    assert result["paper_rows"][0]["aggregate_cells_passed"] == 2
     assert all(row["passes_strict_screen"] for row in result["component_summary"])
+    write_consequence_component_report(tmp_path / "report", result)
+    assert (tmp_path / "report" / "paper_table.csv").is_file()
+    assert "joint" in (tmp_path / "report" / "paper_table.md").read_text()
     payloads["geometry"]["trace_sha256"]["independent"] = "different"
     with pytest.raises(ValueError, match="same protocol evidence"):
         summarize_consequence_components(payloads)
