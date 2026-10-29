@@ -418,13 +418,16 @@ def write_report(output: Path, result: dict) -> None:
         f"(mean non-reference fraction: "
         f"{result['correct_candidate_nonreference_fraction_mean']})",
         "",
-        "| Comparator | Episodes | Correct successes | Control successes | Tick improvement | Pass |",
-        "|---|---:|---:|---:|---:|:---:|",
+        "| Comparator | Episodes | Correct successes | Control successes | Native-command divergences | Causal-selector divergences | Unattributed outcomes | Tick improvement | Pass |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|:---:|",
     ]
     for row in result["comparisons"]:
         lines.append(
             f"| {row['comparator']} | {row['episodes']} | "
             f"{row['correct_successes']} | {row['control_successes']} | "
+            f"{row['command_trace_diverged_cases']} | "
+            f"{row['selection_trace_diverged_cases']} | "
+            f"{row['unattributed_outcome_cases']} | "
             f"{100 * row['tick_improvement_fraction']:.1f}% | "
             f"{'yes' if row['passes_predeclared_rule'] else 'no'} |"
         )

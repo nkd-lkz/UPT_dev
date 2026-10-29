@@ -15,6 +15,9 @@ import torch
 from toolkits.rlt.physrlt import response_adaptation as response_adaptation_module
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
 from toolkits.rlt.physrlt.causal_control_gate import evaluate as evaluate_causal_control
+from toolkits.rlt.physrlt.causal_control_gate import (
+    write_report as write_causal_control_report,
+)
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
     SignedCandidateConsequence,
@@ -2002,6 +2005,11 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         "reversed",
         "zero",
     ]
+    report = tmp_path / "causal-report"
+    write_causal_control_report(report, result)
+    markdown = (report / "comparison.md").read_text()
+    assert "Native-command divergences" in markdown
+    assert "Unattributed outcomes" in markdown
     rows[-3]["success"] = False
     rows[-2]["success"] = True
     (run / "episodes.json").write_text(json.dumps(rows))
