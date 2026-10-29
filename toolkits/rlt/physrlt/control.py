@@ -1104,6 +1104,7 @@ def run(args):
             args, "critic_response_aux_shuffled", []
         ),
         "critic_response_aux_weight": getattr(args, "critic_response_aux_weight", 0.0),
+        "critic_consequence_dueling": getattr(args, "critic_consequence_dueling", []),
         "deferred_online_updates": getattr(args, "deferred_online_updates", False),
         "require_positive_replay": getattr(args, "require_positive_replay", False),
         "conservative_selectors": getattr(args, "conservative_selectors", []),
