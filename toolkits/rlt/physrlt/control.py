@@ -748,6 +748,9 @@ def rollout(
         "execution_gain": execution_gain,
         "delay_ticks": delay_ticks,
         "candidate_selection_calls": len(selection_diagnostics),
+        "candidate_selected_indices": [
+            int(row["selected_index"]) for row in selection_diagnostics
+        ],
         "candidate_nonreference_fraction": (
             sum(row["selected_scale"] > 0 for row in selection_diagnostics)
             / len(selection_diagnostics)

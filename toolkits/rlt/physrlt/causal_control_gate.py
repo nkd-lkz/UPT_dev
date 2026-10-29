@@ -46,6 +46,21 @@ def _episode_map(rows: list[dict], method: str, stage: str, split: str) -> dict:
     return mapped
 
 
+def _selection_trace(row: dict) -> list[int] | None:
+    """Validate one executed candidate-selection trace when it is available."""
+    trace = row.get("candidate_selected_indices")
+    if trace is None:
+        return None
+    if not isinstance(trace, list):
+        raise ValueError("Candidate selection traces must be lists")
+    if any(type(index) is not int or index < 0 for index in trace):
+        raise ValueError("Candidate selection traces must contain nonnegative integers")
+    calls = row.get("candidate_selection_calls")
+    if type(calls) is not int or calls != len(trace):
+        raise ValueError("Candidate selection trace length must match recorded calls")
+    return trace
+
+
 def _paired_row(
     seed: int,
     split: str,
@@ -55,11 +70,20 @@ def _paired_row(
 ) -> dict:
     if set(correct) != set(control):
         raise ValueError("Causal control arms use different case identities")
+    trace_comparable_cases = 0
+    trace_diverged_cases = 0
     for case_id in correct:
         correct_hash = correct[case_id].get("reset_hash")
         control_hash = control[case_id].get("reset_hash")
         if correct_hash is not None and correct_hash != control_hash:
             raise ValueError("Causal control arms use different reset states")
+        correct_trace = _selection_trace(correct[case_id])
+        control_trace = _selection_trace(control[case_id])
+        if correct_trace is None or control_trace is None:
+            continue
+        trace_comparable_cases += 1
+        if any(first != second for first, second in zip(correct_trace, control_trace)):
+            trace_diverged_cases += 1
     correct_successes = sum(bool(row["success"]) for row in correct.values())
     control_successes = sum(bool(row["success"]) for row in control.values())
     correct_ticks = statistics.mean(float(row["ticks"]) for row in correct.values())
@@ -75,6 +99,8 @@ def _paired_row(
         "correct_failure_capped_ticks_mean": correct_ticks,
         "control_failure_capped_ticks_mean": control_ticks,
         "tick_delta_mean": correct_ticks - control_ticks,
+        "selection_trace_comparable_cases": trace_comparable_cases,
+        "selection_trace_diverged_cases": trace_diverged_cases,
     }
 
 
@@ -182,6 +208,18 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             / episodes
         )
         no_split_success_regression = all(row["success_delta"] >= 0 for row in selected)
+        selection_trace_comparable_cases = sum(
+            row["selection_trace_comparable_cases"] for row in selected
+        )
+        selection_trace_diverged_cases = sum(
+            row["selection_trace_diverged_cases"] for row in selected
+        )
+        selection_trace_complete = comparator == "reference" or (
+            selection_trace_comparable_cases == episodes
+        )
+        causal_choices_diverged = comparator == "reference" or (
+            selection_trace_complete and selection_trace_diverged_cases > 0
+        )
         strict_success_gain = correct_successes > control_successes
         tick_improvement_fraction = (
             (control_ticks - correct_ticks) / control_ticks
@@ -191,8 +229,10 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
         tied_success_efficiency_gain = (
             correct_successes == control_successes and tick_improvement_fraction >= 0.05
         )
-        passed = no_split_success_regression and (
-            strict_success_gain or tied_success_efficiency_gain
+        passed = (
+            no_split_success_regression
+            and causal_choices_diverged
+            and (strict_success_gain or tied_success_efficiency_gain)
         )
         comparisons.append(
             {
@@ -205,6 +245,10 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                 "control_failure_capped_ticks_mean": control_ticks,
                 "tick_improvement_fraction": tick_improvement_fraction,
                 "no_split_success_regression": no_split_success_regression,
+                "selection_trace_comparable_cases": selection_trace_comparable_cases,
+                "selection_trace_diverged_cases": selection_trace_diverged_cases,
+                "selection_trace_complete": selection_trace_complete,
+                "causal_choices_diverged": causal_choices_diverged,
                 "passes_predeclared_rule": passed,
             }
         )
@@ -224,7 +268,9 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             "correct has no validation/development success regression and, pooled "
             "across unique optimizer seeds, either strictly more successes or equal "
             "successes with at least 5% lower failure-capped ticks; the correct arm "
-            "must also select at least one non-reference candidate"
+            "must also select at least one non-reference candidate and must differ "
+            "from each causal input control on a shared executed selection prefix; "
+            "every causal comparison must provide a complete selection trace"
         ),
         "arms": arms,
         "seeds": sorted(seen_seeds),
