@@ -36,12 +36,13 @@ def _token(readout: FrozenReadout, record: dict) -> torch.Tensor:
         key: row[key][None]
         for key in (
             "action_feature",
-            "flow_feature",
             "prefix_feature",
             "ref",
             "prop",
         )
     }
+    if "flow_feature" in row:
+        data["flow_feature"] = row["flow_feature"][None]
     return readout.model.encode(
         *inputs(data, readout.payload["stats"], readout.payload["method"])
     )

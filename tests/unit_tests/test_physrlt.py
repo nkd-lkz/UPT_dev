@@ -639,6 +639,34 @@ def test_transport_prior_is_bounded_and_inputs_exclude_measured_outcomes():
     torch.testing.assert_close(before, response_features([record]), atol=0, rtol=0)
 
 
+def test_sparse_token_allows_nonflow_readouts_without_flow_artifacts():
+    from toolkits.rlt.physrlt.sparse_motion import _token
+
+    class Encoder:
+        def encode(self, action, proprioception, reference):
+            return action + reference.mean((1, 2))[:, None] + proprioception
+
+    row = synthetic_rows()[0]
+    row.pop("flow_feature")
+    row["action_feature"] = torch.ones(2)
+    row["prefix_feature"] = torch.ones(2)
+    row["prop"] = torch.ones(2)
+    row["ref"] = torch.ones(1, 1)
+    readout = SimpleNamespace(
+        model=Encoder(),
+        payload={
+            "method": "joint",
+            "stats": {
+                "action_feature_mean": torch.zeros(2),
+                "action_feature_scale": torch.ones(2),
+                "prop_mean": torch.zeros(2),
+                "prop_scale": torch.ones(2),
+            },
+        },
+    )
+    assert _token(readout, {"row": row}).shape == (1, 2)
+
+
 def test_paired_case_batches_cover_layouts_once_and_preserve_split():
     from toolkits.rlt.physrlt.counterfactual import select_cases
 
@@ -656,7 +684,10 @@ def test_paired_case_batches_cover_layouts_once_and_preserve_split():
 
 
 def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
-    from toolkits.rlt.physrlt.transport_probe import layout_comparison
+    from toolkits.rlt.physrlt.transport_probe import (
+        assert_disjoint_records,
+        layout_comparison,
+    )
 
     target = torch.zeros(4, 3)
     direct = torch.tensor([[0.001] * 3] * 3 + [[0.003] * 3])
@@ -672,6 +703,25 @@ def test_transport_uncertainty_clusters_layouts_not_correlated_rows():
     assert comparison["exploratory_layout_bootstrap_95pct"] == pytest.approx([1, 9])
     with pytest.raises(ValueError, match="layout identity"):
         layout_comparison(arms, target, ["a"])
+
+    def record(case, reset):
+        return {"case_id": case, "row": {"reset_hash": reset}}
+
+    audit = assert_disjoint_records(
+        [record("train", "train-reset")],
+        [record("evaluation", "evaluation-reset")],
+    )
+    assert audit["train_cases"] == ["train"]
+    with pytest.raises(ValueError, match="layouts overlap"):
+        assert_disjoint_records(
+            [record("same", "train-reset")],
+            [record("same", "evaluation-reset")],
+        )
+    with pytest.raises(ValueError, match="reset hashes overlap"):
+        assert_disjoint_records(
+            [record("train", "same-reset")],
+            [record("evaluation", "same-reset")],
+        )
 
 
 def test_sparse_motion_report_keeps_all_seeds_and_rejects_duplicates(tmp_path):
