@@ -12,9 +12,9 @@ import random
 from pathlib import Path
 
 import torch
-from torch import nn
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
+from toolkits.rlt.physrlt.conditioning import SignedCandidateConsequence
 from toolkits.rlt.physrlt.control import (
     FrozenReadout,
     replay_trace_sha256,
@@ -27,28 +27,6 @@ from toolkits.rlt.pi05_baseline import configure_source, write_json
 def _file_sha256(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-class SignedConsequence(nn.Module):
-    """Apply a predeclared sign to the candidate-relative physical channel."""
-
-    def __init__(self, conditioner: nn.Module, sign: int) -> None:
-        super().__init__()
-        if sign not in (-1, 0, 1):
-            raise ValueError("Consequence sign must be -1, 0 or 1")
-        self.conditioner = conditioner
-        self.sign = sign
-
-    def train(self, mode: bool = True):
-        """Keep the wrapped frozen physical predictor in evaluation mode."""
-        super().train(False)
-        self.conditioner.eval()
-        return self
-
-    def forward(self, token, action, reference, physical_token=None):
-        conditioned = self.conditioner(token, action, reference, physical_token)
-        base, consequence = conditioned.chunk(2, dim=-1)
-        return torch.cat((base, self.sign * consequence), dim=-1)
 
 
 def parse_evaluations(specs: list[str]) -> dict[str, tuple[Path, Path]]:
@@ -238,12 +216,12 @@ def run(args: argparse.Namespace) -> dict:
             )
     readout = FrozenReadout(args.base_readout, consequence=args.consequence_readout)
     rows = []
-    correct_states = {}
+    arm_states = {}
     for seed in args.seeds:
         for arm, sign in (("correct", 1), ("reversed", -1), ("zero", 0)):
             random.seed(seed)
             torch.manual_seed(seed)
-            conditioner = SignedConsequence(
+            conditioner = SignedCandidateConsequence(
                 readout.candidate_conditioner("relative_concat"), sign
             )
             learner = AcceptanceLearner(
@@ -271,8 +249,7 @@ def run(args: argparse.Namespace) -> dict:
                 metrics = learner.update(train)
                 if step in {0, args.steps - 1}:
                     trace.append({"step": step + 1, **metrics})
-            if arm == "correct":
-                correct_states[seed] = learner.state_dict()
+            arm_states[(arm, seed)] = learner.state_dict()
             for label, replay in evaluations.items():
                 rows.append(
                     {
@@ -311,16 +288,17 @@ def run(args: argparse.Namespace) -> dict:
             else "stop_before_closed_loop"
         ),
         "correct_checkpoints": {},
+        "checkpoints": {arm: {} for arm in ("correct", "reversed", "zero")},
     }
     args.output.mkdir(parents=True)
     if passes_strict_screen:
-        for seed, state in correct_states.items():
-            checkpoint = args.output / f"correct-seed{seed}.pt"
+        for (arm, seed), state in arm_states.items():
+            checkpoint = args.output / f"{arm}-seed{seed}.pt"
             torch.save(
                 {
                     "state_dict": state,
                     "gate_passed": True,
-                    "arm": "correct",
+                    "arm": arm,
                     "optimizer_seed": seed,
                     "train_trace_sha256": trace_hashes["train"],
                     "base_readout_sha256": base_readout_sha256,
@@ -331,7 +309,8 @@ def run(args: argparse.Namespace) -> dict:
                 },
                 checkpoint,
             )
-            result["correct_checkpoints"][str(seed)] = str(checkpoint)
+            result["checkpoints"][arm][str(seed)] = str(checkpoint)
+        result["correct_checkpoints"] = result["checkpoints"]["correct"]
     write_json(args.output / "result.json", result)
     _write_gate_table(args.output, summaries)
     return result

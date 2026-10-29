@@ -16,6 +16,7 @@ from toolkits.rlt.physrlt import response_adaptation as response_adaptation_modu
 from toolkits.rlt.physrlt.campaign import prepare, ready_jobs
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
+    SignedCandidateConsequence,
     SparseMotionConditioner,
     differentiable_env_commands,
     load_sparse_motion_conditioner,
@@ -33,6 +34,7 @@ from toolkits.rlt.physrlt.control import (
     load_gated_online_checkpoint,
     merge_replay_views,
     parse_external_readouts,
+    parse_online_checkpoint_arms,
     replay_trace_sha256,
     skip_deferred_updates,
     validate_fixed_replay,
@@ -1427,9 +1429,7 @@ def test_fixed_replay_views_require_the_same_executed_trace():
     matched[0]["next_critic_z"] = torch.full((128,), 4.0)
     merged = merge_replay_views(base, matched)
     torch.testing.assert_close(merged[0]["critic_z"], matched[0]["critic_z"])
-    torch.testing.assert_close(
-        merged[0]["next_critic_z"], matched[0]["next_critic_z"]
-    )
+    torch.testing.assert_close(merged[0]["next_critic_z"], matched[0]["next_critic_z"])
     physical[0]["action"][0, 0] = 0.1
     with pytest.raises(ValueError, match="traces differ"):
         merge_replay_views(base, physical)
@@ -1455,6 +1455,7 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     torch.save(payload, checkpoint)
     loaded = load_gated_online_checkpoint(
         checkpoint,
+        expected_arm="correct",
         optimizer_seed=31,
         base_readout=base,
         consequence_readout=consequence,
@@ -1463,19 +1464,68 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     with pytest.raises(ValueError, match="optimizer seed differs"):
         load_gated_online_checkpoint(
             checkpoint,
+            expected_arm="correct",
             optimizer_seed=47,
             base_readout=base,
             consequence_readout=consequence,
         )
-    payload["gate_passed"] = False
+    payload["arm"] = "reversed"
     torch.save(payload, checkpoint)
-    with pytest.raises(ValueError, match="did not pass"):
+    with pytest.raises(ValueError, match="arm differs"):
         load_gated_online_checkpoint(
             checkpoint,
+            expected_arm="correct",
             optimizer_seed=31,
             base_readout=base,
             consequence_readout=consequence,
         )
+    loaded = load_gated_online_checkpoint(
+        checkpoint,
+        expected_arm="reversed",
+        optimizer_seed=31,
+        base_readout=base,
+        consequence_readout=consequence,
+    )
+    assert loaded["arm"] == "reversed"
+    payload["gate_passed"] = False
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="not emitted"):
+        load_gated_online_checkpoint(
+            checkpoint,
+            expected_arm="reversed",
+            optimizer_seed=31,
+            base_readout=base,
+            consequence_readout=consequence,
+        )
+
+
+def test_signed_candidate_consequence_preserves_causal_control_arm():
+    class Conditioner(torch.nn.Module):
+        def forward(self, token, action, reference, physical_token=None):
+            return torch.cat((token, action[:, 0, :2]), dim=-1)
+
+    token = torch.tensor([[1.0, 2.0]])
+    action = torch.zeros(1, 10, 7)
+    action[:, 0, :2] = torch.tensor([3.0, -4.0])
+    reference = torch.zeros_like(action)
+    for sign in (-1, 0, 1):
+        output = SignedCandidateConsequence(Conditioner(), sign)(
+            token, action, reference
+        )
+        torch.testing.assert_close(output[:, :2], token)
+        torch.testing.assert_close(output[:, 2:], sign * torch.tensor([[3.0, -4.0]]))
+
+
+def test_online_checkpoint_arm_parser_is_explicit():
+    assert parse_online_checkpoint_arms(
+        ["positive=correct", "negative=reversed", "capacity=zero"]
+    ) == {
+        "positive": "correct",
+        "negative": "reversed",
+        "capacity": "zero",
+    }
+    with pytest.raises(ValueError, match="Checkpoint arms require"):
+        parse_online_checkpoint_arms(["method=unknown"])
 
 
 def test_consequence_gate_requires_explicit_matched_replay_views(tmp_path):
@@ -1535,22 +1585,17 @@ def test_consequence_critic_gate_requires_correct_arm_best_in_every_seed():
     assert len(summaries) == 8
     assert all(row["correct_best"] for row in summaries)
     next(
-        row
-        for row in rows
-        if row["optimizer_seed"] == 47 and row["arm"] == "reversed"
+        row for row in rows if row["optimizer_seed"] == 47 and row["arm"] == "reversed"
     )["return_order_concordance"] = 0.9
     summaries, passes = summarize_gate(rows)
     assert not passes
     failed = [row for row in summaries if not row["correct_best"]]
     assert any(
-        row["optimizer_seed"] == 47
-        and row["metric"] == "return_order_concordance"
+        row["optimizer_seed"] == 47 and row["metric"] == "return_order_concordance"
         for row in failed
     )
     next(
-        row
-        for row in rows
-        if row["optimizer_seed"] == 31 and row["arm"] == "correct"
+        row for row in rows if row["optimizer_seed"] == 31 and row["arm"] == "correct"
     )["return_ranking_auc"] = None
     _, passes = summarize_gate(rows)
     assert not passes
@@ -1899,18 +1944,16 @@ def test_control_report_keeps_axes_denominators_and_skipped_updates(tmp_path):
     assert keyed[("1", "physical")][
         "online_validation_candidate_nonreference_fraction_mean"
     ] == pytest.approx(0.375)
-    assert keyed[("1", "physical")][
-        "online_validation_candidate_selection_calls_total"
-    ] == 4
-    assert keyed[("1", "physical")][
-        "reference_validation_success_rate_pct"
-    ] == 50
-    assert keyed[("1", "physical")][
-        "paired_validation_success_rate_delta_pct"
-    ] == 50
-    assert keyed[("1", "physical")][
-        "paired_validation_failure_capped_ticks_delta_mean"
-    ] == -10
+    assert (
+        keyed[("1", "physical")]["online_validation_candidate_selection_calls_total"]
+        == 4
+    )
+    assert keyed[("1", "physical")]["reference_validation_success_rate_pct"] == 50
+    assert keyed[("1", "physical")]["paired_validation_success_rate_delta_pct"] == 50
+    assert (
+        keyed[("1", "physical")]["paired_validation_failure_capped_ticks_delta_mean"]
+        == -10
+    )
     assert keyed[("1", "physical")]["online_validation_ticks_per_wall_second"] == (
         241 / 25
     )
@@ -1946,9 +1989,7 @@ def test_control_report_rejects_unpaired_reference_resets(tmp_path):
         },
     ]
     (run / "episodes.json").write_text(json.dumps(rows))
-    (run / "result.json").write_text(
-        '{"complete":true,"state":"complete","seed":31}'
-    )
+    (run / "result.json").write_text('{"complete":true,"state":"complete","seed":31}')
     with pytest.raises(ValueError, match="reset hashes differ"):
         summarize_control_runs([run])
 
@@ -3033,9 +3074,7 @@ def test_geometry_evidence_clusters_layouts_before_readout_seeds(tmp_path):
             }
         )
     )
-    result = summarize_geometry(
-        load_geometry_arms("task", path), draws=1000, seed=7
-    )
+    result = summarize_geometry(load_geometry_arms("task", path), draws=1000, seed=7)
     coupled = next(
         arm
         for arm in result["arms"]

@@ -22,6 +22,7 @@ from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner, td_eligib
 from toolkits.rlt.libero_pro_environment import LiberoProEnvironment
 from toolkits.rlt.physrlt.conditioning import (
     CandidateConsequenceConditioner,
+    SignedCandidateConsequence,
     load_sparse_motion_conditioner,
     physical_quantities,
 )
@@ -214,11 +215,11 @@ def warmup(
         else None
     )
     if critic_conditioner_override is not None:
-        if (
-            candidate_mode is not None
-            or critic_conditioning != "sparse_relative_concat"
-        ):
-            raise ValueError("Sparse critic conditioning conflicts with another mode")
+        if critic_conditioning not in {
+            "candidate_relative_concat",
+            "sparse_relative_concat",
+        }:
+            raise ValueError("External critic conditioner has an incompatible mode")
     elif critic_conditioning != "latent" and candidate_mode not in {
         "outcomes",
         "mixed",
@@ -295,6 +296,24 @@ def parse_external_readouts(specs: list[str]) -> dict[str, Path]:
     return result
 
 
+def parse_online_checkpoint_arms(specs: list[str]) -> dict[str, str]:
+    """Parse explicit control labels and their causal consequence arms."""
+    result = {}
+    for spec in specs:
+        label, separator, arm = spec.partition("=")
+        if (
+            not separator
+            or not label
+            or arm not in {"correct", "reversed", "zero"}
+            or label in result
+        ):
+            raise ValueError(
+                "Checkpoint arms require unique LABEL=correct|reversed|zero entries"
+            )
+        result[label] = arm
+    return result
+
+
 def warmup_gate(
     fidelity: dict, validation_results: list[dict], residual_output: bool
 ) -> tuple[bool, str]:
@@ -323,11 +342,14 @@ def file_sha256(path: Path) -> str:
 def load_gated_online_checkpoint(
     path: Path,
     *,
+    expected_arm: str,
     optimizer_seed: int,
     base_readout: Path,
     consequence_readout: Path,
 ) -> dict:
-    """Load an exact correct-arm critic checkpoint that passed the strict gate."""
+    """Load one exact critic arm emitted by a passed consequence gate."""
+    if expected_arm not in {"correct", "reversed", "zero"}:
+        raise ValueError("Expected checkpoint arm must be correct, reversed or zero")
     payload = torch.load(path, map_location="cpu", weights_only=True)
     required = {
         "state_dict",
@@ -340,8 +362,10 @@ def load_gated_online_checkpoint(
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
-    if not payload["gate_passed"] or payload["arm"] != "correct":
-        raise ValueError("Gated online checkpoint did not pass as the correct arm")
+    if not payload["gate_passed"]:
+        raise ValueError("Gated online checkpoint was not emitted by a passed gate")
+    if payload["arm"] != expected_arm:
+        raise ValueError("Gated online checkpoint arm differs")
     if int(payload["optimizer_seed"]) != optimizer_seed:
         raise ValueError("Gated online checkpoint optimizer seed differs")
     if payload["base_readout_sha256"] != file_sha256(base_readout):
@@ -453,9 +477,7 @@ def merge_replay_views(base: list[dict], consequence: list[dict]) -> list[dict]:
     merged = []
     for base_row, consequence_row in zip(base, consequence):
         critic_z = consequence_row.get("critic_z", consequence_row["z"])
-        next_critic_z = consequence_row.get(
-            "next_critic_z", consequence_row["next_z"]
-        )
+        next_critic_z = consequence_row.get("next_critic_z", consequence_row["next_z"])
         if (
             base_row["z"].shape != critic_z.shape
             or base_row["next_z"].shape != next_critic_z.shape
@@ -765,6 +787,15 @@ def run(args):
     online_checkpoints = parse_external_readouts(
         getattr(args, "online_checkpoints", [])
     )
+    online_checkpoint_arms = parse_online_checkpoint_arms(
+        getattr(args, "online_checkpoint_arms", [])
+    )
+    if not set(online_checkpoint_arms).issubset(online_checkpoints):
+        raise ValueError("Checkpoint arm labels require matching online checkpoints")
+    online_checkpoint_arms = {
+        label: online_checkpoint_arms.get(label, "correct")
+        for label in online_checkpoints
+    }
     sparse_motion_heads = parse_external_readouts(
         getattr(args, "sparse_motion_heads", [])
     )
@@ -901,6 +932,7 @@ def run(args):
             )
             sparse_conditioner = None
             sparse_payload = None
+            critic_conditioner_override = None
             critic_conditioning = "latent"
             if method in candidate_critics:
                 critic_conditioning = "candidate_mixed"
@@ -918,6 +950,14 @@ def run(args):
                     sparse_motion_heads[method],
                     expected_readout_sha256=file_sha256(path),
                     zero_channel=method in sparse_zero_controls,
+                )
+                critic_conditioner_override = sparse_conditioner
+            if method in online_checkpoints:
+                critic_conditioner_override = SignedCandidateConsequence(
+                    readout.candidate_conditioner("relative_concat"),
+                    {"correct": 1, "reversed": -1, "zero": 0}[
+                        online_checkpoint_arms[method]
+                    ],
                 )
             critic_bottleneck_dim = (
                 256 if critic_conditioning.endswith("_concat") else None
@@ -940,6 +980,7 @@ def run(args):
                     "correction_axes": getattr(args, "correction_axes", None),
                     "residual_output": getattr(args, "residual_output", False),
                     "conservative_selector": method in conservative_selectors,
+                    "online_checkpoint_arm": online_checkpoint_arms.get(method),
                     "candidate_selection_count": getattr(
                         args, "candidate_selection_count", 0
                     ),
@@ -999,7 +1040,7 @@ def run(args):
                 ),
                 getattr(args, "candidate_selection_margin", 0.0),
                 getattr(args, "candidate_uncertainty_penalty", 0.0),
-                critic_conditioner_override=sparse_conditioner,
+                critic_conditioner_override=critic_conditioner_override,
                 critic_response_aux_weight=(
                     getattr(args, "critic_response_aux_weight", 0.0)
                     if method in response_aux_critics | shuffled_response_aux_critics
@@ -1041,6 +1082,7 @@ def run(args):
                 if method in online_checkpoints:
                     checkpoint_payload = load_gated_online_checkpoint(
                         online_checkpoints[method],
+                        expected_arm=online_checkpoint_arms[method],
                         optimizer_seed=args.seed,
                         base_readout=path,
                         consequence_readout=critic_readouts[method],
@@ -1052,6 +1094,7 @@ def run(args):
                             "source": str(online_checkpoints[method]),
                             "source_sha256": file_sha256(online_checkpoints[method]),
                             "optimizer_seed": args.seed,
+                            "arm": checkpoint_payload["arm"],
                             "train_trace_sha256": checkpoint_payload[
                                 "train_trace_sha256"
                             ],
@@ -1196,6 +1239,7 @@ def run(args):
         "online_checkpoints": {
             key: str(value) for key, value in online_checkpoints.items()
         },
+        "online_checkpoint_arms": online_checkpoint_arms,
         "control_protocol_version": 2,
         "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
     }
@@ -1267,7 +1311,14 @@ def main():
         nargs="*",
         default=[],
         metavar="LABEL=PATH",
-        help="Evaluate exact correct-arm checkpoints emitted by a passed critic gate",
+        help="Evaluate exact checkpoints emitted by a passed critic gate",
+    )
+    parser.add_argument(
+        "--online-checkpoint-arms",
+        nargs="*",
+        default=[],
+        metavar="LABEL=ARM",
+        help="Preserve the correct, reversed or zero consequence arm at inference",
     )
     parser.add_argument(
         "--sparse-motion-heads",

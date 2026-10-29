@@ -12,10 +12,8 @@ from pathlib import Path
 import torch
 
 from toolkits.rlt.libero_acceptance_learning import AcceptanceLearner
-from toolkits.rlt.physrlt.consequence_critic_gate import (
-    SignedConsequence,
-    load_replay,
-)
+from toolkits.rlt.physrlt.conditioning import SignedCandidateConsequence
+from toolkits.rlt.physrlt.consequence_critic_gate import load_replay
 from toolkits.rlt.physrlt.control import (
     FrozenReadout,
     replay_trace_sha256,
@@ -131,7 +129,7 @@ def run(args: argparse.Namespace) -> dict:
             for arm, sign in (("correct", 1), ("reversed", -1), ("zero", 0)):
                 random.seed(seed)
                 torch.manual_seed(seed)
-                conditioner = SignedConsequence(
+                conditioner = SignedCandidateConsequence(
                     readout.candidate_conditioner("relative_concat"), sign
                 )
                 learner = AcceptanceLearner(

@@ -157,6 +157,31 @@ class CandidateConsequenceConditioner(nn.Module):
         return result
 
 
+class SignedCandidateConsequence(nn.Module):
+    """Apply a fixed sign to a base-plus-consequence conditioning channel."""
+
+    def __init__(self, conditioner: nn.Module, sign: int) -> None:
+        super().__init__()
+        if sign not in (-1, 0, 1):
+            raise ValueError("Consequence sign must be -1, 0 or 1")
+        self.conditioner = conditioner
+        self.sign = sign
+
+    def train(self, mode: bool = True):
+        """Keep the wrapped frozen physical predictor in evaluation mode."""
+        super().train(False)
+        self.conditioner.eval()
+        return self
+
+    def forward(self, token, action, reference, physical_token=None):
+        """Return the base channel and signed relative physical consequence."""
+        conditioned = self.conditioner(token, action, reference, physical_token)
+        if conditioned.ndim != 2 or conditioned.shape[-1] % 2:
+            raise ValueError("Signed consequence requires two equal channels")
+        base, consequence = conditioned.chunk(2, dim=-1)
+        return torch.cat((base, self.sign * consequence), dim=-1)
+
+
 class SparseMotionConditioner(nn.Module):
     """Expose candidate-relative sparse object motion to a matched critic."""
 
