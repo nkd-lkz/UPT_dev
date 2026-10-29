@@ -163,6 +163,8 @@ prepare-paired-actions 确认首轮数据和表征已完成后，在授权空闲
 
 ``--consequence-conditioning relative_unit_concat`` 是物理通道尺度诊断：它对每个候选的有效 consequence 方向归一化，动作幅度仍由候选动作输入保留。该变体必须继续使用“correct 训练一次、冻结权重、输入端切换符号”的协议，并先在开发 replay 上筛选，再由预先保留的 fresh replay 确认；同一评测 replay 上的改善不能直接触发闭环。
 
+``consequence_return_probe`` 在不训练 actor 或 TD critic 的情况下进一步定位瓶颈。它只在训练 replay 上按 episode 交叉验证 ridge，并在执行轨迹哈希不同的 replay 上冻结评估 semantic-only、physical-only 与 semantic＋physical 特征；物理组继续比较正确、反向和全零输入。只有 semantic＋正确物理同时超过 semantic-only、反向和全零，并在 AUC 与连续回报排序上都成立，才说明后果表征值得进入新的 critic 设计。该探针以 transition 计算指标，属于机制诊断，不是独立环境样本或闭环收益。
+
 ``--actor-zero-concat`` 与 ``--actor-physical-concat`` 用于检验 grounded readout 是否必须直接进入动作生成路径，而不只是进入 critic。两组 actor 输入均为 256 维：容量对照将完整 128 维 base token 与零向量拼接，物理组将同一 base token 与独立的 128 维 Physical Token 拼接；两组的实际 replay、actor／critic 更新次数和 base token 完全匹配。只有物理组跨多个优化 seed 优于零通道对照，才能支持物理表征收益；若只优于原 128 维 actor，无法排除模型容量增加带来的影响。
 
 ``--actor-physical-outcomes-concat`` 保持同一个 256 维接口，但将受物理监督的 encoder latent 替换为冻结 decoder 对 reference 动作预测的显式归一化后果，以区分“监督塑造的 latent”和类似 WAM 的预测后果表征。部署时只使用当前观测、本体状态、reference chunk 与冻结模型预测；实测未来响应和特权几何仍只作为训练标签。只有同时比较零通道对照、physical latent 与 explicit outcomes，才能把收益归因于显式物理量。

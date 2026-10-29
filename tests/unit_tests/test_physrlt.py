@@ -39,6 +39,7 @@ from toolkits.rlt.physrlt.consequence_critic_gate import (
 from toolkits.rlt.physrlt.consequence_critic_gate import (
     parse_evaluations as parse_consequence_gate_evaluations,
 )
+from toolkits.rlt.physrlt.consequence_return_probe import episode_ids, select_ridge
 from toolkits.rlt.physrlt.control import (
     attach_actor_view,
     deferred_update_summary,
@@ -162,6 +163,21 @@ def test_continuous_return_ranking_concordance_is_tie_aware():
     assert ranking_concordance([1.0, 2.0], [0.0, 0.0]) is None
     with pytest.raises(ValueError, match="equal length"):
         ranking_concordance([1.0], [1.0, 2.0])
+
+
+def test_return_probe_selects_ridge_on_training_episode_folds():
+    x = torch.tensor([[0.0], [1.0], [2.0], [3.0]])
+    y = torch.tensor([0.0, 1.0, 2.0, 3.0])
+    groups = torch.tensor([0, 0, 1, 1])
+    selected, losses = select_ridge(x, y, groups, ridges=(0.1, 10.0))
+    assert selected in (0.1, 10.0)
+    assert set(losses) == {"0.1", "10.0"}
+    replay = [
+        {"ticks": 10, "terminal": False},
+        {"ticks": 10, "terminal": True},
+        {"ticks": 520, "terminal": False},
+    ]
+    assert episode_ids(replay).tolist() == [0, 0, 1]
 
 
 def test_causal_response_matrix_recovers_coupled_execution_map():
