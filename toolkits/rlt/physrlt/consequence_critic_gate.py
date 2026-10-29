@@ -9,6 +9,7 @@ import csv
 import hashlib
 import json
 import random
+import subprocess
 from pathlib import Path
 
 import torch
@@ -217,6 +218,9 @@ def run(args: argparse.Namespace) -> dict:
             "Require a new output, positive steps and three unique optimizer seeds"
         )
     configure_source(args.source)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
+        raise RuntimeError("Critic gate requires a clean Git worktree")
     train = load_replay(args.train_base_replay, args.train_physical_replay)
     evaluations = {
         label: load_replay(*paths)
@@ -285,6 +289,8 @@ def run(args: argparse.Namespace) -> dict:
     consequence_readout_sha256 = _file_sha256(args.consequence_readout)
     result = {
         "state": "complete",
+        "revision": revision,
+        "worktree_clean": True,
         "protocol": (
             "one correct-conditioned critic is trained per optimizer seed; its "
             "weights remain frozen while correct, reversed and zero physical "
@@ -321,8 +327,9 @@ def run(args: argparse.Namespace) -> dict:
             checkpoint = args.output / f"correct-trained-seed{seed}.pt"
             torch.save(
                 {
-                    "schema": 3,
+                    "schema": 4,
                     "state_dict": state,
+                    "gate_revision": revision,
                     "gate_passed": True,
                     "training_arm": "correct",
                     "evaluation_arms": ["correct", "reversed", "zero"],

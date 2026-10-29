@@ -1582,8 +1582,9 @@ def test_gated_online_checkpoint_requires_exact_provenance(tmp_path):
     consequence.write_bytes(b"physical")
     checkpoint = tmp_path / "checkpoint.pt"
     payload = {
-        "schema": 3,
+        "schema": 4,
         "state_dict": {"value": torch.tensor(1)},
+        "gate_revision": "test-revision",
         "gate_passed": True,
         "training_arm": "correct",
         "evaluation_arms": ["correct", "reversed", "zero"],
@@ -1930,6 +1931,8 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                 "complete": True,
                 "seed": 31,
                 "control_protocol_version": 3,
+                "revision": "test-revision",
+                "worktree_clean": True,
             }
         )
     )
@@ -1937,6 +1940,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
         json.dumps(
             {
                 "revision": "test-revision",
+                "worktree_clean": True,
                 "control_protocol_version": 3,
                 "reset_pairing_protocol": "current_run_physics_state_atol_1e-9",
             }
@@ -1998,6 +2002,7 @@ def test_causal_control_gate_requires_correct_arm_to_beat_all_controls(tmp_path)
                 {
                     "source": "shared.pt",
                     "source_sha256": "checkpoint",
+                    "gate_revision": "test-revision",
                     "optimizer_seed": 31,
                     "arm": arm,
                     "training_arm": "correct",

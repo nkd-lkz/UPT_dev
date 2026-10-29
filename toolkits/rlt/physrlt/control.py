@@ -395,6 +395,7 @@ def load_gated_online_checkpoint(
     required = {
         "schema",
         "state_dict",
+        "gate_revision",
         "gate_passed",
         "training_arm",
         "evaluation_arms",
@@ -408,7 +409,7 @@ def load_gated_online_checkpoint(
     }
     if required - set(payload):
         raise ValueError("Gated online checkpoint lacks provenance fields")
-    if payload["schema"] != 3:
+    if payload["schema"] != 4:
         raise ValueError("Gated online checkpoint schema differs")
     if not payload["gate_passed"]:
         raise ValueError("Gated online checkpoint was not emitted by a passed gate")
@@ -802,15 +803,17 @@ def development_cases(path: Path, original: list[dict]) -> list[dict]:
 
 
 def run(args):
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
+        raise RuntimeError("Control runs require a clean Git worktree")
     args.output.mkdir(parents=True, exist_ok=True)
     if (args.output / "result.json").exists():
         raise FileExistsError("Completed control pilots are immutable")
     write_json(
         args.output / "run_manifest.json",
         {
-            "revision": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True
-            ).strip(),
+            "revision": revision,
+            "worktree_clean": True,
             "arguments": {
                 key: str(value) if isinstance(value, Path) else value
                 for key, value in vars(args).items()
@@ -1204,6 +1207,7 @@ def run(args):
                             "optimizer_seed": args.seed,
                             "arm": online_checkpoint_arms[method],
                             "training_arm": checkpoint_payload["training_arm"],
+                            "gate_revision": checkpoint_payload["gate_revision"],
                             "consequence_component": checkpoint_payload[
                                 "consequence_component"
                             ],
@@ -1323,6 +1327,8 @@ def run(args):
     result = {
         "complete": True,
         "state": "complete",
+        "revision": revision,
+        "worktree_clean": True,
         "episodes": len(records),
         "seed": args.seed,
         "role": "small development pilots, not final-test success claims",

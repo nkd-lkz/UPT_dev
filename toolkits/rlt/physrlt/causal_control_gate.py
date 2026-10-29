@@ -202,6 +202,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
         required = {
             "source",
             "source_sha256",
+            "gate_revision",
             "optimizer_seed",
             "arm",
             "training_arm",
@@ -222,6 +223,7 @@ def _checkpoint_audit(run: Path, arms: dict[str, str], seed: int) -> dict:
     shared_fields = (
         "source",
         "source_sha256",
+        "gate_revision",
         "training_arm",
         "consequence_component",
         "consequence_conditioning",
@@ -261,6 +263,11 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
             result.get("control_protocol_version") != 3
             or manifest.get("control_protocol_version") != 3
             or not manifest.get("revision")
+            or result.get("revision") != manifest.get("revision")
+            or result.get("worktree_clean") is not True
+            or manifest.get("worktree_clean") is not True
+            or manifest.get("reset_pairing_protocol")
+            != "current_run_physics_state_atol_1e-9"
         ):
             raise ValueError("Causal control requires version 3 run provenance")
         seed = int(result["seed"])
@@ -272,6 +279,7 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                 "seed": seed,
                 "run": str(run.resolve()),
                 "revision": str(manifest["revision"]),
+                "worktree_clean": True,
                 "control_protocol_version": 3,
                 "reset_pairing_protocol": manifest.get("reset_pairing_protocol"),
             }
@@ -291,6 +299,8 @@ def evaluate(runs: list[Path], arms: dict[str, str]) -> dict:
                     correct_nonreference.append(
                         float(row["candidate_nonreference_fraction"])
                     )
+    if len({row["revision"] for row in run_audits}) != 1:
+        raise ValueError("Causal control runs require one exact code revision")
     comparisons = []
     for comparator in ("reference", "reversed", "zero"):
         selected = [row for row in rows if row["comparator"] == comparator]
